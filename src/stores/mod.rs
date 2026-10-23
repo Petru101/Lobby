@@ -6,11 +6,13 @@
 pub mod epic;
 pub mod gog;
 pub mod saves;
+pub mod takeover;
 pub mod tools;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -234,6 +236,56 @@ pub struct Installed {
     /// that changed no files).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    /// The version installed when it isn't the Windows one ("linux": GOG's Terraria).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+/// The Wine prefix and Proton a game runs with when it isn't gamefix's (a game taken over
+/// from Heroic keeps Heroic's: its settings and saves are there, and another Proton would
+/// upgrade the prefix for every game in it).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WineSetup {
+    pub prefix: PathBuf,
+    pub proton: Option<PathBuf>,
+}
+
+fn wine_setups_file() -> PathBuf {
+    crate::store::dir().join("wine-setups.json")
+}
+
+/// The Wine setup lobby keeps for a store game, by "<store>:<id>".
+pub fn wine_setup(store: Store, id: &str) -> Option<WineSetup> {
+    let all: BTreeMap<String, WineSetup> = read_json(&wine_setups_file());
+    all.get(&format!("{}:{id}", store.id())).cloned()
+}
+
+fn save_wine_setup(store: Store, id: &str, setup: WineSetup) -> Result<(), String> {
+    let mut all: BTreeMap<String, WineSetup> = read_json(&wine_setups_file());
+    all.insert(format!("{}:{id}", store.id()), setup);
+    fs::create_dir_all(crate::store::dir()).map_err(|e| e.to_string())?;
+    fs::write(wine_setups_file(), serde_json::to_string_pretty(&all).unwrap()).map_err(|e| e.to_string())
+}
+
+/// umu's id for a store game, which picks its protonfixes (umu-database), looked up once into
+/// ~/.cache/lobby/umu-ids.json ("" when umu has none).
+pub fn umu_id(store: Store, id: &str) -> Option<String> {
+    let file = cache_dir().join("umu-ids.json");
+    let mut known: BTreeMap<String, String> = read_json(&file);
+    let key = format!("{}:{id}", store.id());
+    if let Some(found) = known.get(&key) {
+        return Some(found.clone()).filter(|f| !f.is_empty());
+    }
+    let umu_store = match store {
+        Store::Epic => "egs",
+        Store::Gog => "gog",
+    };
+    let answer = get_json(&format!("https://umu.openwinecomponents.org/umu_api.php?store={umu_store}&codename={id}"), None).ok()?;
+    let found = answer.as_array().and_then(|a| a.first()).and_then(|g| g.get("umu_id")?.as_str()).unwrap_or_default().to_string();
+    known.insert(key, found.clone());
+    let _ = fs::create_dir_all(cache_dir());
+    let _ = fs::write(&file, serde_json::to_string(&known).unwrap());
+    Some(found).filter(|f| !f.is_empty())
 }
 
 pub(crate) fn config_home() -> PathBuf {

@@ -124,8 +124,12 @@ pub fn installed() -> Vec<Installed> {
 /// What GOG says about a game's latest Windows build: folder_name, buildId, versionName,
 /// languages, dlcs (owned, with an id and title each), builds, dependencies.
 fn info(id: &str) -> Result<serde_json::Value, String> {
+    info_for(id, "windows")
+}
+
+fn info_for(id: &str, platform: &str) -> Result<serde_json::Value, String> {
     let mut command = gogdl()?;
-    command.args(["info", id, "--os", "windows"]);
+    command.args(["info", id, "--os", platform]);
     serde_json::from_str(output(command)?.lines().last().unwrap_or_default()).map_err(|e| format!("gogdl info: {e}"))
 }
 
@@ -137,8 +141,12 @@ fn game_info(folder: &Path, id: &str) -> Option<serde_json::Value> {
 
 /// gogdl's record of an install (the manifest it saved, which its updates patch from): the
 /// build installed (buildId) and the DLC installed with it (HGLdlcs).
+pub(crate) fn manifests_dir() -> PathBuf {
+    config_home().join("lobby/heroic_gogdl/manifests")
+}
+
 fn manifest(id: &str) -> Option<serde_json::Value> {
-    serde_json::from_str(&fs::read_to_string(config_home().join("lobby/heroic_gogdl/manifests").join(id)).ok()?).ok()
+    serde_json::from_str(&fs::read_to_string(manifests_dir().join(id)).ok()?).ok()
 }
 
 /// The game's Galaxy client id (what its cloud save settings are filed under).
@@ -153,7 +161,7 @@ fn installed_build(g: &Installed) -> Option<String> {
 }
 
 /// Saves lobby's record of its GOG installs, with `g` added or replacing its earlier self.
-fn record(g: Installed) -> Result<(), String> {
+pub(crate) fn record(g: Installed) -> Result<(), String> {
     let mut list = installed();
     list.retain(|o| o.id != g.id);
     list.push(g);
@@ -170,7 +178,7 @@ pub fn check_updates() -> Result<Vec<Update>, String> {
     let mut found = Vec::new();
     for g in installed() {
         let Some(have) = installed_build(&g) else { continue };
-        let latest = info(&g.id).map_err(|e| format!("GOG didn't say whether {} has an update: {e}", g.title))?;
+        let latest = info_for(&g.id, g.platform.as_deref().unwrap_or("windows")).map_err(|e| format!("GOG didn't say whether {} has an update: {e}", g.title))?;
         let Some(newest) = latest.get("buildId").and_then(|b| b.as_str()) else { continue };
         if newest != have {
             let builds = latest.get("builds").and_then(|b| b.get("items")).and_then(|i| i.as_array()).cloned().unwrap_or_default();
@@ -185,10 +193,11 @@ pub fn check_updates() -> Result<Vec<Update>, String> {
 /// gogdl's update patches the folder from its saved manifest to the latest build, with the
 /// installed DLC (and `more` DLC, to add some).
 fn update_with(id: &str, folder: &Path, more: &[String], progress: &dyn Fn(f64)) -> Result<(), String> {
+    let platform = installed().into_iter().find(|g| g.id == id).and_then(|g| g.platform).unwrap_or_else(|| "windows".into());
     let mut dlc: Vec<String> = dlc(id, folder).unwrap_or_default().into_iter().filter(|d| d.installed).map(|d| d.id).collect();
     dlc.extend(more.iter().cloned());
     let mut command = gogdl()?;
-    command.args(["update", id, "--platform", "windows", "--lang", &language(folder, id), "--path"]).arg(folder);
+    command.args(["update", id, "--platform", &platform, "--lang", &language(folder, id), "--path"]).arg(folder);
     if !dlc.is_empty() {
         command.args(["--with-dlcs", "--dlcs", &dlc.join(",")]);
     }
@@ -198,7 +207,8 @@ fn update_with(id: &str, folder: &Path, more: &[String], progress: &dyn Fn(f64))
 /// Updates to the latest build, and records it as installed (gogdl leaves its own record as
 /// it was when the new build changed no files).
 pub fn update(id: &str, folder: &Path, progress: &dyn Fn(f64)) -> Result<(), String> {
-    let latest = info(id)?.get("buildId").and_then(|b| b.as_str()).map(String::from);
+    let platform = installed().into_iter().find(|g| g.id == id).and_then(|g| g.platform).unwrap_or_else(|| "windows".into());
+    let latest = info_for(id, &platform)?.get("buildId").and_then(|b| b.as_str()).map(String::from);
     update_with(id, folder, &[], progress)?;
     match installed().into_iter().find(|g| g.id == id) {
         Some(g) => record(Installed { build: latest, ..g }),
@@ -245,6 +255,6 @@ pub fn install(id: &str, games: &Path, progress: &dyn Fn(f64)) -> Result<PathBuf
     let title = super::owned(super::Store::Gog).into_iter().find(|o| o.id == id).map(|o| o.title).unwrap_or_else(|| folder_name.to_string());
     let program = gamefix::gog::read(&folder).map(|i| i.program);
     let build = info.get("buildId").and_then(|b| b.as_str()).map(String::from);
-    record(Installed { id: id.to_string(), title, folder: folder.clone(), program, build })?;
+    record(Installed { id: id.to_string(), title, folder: folder.clone(), program, build, platform: None })?;
     Ok(folder)
 }

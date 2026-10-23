@@ -616,7 +616,7 @@ impl Ui {
         let page = adw::PreferencesPage::new();
         page.add(&group);
         view.set_content(Some(&page));
-        let dialog = adw::Dialog::builder().title("Accounts").content_width(560).content_height(420).child(&view).build();
+        let dialog = adw::Dialog::builder().title("Accounts").content_width(560).content_height(560).child(&view).build();
         for store in Store::ALL {
             let row = adw::ActionRow::builder().title(store.name()).build();
             let account = store.account();
@@ -650,6 +650,33 @@ impl Ui {
                 } else {
                     u.sign_in(store);
                 }
+            });
+        }
+        // Games Heroic installed, which lobby can make its own so Heroic can be removed.
+        let heroic = crate::sources::Home::find().map(|h| crate::stores::takeover::heroic_games(&h)).unwrap_or_default();
+        if !heroic.is_empty() {
+            let group = adw::PreferencesGroup::builder()
+                .title("Games installed by Heroic")
+                .description("Lobby can take them over: it updates them, syncs their cloud saves and starts them itself, in the same Wine prefixes with the same Proton, so their settings and saves stay. Heroic can be removed afterwards.")
+                .build();
+            let row = adw::ActionRow::builder().title(format!("{} games", heroic.len())).subtitle(heroic.join(", ")).subtitle_lines(3).build();
+            let button = gtk::Button::builder().label("Take over").valign(gtk::Align::Center).build();
+            button.add_css_class("suggested-action");
+            row.add_suffix(&button);
+            group.add(&row);
+            page.add(&group);
+            let (u, d) = (self.clone(), dialog.clone());
+            button.connect_clicked(move |_| {
+                d.close();
+                let u = u.clone();
+                glib::spawn_future_local(async move {
+                    let result = gio::spawn_blocking(|| crate::sources::Home::find().ok_or("no home folder".to_string()).and_then(|h| crate::stores::takeover::take_over(&h))).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+                    match result {
+                        Ok(done) => u.alert(&format!("Lobby took over {} games from Heroic", done.len()), &done.iter().map(|l| format!("✓ {l}")).collect::<Vec<_>>().join("\n")),
+                        Err(e) => u.alert("Couldn't take over Heroic's games", &e),
+                    }
+                    u.rescan();
+                });
             });
         }
         dialog.present(Some(&self.window));

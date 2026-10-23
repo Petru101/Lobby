@@ -115,7 +115,7 @@ pub fn installed() -> Vec<Installed> {
         .filter_map(|(id, g)| {
             let folder = PathBuf::from(g.get("install_path")?.as_str()?);
             let program = g.get("executable").and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(|x| folder.join(x.replace('\\', "/").trim_start_matches('/')));
-            Some(Installed { title: g.get("title").and_then(|t| t.as_str()).unwrap_or(&id).to_string(), id, folder, program, build: None })
+            Some(Installed { title: g.get("title").and_then(|t| t.as_str()).unwrap_or(&id).to_string(), id, folder, program, build: None, platform: None })
         })
         .collect()
 }
@@ -136,9 +136,13 @@ pub fn install(app: &str, games: &Path, progress: &dyn Fn(f64)) -> Result<PathBu
 /// Lobby's installed games with a newer version on Epic (legendary compares each install's
 /// version with Epic's latest build).
 pub fn check_updates() -> Result<Vec<Update>, String> {
-    let mut command = legendary()?;
-    command.args(["list-installed", "--check-updates", "--csv"]);
-    let text = output(command).map_err(|e| format!("Epic didn't say which games have updates: {e}"))?;
+    // Tried twice: Epic's service sometimes takes longer than legendary waits (10 s).
+    let check = || {
+        let mut command = legendary()?;
+        command.args(["list-installed", "--check-updates", "--csv"]);
+        output(command)
+    };
+    let text = check().or_else(|_| check()).map_err(|e| format!("Epic didn't say which games have updates: {e}"))?;
     let games: Vec<String> = installed().into_iter().map(|g| g.id).collect();
     Ok(parse_updates(&text, &games))
 }

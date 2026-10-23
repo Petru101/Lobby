@@ -1,7 +1,8 @@
 //! `lobby run <game>`: how a game lobby installed from a store is played. Its cloud saves come
-//! down first (when the store keeps them), then the game runs as its gamefix entry runs it
-//! (Epic's games with the arguments Epic's launcher passes), lobby waits for it to quit, and
-//! its saves go up. Started detached by Play, its output going to the game's log.
+//! down first (when the store keeps them), then the game runs (Epic's with the arguments Epic's
+//! launcher passes) in its Wine prefix, with umu's protonfixes for it when umu knows the game,
+//! lobby waits for it to quit, and its saves go up. Started detached by Play, its output going
+//! to the game's log.
 
 use crate::library::Game;
 use crate::stores::saves::{self, Direction, Synced};
@@ -10,46 +11,61 @@ use std::process::{Command, Stdio};
 
 pub fn run(game: &Game) -> Result<(), String> {
     let (store, id) = crate::stores::installed_in(game).ok_or_else(|| format!("{} wasn't installed by lobby from a store.", game.name))?;
-    let gamefix = crate::launch::gamefix_command(game).ok_or_else(|| format!("{} has no gamefix setup yet: press Play in lobby's window to set it up.", game.name))?;
-    let cloud = saves::supported(store, &id);
+    let wine = crate::launch::wine_command(game).ok_or_else(|| format!("{} isn't set up to start yet: press Play in lobby's window to set it up.", game.name))?;
+    // umu's id for the game picks its protonfixes (gamefix's entries say umu-0: none).
+    let mut env: Vec<(String, String)> = wine.env.iter().filter_map(|w| w.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    if env.iter().any(|(k, v)| k == "GAMEID" && v == "umu-0") {
+        if let Some(umu_id) = crate::stores::umu_id(store, &id) {
+            env.retain(|(k, _)| k != "GAMEID" && k != "STORE");
+            env.push(("GAMEID".into(), umu_id));
+            env.push(("STORE".into(), if store == Store::Epic { "egs".into() } else { "gog".into() }));
+        }
+    }
+    let env_words: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let cloud = wine.umu.is_some() && saves::supported(store, &id);
     if cloud {
-        let down = saves::make_prefix(&gamefix.env, &gamefix.umu).and_then(|()| saves::sync(store, &id, &gamefix.env, Direction::Down));
+        let down = saves::make_prefix(&env_words, wine.umu.as_deref().unwrap()).and_then(|()| saves::sync(store, &id, &env_words, Direction::Down));
         match down {
             Ok(Synced::Moved(what)) => println!("lobby: {what}"),
             Ok(Synced::Nothing) => println!("lobby: its cloud saves were up to date."),
             Ok(Synced::Conflict) => match crate::ui::ask_which_saves(&game.name, store.name()) {
-                Some(choice) => match saves::sync(store, &id, &gamefix.env, choice) {
+                Some(choice) => match saves::sync(store, &id, &env_words, choice) {
                     Ok(_) => println!("lobby: kept {} saves.", if choice == Direction::KeepCloud { "the cloud's" } else { "this computer's" }),
                     Err(e) => notify(&game.name, &e),
                 },
                 None => println!("lobby: saves changed here and in the cloud; left both as they are."),
             },
             // Offline, or the store turned it away: the game still starts, with the saves here.
-            Err(e) => {
-                eprintln!("lobby: {e}");
-                notify(&game.name, &format!("Its cloud saves couldn't be checked ({e}). It starts with the saves on this computer."));
-            }
+            Err(e) => notify(&game.name, &format!("Its cloud saves couldn't be checked ({e}). It starts with the saves on this computer.")),
         }
     }
 
     let (program, cwd, extra_env) = match store {
         Store::Epic => crate::stores::epic::game_command(&id)?,
-        Store::Gog => (gamefix.program.clone(), gamefix.cwd.clone(), Vec::new()),
+        Store::Gog => (wine.program.clone(), wine.cwd.clone(), Vec::new()),
     };
-    let mut command = Command::new(&gamefix.umu);
-    command.args(&program).stdin(Stdio::null());
-    for (k, v) in gamefix.env.iter().filter_map(|w| w.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).chain(extra_env) {
-        command.env(k, v);
-    }
+    let mut command = match &wine.umu {
+        Some(umu) => {
+            let mut c = Command::new(umu);
+            c.args(&program);
+            c
+        }
+        None => {
+            let mut c = Command::new(&program[0]);
+            c.args(&program[1..]);
+            c
+        }
+    };
+    command.stdin(Stdio::null()).envs(env.into_iter().chain(extra_env));
     if let Some(dir) = cwd.filter(|d| d.is_dir()) {
         command.current_dir(dir);
     }
     // umu-run returns when the game has quit (Proton's waitforexitandrun).
-    let status = command.status().map_err(|e| format!("{}: {e}", gamefix.umu))?;
+    let status = command.status().map_err(|e| format!("{}: {e}", program[0]))?;
     println!("lobby: {} quit ({status}).", game.name);
 
     if cloud {
-        match saves::sync(store, &id, &gamefix.env, Direction::Up) {
+        match saves::sync(store, &id, &env_words, Direction::Up) {
             Ok(Synced::Moved(what)) => println!("lobby: {what}"),
             Ok(Synced::Nothing) => println!("lobby: no saves to put in the cloud."),
             Ok(Synced::Conflict) => notify(&game.name, "Its saves weren't put in the cloud: they changed there too since the last sync. Lobby asks which to keep when you next play it."),

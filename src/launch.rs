@@ -106,7 +106,7 @@ fn windows_program(p: &Path) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))
 }
 
-fn program_on_path(name: &str) -> Option<PathBuf> {
+pub fn program_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
 }
@@ -138,7 +138,7 @@ fn umu_plan(program: &Path, prefix: &Path, args: &str, how: &str) -> Plan {
 
 /// The Proton a prefix was made or last upgraded with: Proton's `config_info` (beside drive_c,
 /// or beside `pfx`) names its version, then its own font folder.
-fn proton_of(prefix: &Path) -> Option<PathBuf> {
+pub fn proton_of(prefix: &Path) -> Option<PathBuf> {
     [Some(prefix), prefix.parent()].into_iter().flatten().find_map(|dir| {
         let text = fs::read_to_string(dir.join("config_info")).ok()?;
         let fonts = text.lines().nth(1)?.trim_end_matches('/');
@@ -152,34 +152,57 @@ fn proton_of(prefix: &Path) -> Option<PathBuf> {
 /// around playing and (Epic) passes Epic's sign-in; the game itself runs as its gamefix entry
 /// runs it (prefix, Proton, fixes).
 fn store_plan(game: &Game) -> Option<Plan> {
-    let (store, _) = crate::stores::installed_in(game)?;
+    let (store, id) = crate::stores::installed_in(game)?;
     let folder = game.entries.iter().find(|e| e.source == store.source()).and_then(|e| e.folder.clone())?;
-    if gamefix_command(game).is_none() {
+    if wine_command(game).is_none() {
         return Some(Plan::SetUp(folder));
     }
     let lobby = std::env::current_exe().map_or_else(|_| "lobby".to_string(), |p| p.display().to_string());
-    let how = match store {
-        crate::stores::Store::Epic => "Lobby (Epic's sign-in and cloud saves) and its gamefix setup",
-        crate::stores::Store::Gog => "Lobby (GOG cloud saves) and its gamefix setup",
+    let setup = match crate::stores::wine_setup(store, &id) {
+        Some(s) => format!("in the Wine prefix it had in Heroic, {}", s.prefix.display()),
+        None => "as its gamefix setup runs it".to_string(),
     };
-    Some(run(how, vec![lobby, "run".into(), game.id.clone()], Some(folder)))
+    let how = match store {
+        crate::stores::Store::Epic => format!("Lobby (Epic's sign-in and cloud saves), {setup}"),
+        crate::stores::Store::Gog => format!("Lobby (GOG cloud saves), {setup}"),
+    };
+    Some(run(&how, vec![lobby, "run".into(), game.id.clone()], Some(folder)))
 }
 
-/// What a game's gamefix entry runs, split: the environment it sets (NAME=value words),
-/// umu-run, then the program and its arguments; and the folder it runs in.
-pub fn gamefix_command(game: &Game) -> Option<GamefixCommand> {
+/// How a store game lobby installed runs, split: the environment (NAME=value words), umu-run
+/// (none for a Linux version), then the program and its arguments; and the folder it runs in.
+/// A game taken over from Heroic runs in the prefix and Proton it had there; any other, as
+/// its gamefix entry runs it.
+pub fn wine_command(game: &Game) -> Option<WineCommand> {
+    if let Some((store, id)) = crate::stores::installed_in(game) {
+        let ours = store.installed().into_iter().find(|g| g.id == id)?;
+        if ours.platform.as_deref() == Some("linux") {
+            return Some(WineCommand { env: Vec::new(), umu: None, program: vec![ours.program?.display().to_string()], cwd: Some(ours.folder) });
+        }
+        if let Some(setup) = crate::stores::wine_setup(store, &id) {
+            let gog = gamefix::gog::read(&ours.folder);
+            let program = gog.as_ref().map(|g| g.program.clone()).or(ours.program)?;
+            let mut words = vec![program.display().to_string()];
+            words.extend(gog.as_ref().map(|g| g.args.clone()).unwrap_or_default());
+            let cwd = gog.and_then(|g| g.workdir).or_else(|| program.parent().map(Path::to_path_buf));
+            let proton = setup.proton.map_or("GE-Proton".to_string(), |p| p.display().to_string());
+            let env = vec![format!("WINEPREFIX={}", setup.prefix.display()), format!("PROTONPATH={proton}"), "GAMEID=umu-0".into()];
+            let umu = program_on_path("umu-run").map_or("umu-run".to_string(), |p| p.display().to_string());
+            return Some(WineCommand { env, umu: Some(umu), program: words, cwd });
+        }
+    }
     let (words, cwd) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(|e| {
         let file = e.keys.iter().find_map(|k| if let Key::Desktop(p) = k { Some(p) } else { None })?;
         desktop_exec(&fs::read_to_string(file).ok()?)
     })?;
     let umu = words.iter().position(|w| w.ends_with("umu-run"))?;
     let env = if words[0] == "env" { words[1..umu].to_vec() } else { Vec::new() };
-    Some(GamefixCommand { env, umu: words[umu].clone(), program: words[umu + 1..].to_vec(), cwd })
+    Some(WineCommand { env, umu: Some(words[umu].clone()), program: words[umu + 1..].to_vec(), cwd })
 }
 
-pub struct GamefixCommand {
+pub struct WineCommand {
     pub env: Vec<String>,
-    pub umu: String,
+    pub umu: Option<String>,
     pub program: Vec<String>,
     pub cwd: Option<PathBuf>,
 }

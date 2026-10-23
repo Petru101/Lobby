@@ -25,7 +25,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby accounts          the stores lobby is signed in to (sign in from the window)
        lobby update [<game>]   which of lobby's store installs have updates; update one
        lobby dlc <game> [<dlc>]  the DLC you own for a game lobby installed; install one
-       lobby saves <game> [down|up]  sync a store game's cloud saves now (down: newer from the cloud)";
+       lobby saves <game> [down|up|keep-cloud|keep-local]  sync a store game's cloud saves now
+       lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -44,7 +45,8 @@ fn main() -> ExitCode {
         (Some("how"), words) if !words.is_empty() => how(&words.join(" ")),
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
-        (Some("saves"), [game, way @ ..]) if matches!(way, [] | ["down"] | ["up"]) => sync_saves(game, way.first() == Some(&"up")),
+        (Some("take-over-heroic"), []) => take_over_heroic(),
+        (Some("saves"), [game, way @ ..]) if way.len() <= 1 => sync_saves(game, way.first().copied().unwrap_or("down")),
         // The question `lobby run` asks when saves changed both here and in the cloud (to see it).
         (Some("ask-saves"), words) => {
             println!("{:?}", ui::ask_which_saves(&words.join(" "), "GOG"));
@@ -180,7 +182,13 @@ fn progress_printer() -> impl Fn(f64) {
 fn check_updates() -> Result<(), String> {
     for store in stores::Store::ALL.into_iter().filter(|s| s.account().is_some()) {
         let names = store.installed();
-        let found = store.check_updates()?;
+        let found = match store.check_updates() {
+            Ok(found) => found,
+            Err(e) => {
+                println!("{}: {e}", store.name());
+                continue;
+            }
+        };
         for u in &found {
             let title = names.iter().find(|g| g.id == u.id).map_or(u.id.as_str(), |g| g.title.as_str());
             println!("{}: {title} {} → {}", store.name(), u.from, u.to);
@@ -223,7 +231,7 @@ fn dlc(query: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn sync_saves(query: &str, up: bool) -> Result<(), String> {
+fn sync_saves(query: &str, way: &str) -> Result<(), String> {
     use stores::saves::{self, Direction, Synced};
     let lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?.clone();
@@ -232,14 +240,36 @@ fn sync_saves(query: &str, up: bool) -> Result<(), String> {
         println!("{} doesn't keep {}'s saves in {}'s cloud.", store.name(), game.name, store.name());
         return Ok(());
     }
-    let gamefix = launch::gamefix_command(&game).ok_or("It has no gamefix setup yet: play it once first.")?;
-    saves::make_prefix(&gamefix.env, &gamefix.umu)?;
-    match saves::sync(store, &id, &gamefix.env, if up { Direction::Up } else { Direction::Down })? {
+    let wine = launch::wine_command(&game).ok_or("It isn't set up to start yet: play it once first.")?;
+    let umu = wine.umu.as_deref().ok_or("It's a Linux version: lobby syncs only Windows versions' saves.")?;
+    saves::make_prefix(&wine.env, umu)?;
+    let direction = match way {
+        "down" => Direction::Down,
+        "up" => Direction::Up,
+        "keep-cloud" => Direction::KeepCloud,
+        "keep-local" => Direction::KeepLocal,
+        _ => return Err(USAGE.into()),
+    };
+    match saves::sync(store, &id, &wine.env, direction)? {
         Synced::Moved(what) => println!("{what}"),
-        Synced::Nothing => println!("Nothing to move: the saves are the same here and in the cloud{}.", if up { ", or newer in the cloud" } else { ", or newer here" }),
-        Synced::Conflict => println!("The saves changed here and in the cloud since the last sync: play it from lobby to choose which to keep."),
+        Synced::Nothing => println!("Nothing to move: the saves are the same here and in the cloud{}.", if direction == Direction::Up { ", or newer in the cloud" } else { ", or newer here" }),
+        Synced::Conflict => println!("The saves changed here and in the cloud since the last sync: lobby saves {query:?} keep-cloud (or keep-local), or play it from lobby's window to choose."),
     }
     Ok(())
+}
+
+fn take_over_heroic() -> Result<(), String> {
+    let home = sources::Home::find().ok_or("no home folder")?;
+    let done = stores::takeover::take_over(&home)?;
+    if done.is_empty() {
+        println!("Heroic has no Epic or GOG games lobby hasn't taken over.");
+        return Ok(());
+    }
+    println!("Lobby took over {} games from Heroic:", done.len());
+    for l in &done {
+        println!("  ✓ {l}");
+    }
+    scan().map(|_| ())
 }
 
 fn accounts() -> Result<(), String> {
