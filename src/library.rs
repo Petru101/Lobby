@@ -1,11 +1,12 @@
 //! What the sources found (entries) and how they become one list of games: entries naming the
 //! same game (a Lutris game that's also a Steam shortcut, a GOG folder Heroic knows) merge.
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Where an entry was found. The order is the order names are trusted in: a store's name
 /// beats a folder's.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Source {
     Steam,
     Epic,
@@ -41,17 +42,21 @@ impl Source {
 }
 
 /// Ids launchers use to point at each other's games.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Key {
     SteamApp(u32),
     SteamShortcut(u32),
     Lutris(i64),
     Desktop(PathBuf),
+    /// Heroic's runner (legendary, gog, nile, sideload) and app name.
+    Heroic(String, String),
+    /// Faugus's game id.
+    Faugus(String),
     /// A download and an installed game of the same name.
     Name(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Kind {
     Game,
     /// A store's own program installed in Wine (EA app, Epic Games Launcher).
@@ -60,7 +65,7 @@ pub enum Kind {
     Download,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entry {
     pub source: Source,
     pub name: String,
@@ -71,9 +76,11 @@ pub struct Entry {
     pub program: Option<PathBuf>,
     /// The Wine prefix it runs in (the folder holding drive_c).
     pub prefix: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<Key>,
     /// Only says something about a game another entry found (gamefix's record of a shortcut it
     /// made): dropped when nothing else matches it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub annotation: bool,
 }
 
@@ -83,13 +90,26 @@ impl Entry {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Game {
+    /// lobby's own id for it, kept from scan to scan (set by the saved library).
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub kind: Kind,
     pub entries: Vec<Entry>,
     /// Nothing it names is on disk (uninstalled behind a launcher's back, or on a drive that
     /// isn't plugged in).
     pub missing: bool,
+    /// No source found it in the last scan (uninstalled, or its drive isn't plugged in): kept so
+    /// it isn't lost.
+    #[serde(default)]
+    pub gone: bool,
+    /// Unix times.
+    #[serde(default)]
+    pub added: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub played: Option<u64>,
 }
 
 impl Game {
@@ -252,7 +272,7 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             };
             let paths: Vec<&PathBuf> = entries.iter().flat_map(|e| [e.folder.as_ref(), e.program.as_ref()]).flatten().collect();
             let missing = !paths.is_empty() && !paths.iter().any(|p| p.exists());
-            Game { name, kind, entries, missing }
+            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None }
         })
         .collect();
     games.sort_by_key(|g| g.name.to_lowercase());

@@ -62,7 +62,7 @@ fn read(file: &Path) -> Option<Entry> {
         e.keys.push(if id > u32::MAX as u64 { Key::SteamShortcut((id >> 32) as u32) } else { Key::SteamApp(id as u32) });
     }
     // The last file the command names: the game's program, or what a runner opens.
-    e.program = words(exec).into_iter().rev().map(|w| PathBuf::from(w.rsplit_once('=').map_or(w.as_str(), |(_, v)| v))).find(|p| p.is_absolute() && p.is_file());
+    e.program = crate::launch::desktop_exec(&text).map(|(w, _)| w).unwrap_or_default().into_iter().rev().map(|w| PathBuf::from(w.rsplit_once('=').map_or(w.as_str(), |(_, v)| v))).find(|p| p.is_absolute() && p.is_file());
     // Its working folder is the game's when the program is in it, or when no program could be
     // found (a runner's command naming a folder that was since deleted).
     e.folder = get("Path").filter(|p| !p.is_empty()).map(PathBuf::from).filter(|p| e.program.as_ref().is_none_or(|prog| prog.starts_with(p)));
@@ -75,28 +75,4 @@ fn read(file: &Path) -> Option<Entry> {
         e.prefix = pfx.filter(|p| p.starts_with('/')).map(PathBuf::from);
     }
     Some(e)
-}
-
-/// A command line's words, with "quoted parts" kept whole.
-fn words(exec: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    let mut chars = exec.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => quoted = !quoted,
-            '\\' if quoted => cur.extend(chars.next()),
-            c if c.is_whitespace() && !quoted => {
-                if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-            }
-            c => cur.push(c),
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
 }

@@ -5,6 +5,8 @@
 use super::Home;
 use crate::library::{self, Entry, Kind, Source};
 use gamefix::binary::Binary;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use gamefix::{disc, scan};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,27 +66,107 @@ pub fn scan(roots: &[PathBuf], known: &[Entry]) -> (Vec<Entry>, Vec<PathBuf>) {
     candidates.sort();
     candidates.dedup_by(|a, b| library::norm(a) == library::norm(b));
 
+    let mut cache = Cache::load();
+    let (fresh, stale): (Vec<_>, Vec<_>) = candidates.into_iter().map(|dir| {
+        let key = Looked::key(&dir, &known);
+        (dir, key)
+    }).partition(|(dir, key)| cache.folders.get(&dir.display().to_string()).is_some_and(|c| c.mtime == key.0 && c.known_inside == key.1));
+
     // Folders are independent, and big games take a while to walk: several at once.
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
-    let chunks: Vec<Vec<PathBuf>> = (0..threads).map(|t| candidates.iter().skip(t).step_by(threads).cloned().collect()).collect();
-    let results: Vec<Found> = std::thread::scope(|s| {
-        let handles: Vec<_> = chunks.iter().map(|chunk| s.spawn(|| chunk.iter().flat_map(|dir| look(dir, &known, 0)).collect::<Vec<_>>())).collect();
+    let chunks: Vec<Vec<&(PathBuf, (u64, Vec<PathBuf>))>> = (0..threads).map(|t| stale.iter().skip(t).step_by(threads).collect()).collect();
+    let looked: Vec<(String, Looked)> = std::thread::scope(|s| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|chunk| s.spawn(|| chunk.iter().map(|(dir, (mtime, inside))| (dir.display().to_string(), Looked::from(look(dir, &known, 0), *mtime, inside.clone()))).collect::<Vec<_>>()))
+            .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
     });
-
     let mut entries = Vec::new();
     let mut prefixes = Vec::new();
-    for found in results {
-        match found {
-            Found::Game(e) => entries.push(e),
-            Found::Prefix(p, fallback) => {
-                prefixes.push(p);
-                entries.extend(fallback);
+    for (dir, _) in &fresh {
+        let c = &cache.folders[&dir.display().to_string()];
+        entries.extend(c.entries.iter().cloned());
+        prefixes.extend(c.prefixes.iter().cloned());
+    }
+    for (dir, l) in looked {
+        entries.extend(l.entries.iter().cloned());
+        prefixes.extend(l.prefixes.iter().cloned());
+        cache.folders.insert(dir, l);
+    }
+    // Folders gone from the roots leave the cache.
+    let wanted: Vec<String> = fresh.iter().chain(&stale).map(|(d, _)| d.display().to_string()).collect();
+    cache.folders.retain(|k, _| wanted.contains(k));
+    cache.save();
+    (entries, prefixes)
+}
+
+/// What looking at one folder in a root found, kept between scans in
+/// ~/.cache/lobby/folders.json: walking big games is most of a scan's time.
+#[derive(Serialize, Deserialize)]
+struct Looked {
+    /// The folder's own change time: a game added, removed or unpacked at its top changes it.
+    mtime: u64,
+    /// Launcher-known game folders inside it, which change what's looked at.
+    known_inside: Vec<PathBuf>,
+    entries: Vec<Entry>,
+    prefixes: Vec<PathBuf>,
+}
+
+impl Looked {
+    fn key(dir: &Path, known: &[PathBuf]) -> (u64, Vec<PathBuf>) {
+        let mtime = fs::metadata(dir).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        let norm = library::norm(dir);
+        (mtime, known.iter().filter(|k| k.starts_with(&norm)).cloned().collect())
+    }
+
+    fn from(found: Vec<Found>, mtime: u64, known_inside: Vec<PathBuf>) -> Looked {
+        let mut l = Looked { mtime, known_inside, entries: Vec::new(), prefixes: Vec::new() };
+        for f in found {
+            match f {
+                Found::Game(e) => l.entries.push(e),
+                Found::Prefix(p, fallback) => {
+                    l.prefixes.push(p);
+                    l.entries.extend(fallback);
+                }
+                Found::Nothing => {}
             }
-            Found::Nothing => {}
+        }
+        l
+    }
+}
+
+/// Bumped when what a folder's look finds changes, so old results aren't reused.
+const CACHE_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize, Default)]
+struct Cache {
+    version: u32,
+    folders: HashMap<String, Looked>,
+}
+
+impl Cache {
+    fn file() -> PathBuf {
+        let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
+        cache.join("lobby/folders.json")
+    }
+
+    fn load() -> Cache {
+        let cache: Cache = fs::read_to_string(Self::file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        if cache.version == CACHE_VERSION {
+            cache
+        } else {
+            Cache { version: CACHE_VERSION, folders: HashMap::new() }
         }
     }
-    (entries, prefixes)
+
+    fn save(&self) {
+        let file = Self::file();
+        let _ = fs::create_dir_all(file.parent().unwrap());
+        if let Ok(text) = serde_json::to_string(self) {
+            let _ = fs::write(&file, text);
+        }
+    }
 }
 
 fn look(dir: &Path, known: &[PathBuf], depth: usize) -> Vec<Found> {

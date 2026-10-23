@@ -6,26 +6,42 @@ use crate::library::{Entry, Key, Source};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The `exe`, `prefix` and `working_dir` of a config's top-level `game:` block.
+/// The `exe`, `prefix` and `working_dir` of a config's top-level `game:` block. Lutris wraps
+/// long values onto lines indented further, which continue the value after a space.
 fn game_block(yml: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     let mut inside = false;
+    let mut continues = false;
     for line in yml.lines() {
         if !line.starts_with(' ') {
             inside = line.trim_end() == "game:";
+            continues = false;
             continue;
         }
         if !inside {
             continue;
         }
         // Only the block's own keys, two spaces in.
-        let Some(rest) = line.strip_prefix("  ").filter(|r| !r.starts_with(' ')) else { continue };
-        if let Some((k, v)) = rest.split_once(':') {
-            let v = v.trim().trim_matches(|c| c == '\'' || c == '"');
-            if !v.is_empty() {
-                out.push((k.trim().to_string(), v.to_string()));
+        match line.strip_prefix("  ") {
+            Some(rest) if !rest.starts_with(' ') => {
+                continues = false;
+                if let Some((k, v)) = rest.split_once(':') {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        out.push((k.trim().to_string(), v.to_string()));
+                        continues = true;
+                    }
+                }
             }
+            Some(_) if continues => {
+                let last = out.last_mut().unwrap();
+                last.1 = format!("{} {}", last.1, line.trim());
+            }
+            _ => continues = false,
         }
+    }
+    for (_, v) in &mut out {
+        *v = v.trim_matches(|c| c == '\'' || c == '"').to_string();
     }
     out
 }
@@ -64,5 +80,12 @@ mod tests {
     fn reads_the_game_block() {
         let yml = "game:\n  exe: drive_c/Games/Forager/Forager.exe\n  prefix: /home/u/Games/gog/forager\nscript:\n  game:\n    exe: other.exe\n";
         assert_eq!(game_block(yml), [("exe".into(), "drive_c/Games/Forager/Forager.exe".into()), ("prefix".into(), "/home/u/Games/gog/forager".into())]);
+    }
+
+    #[test]
+    fn long_values_wrap() {
+        let yml = "game:\n  exe: /home/u/Games/gog/ee/drive_c/GOG Games/Empire Earth\n    Gold Edition/Empire Earth/Empire Earth.exe\n  prefix: /home/u/Games/gog/ee\n";
+        assert_eq!(game_block(yml)[0].1, "/home/u/Games/gog/ee/drive_c/GOG Games/Empire Earth Gold Edition/Empire Earth/Empire Earth.exe");
+        assert_eq!(game_block(yml)[1].1, "/home/u/Games/gog/ee");
     }
 }

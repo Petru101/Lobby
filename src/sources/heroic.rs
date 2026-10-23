@@ -3,7 +3,7 @@
 //! for Epic games installed with legendary alone.
 
 use super::{json, str_of, Home};
-use crate::library::{Entry, Source};
+use crate::library::{Entry, Key, Source};
 use std::path::{Path, PathBuf};
 
 /// The prefix Heroic runs a game in, from its per-game settings.
@@ -24,8 +24,9 @@ pub fn games(home: &Home) -> Vec<Entry> {
     let mut legendary: Vec<PathBuf> = Vec::new();
     for heroic in home.app_dirs("com.heroicgameslauncher.hgl", "config/heroic", ".config/heroic") {
         legendary.push(heroic.join("legendaryConfig/legendary/installed.json"));
-        let with_prefix = |mut e: Entry, app: &str| {
+        let with_prefix = |mut e: Entry, runner: &str, app: &str| {
             e.prefix = prefix(&heroic, app);
+            e.keys.push(Key::Heroic(runner.into(), app.into()));
             e
         };
 
@@ -41,7 +42,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
                 e.folder = Some(PathBuf::from(path));
                 // gogdl leaves the program to GOG's .info in the game's folder.
                 e.program = str_of(&g, "executable").map(|x| Path::new(path).join(x)).or_else(|| gamefix::gog::read(Path::new(path)).map(|i| i.program));
-                entries.push(with_prefix(e, app));
+                entries.push(with_prefix(e, "gog", app));
             }
         }
 
@@ -52,7 +53,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
                 let title = nile_titles.iter().find(|(a, _)| a == app).map(|(_, t)| t.clone()).unwrap_or_else(|| folder_name(path));
                 let mut e = Entry::new(Source::Amazon, title);
                 e.folder = Some(PathBuf::from(path));
-                entries.push(with_prefix(e, app));
+                entries.push(with_prefix(e, "nile", app));
             }
         }
 
@@ -62,7 +63,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
                 let mut e = Entry::new(Source::Heroic, title);
                 e.program = g.get("install").and_then(|i| str_of(i, "executable")).map(PathBuf::from);
                 e.folder = str_of(&g, "folder_name").map(PathBuf::from);
-                entries.push(with_prefix(e, app));
+                entries.push(with_prefix(e, "sideload", app));
             }
         }
     }
@@ -80,7 +81,11 @@ pub fn games(home: &Home) -> Vec<Entry> {
             e.program = str_of(&g, "executable").map(|x| Path::new(path).join(x));
             // The Heroic config this came from, if any, knows its prefix.
             let heroic = file.ancestors().nth(3).map(Path::to_path_buf);
-            e.prefix = heroic.and_then(|h| prefix(&h, &app));
+            e.prefix = heroic.as_ref().and_then(|h| prefix(h, &app));
+            // Started through Heroic when Heroic installed it, else it's legendary's alone.
+            if heroic.as_ref().is_some_and(|h| h.join("GamesConfig").is_dir()) {
+                e.keys.push(Key::Heroic("legendary".into(), app.clone()));
+            }
             entries.push(e);
         }
     }

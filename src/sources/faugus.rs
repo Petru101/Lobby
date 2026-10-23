@@ -1,7 +1,7 @@
 //! Faugus Launcher: its games.json.
 
 use super::{json, str_of, Home};
-use crate::library::{Entry, Source};
+use crate::library::{Entry, Key, Source};
 use std::path::PathBuf;
 
 pub fn games(home: &Home) -> Vec<Entry> {
@@ -13,6 +13,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
             let mut e = Entry::new(Source::Faugus, title);
             e.program = str_of(&g, "path").map(PathBuf::from);
             e.prefix = str_of(&g, "prefix").map(PathBuf::from);
+            e.keys.extend(str_of(&g, "gameid").map(|id| Key::Faugus(id.into())));
             entries.push(e);
         }
     }
