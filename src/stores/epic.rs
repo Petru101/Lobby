@@ -38,12 +38,17 @@ pub fn sign_out() -> Result<(), String> {
     output(command).map(|_| ())
 }
 
-/// The account's games (not DLC, not ones only another store's app installs), with the tall
-/// box art Epic's own launcher shows.
+/// The account's games, with the tall box art Epic's own launcher shows. Tried twice: the
+/// first list after signing in fetches every item's details, and Epic's service sometimes
+/// takes longer than legendary waits (10 s).
 pub fn owned() -> Result<Vec<Owned>, String> {
-    let mut command = legendary()?;
-    command.args(["list", "--json"]);
-    let list: serde_json::Value = serde_json::from_str(&output(command)?).map_err(|e| format!("legendary list: {e}"))?;
+    let list = || {
+        let mut command = legendary()?;
+        command.args(["list", "--json"]);
+        output(command)
+    };
+    let text = list().or_else(|_| list()).map_err(|e| format!("Epic didn't send the list of your games: {e}"))?;
+    let list: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("legendary list: {e}"))?;
     Ok(parse_owned(&list))
 }
 
@@ -52,6 +57,7 @@ fn parse_owned(list: &serde_json::Value) -> Vec<Owned> {
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|g| is_game(g))
         .filter_map(|g| {
             let id = g.get("app_name")?.as_str()?.to_string();
             let title = g.get("app_title")?.as_str()?.to_string();
@@ -62,6 +68,14 @@ fn parse_owned(list: &serde_json::Value) -> Vec<Owned> {
         .collect();
     games.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
     games
+}
+
+/// Epic's list holds whatever the account got from Epic: games, but also Fab/Unreal assets,
+/// plugins and sample projects, add-ons and software. A game is in Epic's "games" category and
+/// isn't an add-on (LEGO Fortnite's experiences are launchable add-ons).
+fn is_game(item: &serde_json::Value) -> bool {
+    let categories: Vec<&str> = item.get("metadata").and_then(|m| m.get("categories")).and_then(|c| c.as_array()).into_iter().flatten().filter_map(|c| c.get("path")?.as_str()).collect();
+    categories.contains(&"games") && !categories.contains(&"addons")
 }
 
 /// legendary's installed.json: app name to what it installed.
@@ -81,10 +95,15 @@ pub fn installed() -> Vec<Installed> {
         .collect()
 }
 
-/// Installs the Windows version with every owned DLC into the games folder.
+/// Installs the Windows version with every owned DLC into the games folder, in a folder named
+/// after the game (Epic's own names can be "MinutesTillDawnxgosd").
 pub fn install(app: &str, games: &Path, progress: &dyn Fn(f64)) -> Result<PathBuf, String> {
+    let title = super::owned(super::Store::Epic).into_iter().find(|o| o.id == app).map(|o| o.title);
     let mut command = legendary()?;
     command.args(["-y", "install", app, "--platform", "Windows", "--with-dlcs", "--skip-sdl", "--base-path"]).arg(games);
+    if let Some(title) = title {
+        command.arg("--game-folder").arg(crate::install::free_folder(games, &title));
+    }
     run_with_progress(command, progress).map_err(|e| format!("Epic's download stopped: {e}"))?;
     installed().into_iter().find(|g| g.id == app).map(|g| g.folder).ok_or_else(|| "legendary finished, but the game isn't in its list of installed games.".into())
 }
@@ -107,12 +126,16 @@ mod tests {
     #[test]
     fn owned_list() {
         let list = serde_json::json!([
-            {"app_name": "Fang", "app_title": "Fall Guys", "metadata": {"keyImages": [
+            {"app_name": "Fang", "app_title": "Fall Guys", "metadata": {"categories": [{"path": "games"}, {"path": "applications"}], "keyImages": [
                 {"type": "DieselGameBox", "url": "https://x/wide.jpg"},
                 {"type": "DieselGameBoxTall", "url": "https://x/tall.jpg"}]}},
-            {"app_name": "abc", "app_title": "another game", "metadata": {}}
+            {"app_name": "abc", "app_title": "another game", "metadata": {"categories": [{"path": "applications"}, {"path": "games"}, {"path": "public"}]}},
+            {"app_name": "acf", "app_title": "Ascent Combat Framework", "metadata": {"categories": [{"path": "asset-format"}, {"path": "plugins"}]}},
+            {"app_name": "lego", "app_title": "LEGO Fortnite: Odyssey", "metadata": {"categories": [{"path": "addons"}, {"path": "addons/launchable"}, {"path": "games"}]}},
+            {"app_name": "kenney", "app_title": "Kenney Shape", "metadata": {"categories": [{"path": "applications"}, {"path": "software"}]}}
         ]);
         let games = parse_owned(&list);
+        assert_eq!(games.len(), 2);
         assert_eq!(games[0], Owned { id: "abc".into(), title: "another game".into(), cover: None });
         assert_eq!(games[1].cover.as_deref(), Some("https://x/tall.jpg"));
     }

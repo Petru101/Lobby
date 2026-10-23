@@ -315,7 +315,13 @@ impl Ui {
         let lib = self.lib.borrow();
         let shown = lib.games.iter().filter(|g| self.shows(g)).count();
         let total = lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone && !g.missing).count();
-        self.title.set_subtitle(&if shown == total { format!("{total} games") } else { format!("{shown} of {total} games") });
+        let subtitle = match self.filter.get() {
+            Filter::Downloads => format!("{shown} downloads"),
+            Filter::Owned => format!("{shown} games you own, not installed"),
+            _ if shown == total => format!("{total} games"),
+            _ => format!("{shown} of {total} games"),
+        };
+        self.title.set_subtitle(&subtitle);
         if !self.scanning.get() || !lib.games.is_empty() {
             self.stack.set_visible_child_name(if shown == 0 { "empty" } else { "games" });
         }
@@ -556,14 +562,14 @@ impl Ui {
         self.toast(&format!("Signing in to {}…", store.name()));
         let u = self.clone();
         glib::spawn_future_local(async move {
-            let result = gio::spawn_blocking(move || {
-                store.sign_in(&code)?;
-                store.refresh_owned().map(|g| g.len())
-            })
-            .await
-            .unwrap_or_else(|_| Err("it stopped with an error".into()));
+            // Signed in, and then the list of games, which can fail on its own (it's tried
+            // again by the next scan).
+            let result = gio::spawn_blocking(move || store.sign_in(&code).map(|()| store.refresh_owned().map(|g| g.len())))
+                .await
+                .unwrap_or_else(|_| Err("it stopped with an error".into()));
             match result {
-                Ok(n) => u.toast(&format!("Signed in to {}: you own {n} games there. The ones not installed are under Not installed.", store.name())),
+                Ok(Ok(n)) => u.toast(&format!("Signed in to {}: you own {n} games there. The ones not installed are under Not installed.", store.name())),
+                Ok(Err(e)) => u.alert(&format!("Signed in to {}", store.name()), &format!("But the list of your games didn't come through yet ({e}). Lobby asks again when it looks for games: press Refresh (F5) in a moment.")),
                 Err(e) => u.alert(&format!("Couldn't sign in to {}", store.name()), &e),
             }
             u.rescan();
@@ -589,7 +595,7 @@ impl Ui {
                 self.toast(&format!("Setting up {} with gamefix (only the first time)…", game.name));
                 let u = self.clone();
                 glib::spawn_future_local(async move {
-                    let result = gio::spawn_blocking(move || launch::set_up(&folder)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+                    let result = gio::spawn_blocking(move || launch::set_up(&folder, None)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
                     match result {
                         Ok((lines, Some(entry))) => {
                             let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id)));

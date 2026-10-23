@@ -52,7 +52,7 @@ fn unpack(file: &Path, into: &Path) -> Result<(), String> {
 }
 
 /// A folder name from the game's name: what file systems allow, and not one already used.
-fn free_folder(parent: &Path, name: &str) -> PathBuf {
+pub fn free_folder(parent: &Path, name: &str) -> PathBuf {
     let clean: String = name.chars().map(|c| if c == '/' || c == '\\' || c.is_control() || c == ':' { ' ' } else { c }).collect();
     let base = clean.split_whitespace().collect::<Vec<_>>().join(" ");
     let base = if base.is_empty() || base.starts_with('.') { "Game".to_string() } else { base };
@@ -108,15 +108,16 @@ pub fn install(game: &Game, progress: &dyn Fn(f64)) -> Result<Installed, String>
     }
     let file = download(game).ok_or_else(|| format!("{}'s download isn't there any more.", game.name))?;
     let mut lines = Vec::new();
-    let target = if archive_kind(&file).is_some() {
+    // An unpacked game is named as lobby names it; an installer or a disc image is run by
+    // gamefix, which names it after what it installs.
+    let (target, name) = if archive_kind(&file).is_some() {
         let folder = unpack_into_games(game, &file)?;
         lines.push(format!("✓ Unpacked it into {}.", folder.display()));
-        folder
+        (folder, Some(game.name.as_str()))
     } else {
-        // An installer or a disc image: gamefix runs it.
-        file.clone()
+        (file.clone(), None)
     };
-    match crate::launch::set_up(&target) {
+    match crate::launch::set_up(&target, name) {
         Ok((done, entry)) => {
             lines.extend(done);
             Ok(Installed { lines, entry })
@@ -141,7 +142,7 @@ fn install_owned(game: &Game, progress: &dyn Fn(f64)) -> Result<Installed, Strin
     let (store, id) = owned_in(game).ok_or_else(|| format!("{} isn't owned in a store lobby is signed in to.", game.name))?;
     let folder = store.install(&id, progress)?;
     let mut lines = vec![format!("✓ Downloaded it from {} into {}.", store.name(), folder.display())];
-    match crate::launch::set_up(&folder) {
+    match crate::launch::set_up(&folder, Some(&game.name)) {
         Ok((done, entry)) => {
             lines.extend(done);
             Ok(Installed { lines, entry })

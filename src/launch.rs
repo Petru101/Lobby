@@ -263,10 +263,15 @@ pub fn start(command: &[String], cwd: Option<&Path>, log: &Path) -> Result<(), S
     cmd.spawn().map(|_| ()).map_err(|e| format!("{program}: {e}"))
 }
 
-/// gamefix's setup for a game no launcher knows: an app-menu entry with its fixes. Returns
-/// what it did and the entry made, which starts it from then on.
-pub fn set_up(folder: &Path) -> Result<(Vec<String>, Option<PathBuf>), String> {
-    let game = gamefix::scan::scan(folder).ok_or_else(|| format!("{}: nothing there gamefix can read", folder.display()))?;
+/// gamefix's setup for a game no launcher knows: an app-menu entry with its fixes, named
+/// `name` when lobby knows the game's real name (a store's, else gamefix names it from its
+/// files: "MinutesTillDawn"). Returns what it did and the entry made, which starts it from
+/// then on.
+pub fn set_up(folder: &Path, name: Option<&str>) -> Result<(Vec<String>, Option<PathBuf>), String> {
+    let mut game = gamefix::scan::scan(folder).ok_or_else(|| format!("{}: nothing there gamefix can read", folder.display()))?;
+    if let Some(name) = name {
+        game.name = name.to_string();
+    }
     let report = gamefix::check::check(&game, &gamefix::system::System::load());
     if let Some(runner) = gamefix::setup::missing_runner(&game, &report) {
         return Err(format!("It needs {} (from Flathub) to run. gamefix setup \"{}\" installs it and sets the game up.", runner.name, folder.display()));

@@ -82,7 +82,7 @@ fn play(query: &str) -> Result<(), String> {
         launch::Plan::Cannot(why) => return Err(format!("{}: {why}", game.name)),
         launch::Plan::SetUp(folder) => {
             println!("No launcher knows {}, so gamefix sets it up first (once):", game.name);
-            let (lines, entry) = launch::set_up(&folder)?;
+            let (lines, entry) = launch::set_up(&folder, None)?;
             for l in &lines {
                 println!("  {l}");
             }
