@@ -21,7 +21,7 @@ pub fn games() -> Vec<Entry> {
         if store.account().is_none() {
             continue;
         }
-        for o in owned.into_iter().filter(|o| !installed.iter().any(|g| g.id == o.id)) {
+        for o in owned.into_iter().filter(|o| o.installable != Some(false) && !installed.iter().any(|g| g.id == o.id)) {
             let mut e = Entry::new(store.source(), o.title);
             e.kind = Kind::Owned;
             e.cover = o.cover;

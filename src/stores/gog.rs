@@ -63,19 +63,22 @@ pub fn sign_out() -> Result<(), String> {
     }
 }
 
-/// The account's games, page by page, each with its tall cover from GOG's games database
-/// (fetched once: covers already in `old` are kept).
+/// The account's games, page by page, each with its tall cover from GOG's games database (else
+/// GOG's wide image) and whether it has a Windows version to download: goodie packs are
+/// "games" too, with nothing to install. Both are looked up once (`old` keeps them).
 pub fn owned(old: &[Owned]) -> Result<Vec<Owned>, String> {
     let token = token()?;
-    let mut games: Vec<Owned> = Vec::new();
+    let mut games: Vec<(Owned, Option<String>)> = Vec::new();
     let mut page = 1;
     loop {
         let v = get_json(&format!("https://embed.gog.com/account/getFilteredProducts?mediaType=1&sortBy=title&page={page}"), Some(&token))?;
         for p in v.get("products").and_then(|p| p.as_array()).into_iter().flatten() {
             let (Some(id), Some(title)) = (p.get("id").and_then(|i| i.as_u64()), p.get("title").and_then(|t| t.as_str())) else { continue };
             let id = id.to_string();
-            let cover = old.iter().find(|o| o.id == id).and_then(|o| o.cover.clone());
-            games.push(Owned { id, title: title.to_string(), cover });
+            let before = old.iter().find(|o| o.id == id);
+            let cover = before.and_then(|o| o.cover.clone());
+            let wide = p.get("image").and_then(|i| i.as_str()).filter(|i| !i.is_empty()).map(|i| format!("https:{i}_784.jpg"));
+            games.push((Owned { id, title: title.to_string(), cover, installable: before.and_then(|o| o.installable) }, wide));
         }
         let pages = v.get("totalPages").and_then(|t| t.as_u64()).unwrap_or(1);
         if page >= pages {
@@ -86,12 +89,24 @@ pub fn owned(old: &[Owned]) -> Result<Vec<Owned>, String> {
     // Four at a time.
     for chunk in games.chunks_mut(4) {
         std::thread::scope(|s| {
-            for g in chunk.iter_mut().filter(|g| g.cover.is_none()) {
-                s.spawn(move || g.cover = vertical_cover(&g.id));
+            for (g, wide) in chunk.iter_mut().filter(|(g, _)| g.cover.is_none() || g.installable.is_none()) {
+                s.spawn(move || {
+                    if g.cover.is_none() {
+                        g.cover = vertical_cover(&g.id).or(wide.take());
+                    }
+                    if g.installable.is_none() {
+                        g.installable = windows_builds(&g.id).map(|n| n > 0);
+                    }
+                });
             }
         });
     }
-    Ok(games)
+    Ok(games.into_iter().map(|(g, _)| g).collect())
+}
+
+/// How many Windows builds GOG has for a product (None: the request failed).
+fn windows_builds(id: &str) -> Option<u64> {
+    get_json(&format!("https://content-system.gog.com/products/{id}/os/windows/builds?generation=2"), None).ok()?.get("total_count")?.as_u64()
 }
 
 fn vertical_cover(id: &str) -> Option<String> {

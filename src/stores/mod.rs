@@ -121,6 +121,10 @@ pub struct Owned {
     pub title: String,
     #[serde(default)]
     pub cover: Option<String>,
+    /// Whether there's a Windows version to download (GOG lists goodie packs as games): known
+    /// once checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installable: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

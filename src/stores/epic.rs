@@ -63,7 +63,7 @@ fn parse_owned(list: &serde_json::Value) -> Vec<Owned> {
             let title = g.get("app_title")?.as_str()?.to_string();
             let images = g.get("metadata").and_then(|m| m.get("keyImages")).and_then(|k| k.as_array());
             let image = |kind: &str| images.into_iter().flatten().find(|i| i.get("type").and_then(|t| t.as_str()) == Some(kind)).and_then(|i| i.get("url")?.as_str().map(String::from));
-            Some(Owned { id, title, cover: image("DieselGameBoxTall").or_else(|| image("Thumbnail")) })
+            Some(Owned { id, title, cover: image("DieselGameBoxTall").or_else(|| image("Thumbnail")), installable: Some(true) })
         })
         .collect();
     games.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
@@ -136,7 +136,7 @@ mod tests {
         ]);
         let games = parse_owned(&list);
         assert_eq!(games.len(), 2);
-        assert_eq!(games[0], Owned { id: "abc".into(), title: "another game".into(), cover: None });
+        assert_eq!(games[0], Owned { id: "abc".into(), title: "another game".into(), cover: None, installable: Some(true) });
         assert_eq!(games[1].cover.as_deref(), Some("https://x/tall.jpg"));
     }
 }
