@@ -52,11 +52,14 @@ fn read(file: &Path) -> Option<Entry> {
         || file.file_name().is_some_and(|n| n.to_string_lossy().starts_with("gamefix-"))
         || exec.contains("steam://rungameid/")
         || wine;
-    if !game || get("Type").is_some_and(|t| t != "Application") || get("NoDisplay") == Some("true") {
+    // lobby's own entry is in Games too.
+    let lobby = file.file_stem().is_some_and(|s| s == "io.github.Petru101.Lobby");
+    if !game || lobby || get("Type").is_some_and(|t| t != "Application") || get("NoDisplay") == Some("true") {
         return None;
     }
     let mut e = Entry::new(Source::AppMenu, name);
     e.keys.push(Key::Desktop(file.to_path_buf()));
+    e.icon = get("Icon").map(PathBuf::from).filter(|p| p.is_absolute());
     if let Some(id) = exec.split("steam://rungameid/").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).and_then(|s| s.parse::<u64>().ok()) {
         // A non-Steam game's run id is its shortcut id shifted up (with 0x02000000 below).
         e.keys.push(if id > u32::MAX as u64 { Key::SteamShortcut((id >> 32) as u32) } else { Key::SteamApp(id as u32) });

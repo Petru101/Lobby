@@ -64,6 +64,17 @@ pub fn plan(game: &Game) -> Plan {
     Plan::Cannot("Nothing that knows how to start it was found (no launcher lists it, and its files aren't in a game folder).".into())
 }
 
+impl Plan {
+    /// In a sentence, for people.
+    pub fn describe(&self) -> String {
+        match self {
+            Plan::Run { how, .. } => format!("Starts with {how}."),
+            Plan::SetUp(_) => "No launcher knows it: the first time you play, gamefix sets it up (an app-menu entry with any fixes it needs).".into(),
+            Plan::Cannot(why) => why.clone(),
+        }
+    }
+}
+
 fn run(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
     Plan::Run { how: how.into(), command, cwd }
 }

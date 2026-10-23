@@ -136,12 +136,20 @@ impl Looked {
     }
 }
 
-/// Bumped when what a folder's look finds changes, so old results aren't reused.
-const CACHE_VERSION: u32 = 1;
+/// Bumped when the cache's format changes.
+const CACHE_VERSION: u32 = 2;
+
+/// When the running lobby was built: a rebuild (lobby's look or gamefix's scan may pick
+/// differently now) starts the cache over.
+fn build_time() -> u64 {
+    std::env::current_exe().and_then(fs::metadata).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+}
 
 #[derive(Serialize, Deserialize, Default)]
 struct Cache {
     version: u32,
+    #[serde(default)]
+    build: u64,
     folders: HashMap<String, Looked>,
 }
 
@@ -153,10 +161,11 @@ impl Cache {
 
     fn load() -> Cache {
         let cache: Cache = fs::read_to_string(Self::file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        if cache.version == CACHE_VERSION {
+        let build = build_time();
+        if cache.version == CACHE_VERSION && cache.build == build {
             cache
         } else {
-            Cache { version: CACHE_VERSION, folders: HashMap::new() }
+            Cache { version: CACHE_VERSION, build, folders: HashMap::new() }
         }
     }
 

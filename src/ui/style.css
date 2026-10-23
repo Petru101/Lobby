@@ -1,0 +1,47 @@
+.filters {
+  padding: 0 12px;
+}
+
+flowboxchild.game-card {
+  padding: 6px;
+  border-radius: 16px;
+}
+
+.cover {
+  border-radius: 12px;
+  box-shadow: 0 2px 6px alpha(black, 0.25);
+}
+
+.cover-placeholder {
+  border-radius: 12px;
+}
+
+.cover-name {
+  color: white;
+  font-weight: 800;
+  font-size: 15pt;
+}
+
+.tint-0 { background: linear-gradient(160deg, #3c6ebd, #1c3a70); }
+.tint-1 { background: linear-gradient(160deg, #c64600, #6b2400); }
+.tint-2 { background: linear-gradient(160deg, #26a269, #10502f); }
+.tint-3 { background: linear-gradient(160deg, #813d9c, #3e1a4d); }
+.tint-4 { background: linear-gradient(160deg, #a51d2d, #4d0a12); }
+.tint-5 { background: linear-gradient(160deg, #5e5c64, #241f31); }
+
+.card-name {
+  font-weight: 700;
+}
+
+/* Play shows on the card under the pointer or with keyboard focus. */
+.play-button {
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+  min-width: 48px;
+  min-height: 48px;
+}
+
+flowboxchild:hover .play-button,
+flowboxchild:focus-within .play-button {
+  opacity: 1;
+}

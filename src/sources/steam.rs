@@ -69,11 +69,30 @@ pub fn apps(home: &Home) -> Vec<Entry> {
                 let mut e = Entry::new(Source::Steam, name);
                 e.folder = Some(folder);
                 e.keys.push(Key::SteamApp(appid));
+                e.cover = Some(library_art(&root, appid));
                 entries.push(e);
             }
         }
     }
     entries
+}
+
+/// Steam's portrait art for an app it has shown: `appcache/librarycache/<appid>/` or a folder
+/// inside it (newer clients call it library_capsule.jpg), else the same art on Steam's CDN.
+fn library_art(root: &Path, appid: u32) -> String {
+    let dir = root.join("appcache/librarycache").join(appid.to_string());
+    let names = ["library_600x900.jpg", "library_capsule.jpg"];
+    let mut dirs = vec![dir.clone()];
+    dirs.extend(fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+    dirs.iter()
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
+        .find(|p| p.is_file())
+        .map_or_else(|| format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg"), |p| p.display().to_string())
+}
+
+/// Art a user picked for a non-Steam game in Steam: `config/grid/<id>p.png` (portrait).
+fn grid_art(user: &Path, id: u32) -> Option<PathBuf> {
+    ["png", "jpg", "jpeg", "webp"].iter().map(|ext| user.join("config/grid").join(format!("{id}p.{ext}"))).find(|p| p.is_file())
 }
 
 fn text(node: &steam::Node) -> Option<String> {
@@ -97,7 +116,9 @@ pub fn shortcuts(home: &Home) -> Vec<Entry> {
                 let mut e = Entry::new(Source::SteamShortcut, name);
                 if let Some(steam::Node::Int(id)) = field("appid") {
                     e.keys.push(Key::SteamShortcut(*id));
+                    e.cover = grid_art(&user.path(), *id).map(|p| p.display().to_string());
                 }
+                e.icon = field("icon").and_then(text).map(PathBuf::from).filter(|p| p.is_absolute());
                 let exe = field("Exe").and_then(text).unwrap_or_default();
                 let options = field("LaunchOptions").and_then(text).unwrap_or_default();
                 // A Lutris game added to Steam by Lutris: `lutris lutris:rungameid/2`.

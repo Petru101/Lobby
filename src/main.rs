@@ -5,12 +5,14 @@ mod launch;
 mod library;
 mod sources;
 mod store;
+mod ui;
 
 use library::{Game, Kind};
 use std::process::ExitCode;
 use store::Library;
 
-const USAGE: &str = "usage: lobby scan [--json]     look for games again and list them
+const USAGE: &str = "usage: lobby                   open the window
+       lobby scan [--json]     look for games again and list them
        lobby list [--json]     list the games found before (scans the first time)
        lobby play <game>       start a game, by its id or name
        lobby how <game>        say how lobby would start it, without starting it";
@@ -19,6 +21,12 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let json = args.iter().any(|a| a == "--json");
     let rest: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with("--")).map(String::as_str).collect();
+    if args.is_empty() {
+        return match ui::run() {
+            c if c == gtk::glib::ExitCode::SUCCESS => ExitCode::SUCCESS,
+            _ => ExitCode::FAILURE,
+        };
+    }
     let result = match (args.first().map(String::as_str), rest.as_slice()) {
         (Some("scan"), []) => scan().map(|lib| show(&lib, json)),
         (Some("list"), []) => Library::load().map_or_else(scan, Ok).map(|lib| show(&lib, json)),
@@ -35,10 +43,20 @@ fn main() -> ExitCode {
     }
 }
 
-fn scan() -> Result<Library, String> {
+pub fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Every game the sources find, merged (no saved library involved: safe off the main thread).
+pub fn find_games() -> Result<Vec<Game>, String> {
     let home = sources::Home::find().ok_or("lobby: no home folder")?;
     let found = sources::scan(&home);
-    let games = library::merge(found.entries, &found.roots);
+    Ok(library::merge(found.entries, &found.roots))
+}
+
+fn scan() -> Result<Library, String> {
+    let games = find_games()?;
     let mut lib = Library::load().unwrap_or_default();
     lib.update(games);
     lib.save()?;

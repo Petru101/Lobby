@@ -78,6 +78,12 @@ pub struct Entry {
     pub prefix: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<Key>,
+    /// Portrait cover art: a file, or a web address to fetch it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<String>,
+    /// A small icon, for games without a cover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
     /// Only says something about a game another entry found (gamefix's record of a shortcut it
     /// made): dropped when nothing else matches it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -86,7 +92,7 @@ pub struct Entry {
 
 impl Entry {
     pub fn new(source: Source, name: impl Into<String>) -> Entry {
-        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), annotation: false }
+        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), cover: None, icon: None, annotation: false }
     }
 }
 
@@ -136,6 +142,16 @@ impl Game {
 
     pub fn program(&self) -> Option<&Path> {
         self.installed_first().find_map(|e| e.program.as_deref())
+    }
+
+    /// Its cover: a file on disk first, else a web address.
+    pub fn cover(&self) -> Option<&str> {
+        let covers = || self.entries.iter().filter_map(|e| e.cover.as_deref());
+        covers().find(|c| c.starts_with('/') && Path::new(c).is_file()).or_else(|| covers().find(|c| c.starts_with("https://")))
+    }
+
+    pub fn icon(&self) -> Option<&Path> {
+        self.entries.iter().filter_map(|e| e.icon.as_deref()).find(|p| p.is_file())
     }
 }
 

@@ -14,6 +14,8 @@ pub fn games(home: &Home) -> Vec<Entry> {
             e.program = str_of(&g, "path").map(PathBuf::from);
             e.prefix = str_of(&g, "prefix").map(PathBuf::from);
             e.keys.extend(str_of(&g, "gameid").map(|id| Key::Faugus(id.into())));
+            e.cover = str_of(&g, "cover").map(String::from);
+            e.icon = str_of(&g, "icon").map(PathBuf::from);
             entries.push(e);
         }
     }
