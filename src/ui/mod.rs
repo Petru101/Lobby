@@ -409,19 +409,10 @@ impl Ui {
             let installer = !file.extension().is_some_and(|e| ["zip", "rar", "7z", "gz", "tgz", "xz", "bz2"].contains(&e.to_string_lossy().to_lowercase().as_str()));
             self.toast(&if installer { format!("Installing {}: its installer opens in a moment; click through it.", game.name) } else { format!("Unpacking {}…", game.name) });
         }
-        let progress = Arc::new(Mutex::new(-1.0));
-        self.installing.borrow_mut().push((game.id.clone(), progress.clone()));
-        self.fill();
-        let u = self.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
-            u.show_progress();
-            if u.installing.borrow().is_empty() { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
-        });
         let u = self.clone();
         glib::spawn_future_local(async move {
             let g = game.clone();
-            let result = gio::spawn_blocking(move || crate::install::install(&g, &|p| *progress.lock().unwrap() = p)).await.unwrap_or_else(|_| Err("The install stopped with an error.".into()));
-            u.installing.borrow_mut().retain(|(i, _)| i != &game.id);
+            let result = u.with_progress(&game.id, move |p| crate::install::install(&g, p)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
             if result.is_err() {
                 u.fill();
             }
@@ -440,6 +431,101 @@ impl Ui {
                 }
                 Err(e) => u.alert(&format!("{} couldn't be installed", game.name), &e),
             }
+        });
+    }
+
+    /// A game's DLC on its page, for games lobby installed from a store: what the account owns,
+    /// installed or with an Install button. Looked up when the page opens (GOG asks the store);
+    /// hidden when there's none.
+    fn fill_dlc(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup, dialog: &adw::Dialog) {
+        let Some((store, sid)) = crate::stores::installed_in(game) else {
+            group.set_visible(false);
+            return;
+        };
+        let looking = adw::ActionRow::builder().title("Looking for DLC you own…").build();
+        looking.add_suffix(&adw::Spinner::new());
+        group.add(&looking);
+        let (u, group, dialog, id) = (self.clone(), group.clone(), dialog.clone(), game.id.clone());
+        glib::spawn_future_local(async move {
+            let found = gio::spawn_blocking(move || store.dlc(&sid)).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+            group.remove(&looking);
+            match found {
+                Ok(list) if list.is_empty() => group.set_visible(false),
+                Ok(list) => {
+                    for d in list {
+                        let row = adw::ActionRow::builder().title(&d.title).build();
+                        if d.installed {
+                            let label = gtk::Label::new(Some("Installed"));
+                            label.add_css_class("dim-label");
+                            row.add_suffix(&label);
+                        } else {
+                            let button = gtk::Button::builder().label("Install").valign(gtk::Align::Center).build();
+                            let (u, dialog, id) = (u.clone(), dialog.clone(), id.clone());
+                            button.connect_clicked(move |_| {
+                                dialog.close();
+                                u.install_dlc(&id, d.clone());
+                            });
+                            row.add_suffix(&button);
+                        }
+                        group.add(&row);
+                    }
+                }
+                Err(e) => group.add(&adw::ActionRow::builder().title("Couldn't look for DLC").subtitle(e.as_str()).build()),
+            }
+        });
+    }
+
+    /// Runs a long job for a game off the main thread (an install, an update, DLC), its card
+    /// showing how far it is meanwhile. None: the job stopped with an error.
+    async fn with_progress<T: Send + 'static>(self: &Rc<Self>, id: &str, task: impl FnOnce(&dyn Fn(f64)) -> T + Send + 'static) -> Option<T> {
+        let progress = Arc::new(Mutex::new(-1.0));
+        self.installing.borrow_mut().push((id.to_string(), progress.clone()));
+        self.fill();
+        let u = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+            u.show_progress();
+            if u.installing.borrow().is_empty() { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        });
+        let result = gio::spawn_blocking(move || task(&|p| *progress.lock().unwrap() = p)).await.ok();
+        self.installing.borrow_mut().retain(|(i, _)| i != id);
+        result
+    }
+
+    /// Downloads the store's newer version of a game lobby installed.
+    fn update(self: &Rc<Self>, id: &str) {
+        let Some(game) = self.game(id) else { return };
+        let Some((store, sid)) = crate::stores::installed_in(&game) else { return };
+        if self.is_installing(&game.id) {
+            return;
+        }
+        self.toast(&format!("Updating {}…", game.name));
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            match u.with_progress(&game.id, move |p| store.update(&sid, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
+                Ok(()) => u.toast(&format!("{} is up to date.", game.name)),
+                Err(e) => u.alert(&format!("{} couldn't be updated", game.name), &e),
+            }
+            u.rescan();
+        });
+    }
+
+    /// Downloads DLC the account owns into a game lobby installed.
+    fn install_dlc(self: &Rc<Self>, id: &str, dlc: crate::stores::Dlc) {
+        let Some(game) = self.game(id) else { return };
+        let Some((store, sid)) = crate::stores::installed_in(&game) else { return };
+        if self.is_installing(&game.id) {
+            self.toast(&format!("{} is busy downloading: try again when it's done.", game.name));
+            return;
+        }
+        self.toast(&format!("Downloading {}…", dlc.title));
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let ids = vec![dlc.id.clone()];
+            match u.with_progress(&game.id, move |p| store.install_dlc(&sid, &ids, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
+                Ok(()) => u.toast(&format!("{} is installed.", dlc.title)),
+                Err(e) => u.alert(&format!("{} couldn't be installed", dlc.title), &e),
+            }
+            u.fill();
         });
     }
 
@@ -638,6 +724,12 @@ impl Ui {
         play.set_sensitive(download || !matches!(plan, Plan::Cannot(_)));
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).margin_top(12).build();
         buttons.append(&play);
+        let update = game.update().map(|_| {
+            let b = gtk::Button::builder().label("Update").tooltip_text("Download the store's newer version").build();
+            b.add_css_class("pill");
+            buttons.append(&b);
+            b
+        });
         let change = gtk::Button::builder().label("Change cover").build();
         change.add_css_class("pill");
         buttons.append(&change);
@@ -658,6 +750,9 @@ impl Ui {
             r.add_css_class("property");
             info.add(&r);
         };
+        if let Some(version) = game.update() {
+            row("Update", &if version.is_empty() { "A newer version is ready to download.".to_string() } else { format!("Version {version} is ready to download.") });
+        }
         row("How it starts", &plan.describe());
         if let Some(p) = game.program() {
             row(if download { "Download" } else { "Program" }, &p.display().to_string());
@@ -691,6 +786,8 @@ impl Ui {
             content.append(&row);
         }
         content.append(&info);
+        let dlc = adw::PreferencesGroup::builder().title("DLC").build();
+        content.append(&dlc);
 
         let view = adw::ToolbarView::new();
         view.add_top_bar(&adw::HeaderBar::new());
@@ -707,6 +804,14 @@ impl Ui {
         let d = dialog.clone();
         let id = game.id.clone();
         change.connect_clicked(move |_| u.choose_cover(&id, &d));
+        if let Some(update) = update {
+            let (u, d, id) = (self.clone(), dialog.clone(), game.id.clone());
+            update.connect_clicked(move |_| {
+                d.close();
+                u.update(&id);
+            });
+        }
+        self.fill_dlc(&game, &dlc, &dialog);
         if self.is_just_installed(&game.id) {
             let u = self.clone();
             dialog.connect_closed(move |_| {
@@ -969,6 +1074,11 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
         ui.bars.borrow_mut().push((g.id.clone(), bar));
     }
     let just_installed = ui.is_just_installed(&g.id);
+    if g.update().is_some() && !just_installed {
+        let badge = gtk::Label::builder().label("Update").halign(gtk::Align::Start).valign(gtk::Align::Start).margin_start(10).margin_top(10).tooltip_text("A newer version is ready to download: open the game's page").build();
+        badge.add_css_class("update-badge");
+        cover.add_overlay(&badge);
+    }
     if just_installed {
         let badge = gtk::Label::builder().label("Installed").halign(gtk::Align::Start).valign(gtk::Align::Start).margin_start(10).margin_top(10).build();
         badge.add_css_class("installed-badge");

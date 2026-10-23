@@ -1,7 +1,7 @@
 //! Epic Games through legendary, with its config in ~/.config/lobby/legendary
 //! (LEGENDARY_CONFIG_PATH): lobby's sign-in, lobby's installs.
 
-use super::{config_dir, output, read_json, run_with_progress, tools, Installed, Owned};
+use super::{config_dir, csv_fields, output, read_json, run_with_progress, tools, Dlc, Installed, Owned, Update};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,10 +49,18 @@ pub fn owned() -> Result<Vec<Owned>, String> {
     };
     let text = list().or_else(|_| list()).map_err(|e| format!("Epic didn't send the list of your games: {e}"))?;
     let list: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("legendary list: {e}"))?;
-    Ok(parse_owned(&list))
+    Ok(parse_owned(&list, &saved_items()))
 }
 
-fn parse_owned(list: &serde_json::Value) -> Vec<Owned> {
+/// Every item legendary has details of (metadata/<app>.json, one per owned item, DLC too:
+/// its list leaves DLC out).
+fn saved_items() -> Vec<serde_json::Value> {
+    std::fs::read_dir(config().join("metadata")).into_iter().flatten().flatten().filter_map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok()).collect()
+}
+
+/// Games, with the DLC owned for each: add-ons naming their game
+/// (metadata.mainGameItem.releaseInfo[].appId), among all the items owned.
+fn parse_owned(list: &serde_json::Value, items: &[serde_json::Value]) -> Vec<Owned> {
     let mut games: Vec<Owned> = list
         .as_array()
         .into_iter()
@@ -63,7 +71,8 @@ fn parse_owned(list: &serde_json::Value) -> Vec<Owned> {
             let title = g.get("app_title")?.as_str()?.to_string();
             let images = g.get("metadata").and_then(|m| m.get("keyImages")).and_then(|k| k.as_array());
             let image = |kind: &str| images.into_iter().flatten().find(|i| i.get("type").and_then(|t| t.as_str()) == Some(kind)).and_then(|i| i.get("url")?.as_str().map(String::from));
-            Some(Owned { id, title, cover: image("DieselGameBoxTall").or_else(|| image("Thumbnail")), installable: Some(true) })
+            let dlc = items.iter().filter(|d| main_game(d).as_deref() == Some(id.as_str())).filter_map(|d| Some(Dlc { id: d.get("app_name")?.as_str()?.to_string(), title: d.get("app_title")?.as_str()?.to_string(), installed: false })).collect();
+            Some(Owned { id, title, cover: image("DieselGameBoxTall").or_else(|| image("Thumbnail")), installable: Some(true), dlc })
         })
         .collect();
     games.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
@@ -78,6 +87,15 @@ fn is_game(item: &serde_json::Value) -> bool {
     categories.contains(&"games") && !categories.contains(&"addons")
 }
 
+/// The game an add-on belongs to (its app name), for add-ons with something to install.
+fn main_game(item: &serde_json::Value) -> Option<String> {
+    let categories: Vec<&str> = item.get("metadata")?.get("categories")?.as_array()?.iter().filter_map(|c| c.get("path")?.as_str()).collect();
+    if !categories.contains(&"addons") || item.get("asset_infos").and_then(|a| a.get("Windows")).is_none() {
+        return None;
+    }
+    item.get("metadata")?.get("mainGameItem")?.get("releaseInfo")?.as_array()?.iter().find_map(|r| r.get("appId")?.as_str().map(String::from))
+}
+
 /// legendary's installed.json: app name to what it installed.
 fn installed_json() -> BTreeMap<String, serde_json::Value> {
     read_json(&config().join("installed.json"))
@@ -90,7 +108,7 @@ pub fn installed() -> Vec<Installed> {
         .filter_map(|(id, g)| {
             let folder = PathBuf::from(g.get("install_path")?.as_str()?);
             let program = g.get("executable").and_then(|x| x.as_str()).filter(|x| !x.is_empty()).map(|x| folder.join(x.replace('\\', "/").trim_start_matches('/')));
-            Some(Installed { title: g.get("title").and_then(|t| t.as_str()).unwrap_or(&id).to_string(), id, folder, program })
+            Some(Installed { title: g.get("title").and_then(|t| t.as_str()).unwrap_or(&id).to_string(), id, folder, program, build: None })
         })
         .collect()
 }
@@ -106,6 +124,49 @@ pub fn install(app: &str, games: &Path, progress: &dyn Fn(f64)) -> Result<PathBu
     }
     run_with_progress(command, progress).map_err(|e| format!("Epic's download stopped: {e}"))?;
     installed().into_iter().find(|g| g.id == app).map(|g| g.folder).ok_or_else(|| "legendary finished, but the game isn't in its list of installed games.".into())
+}
+
+/// Lobby's installed games with a newer version on Epic (legendary compares each install's
+/// version with Epic's latest build).
+pub fn check_updates() -> Result<Vec<Update>, String> {
+    let mut command = legendary()?;
+    command.args(["list-installed", "--check-updates", "--csv"]);
+    let text = output(command).map_err(|e| format!("Epic didn't say which games have updates: {e}"))?;
+    let games: Vec<String> = installed().into_iter().map(|g| g.id).collect();
+    Ok(parse_updates(&text, &games))
+}
+
+/// legendary's CSV: app name, title, installed version, available version, update available...
+fn parse_updates(csv: &str, games: &[String]) -> Vec<Update> {
+    csv.lines()
+        .skip(1)
+        .map(csv_fields)
+        .filter(|f| f.len() >= 5 && f[4] == "True" && games.contains(&f[0]))
+        .map(|f| Update { id: f[0].clone(), from: f[2].clone(), to: f[3].clone() })
+        .collect()
+}
+
+pub fn update(app: &str, progress: &dyn Fn(f64)) -> Result<(), String> {
+    let mut command = legendary()?;
+    command.args(["-y", "install", app, "--update-only", "--with-dlcs", "--skip-sdl"]);
+    run_with_progress(command, progress).map_err(|e| format!("Epic's update stopped: {e}"))
+}
+
+/// The DLC owned for a game, from the owned list; installed when legendary has it installed.
+pub fn dlc(app: &str) -> Vec<Dlc> {
+    let installed = installed_json();
+    let owned = super::owned(super::Store::Epic).into_iter().find(|o| o.id == app).map(|o| o.dlc).unwrap_or_default();
+    owned.into_iter().map(|d| Dlc { installed: installed.contains_key(&d.id), ..d }).collect()
+}
+
+/// legendary installs a DLC into its game's folder.
+pub fn install_dlc(dlc: &[String], progress: &dyn Fn(f64)) -> Result<(), String> {
+    for id in dlc {
+        let mut command = legendary()?;
+        command.args(["-y", "install", id, "--skip-sdl"]);
+        run_with_progress(command, progress).map_err(|e| format!("Epic's download stopped: {e}"))?;
+    }
+    Ok(())
 }
 
 /// How a game lobby installed starts: legendary signs it in to Epic (the arguments Epic's
@@ -132,11 +193,22 @@ mod tests {
             {"app_name": "abc", "app_title": "another game", "metadata": {"categories": [{"path": "applications"}, {"path": "games"}, {"path": "public"}]}},
             {"app_name": "acf", "app_title": "Ascent Combat Framework", "metadata": {"categories": [{"path": "asset-format"}, {"path": "plugins"}]}},
             {"app_name": "lego", "app_title": "LEGO Fortnite: Odyssey", "metadata": {"categories": [{"path": "addons"}, {"path": "addons/launchable"}, {"path": "games"}]}},
-            {"app_name": "kenney", "app_title": "Kenney Shape", "metadata": {"categories": [{"path": "applications"}, {"path": "software"}]}}
+            {"app_name": "kenney", "app_title": "Kenney Shape", "metadata": {"categories": [{"path": "applications"}, {"path": "software"}]}},
+            {"app_name": "dlc1", "app_title": "Fall Guys: Pack", "asset_infos": {"Windows": {}}, "metadata": {"categories": [{"path": "addons"}], "mainGameItem": {"releaseInfo": [{"appId": "Fang"}]}}}
         ]);
-        let games = parse_owned(&list);
+        let games = parse_owned(&list, list.as_array().unwrap());
         assert_eq!(games.len(), 2);
-        assert_eq!(games[0], Owned { id: "abc".into(), title: "another game".into(), cover: None, installable: Some(true) });
+        assert_eq!(games[0], Owned { id: "abc".into(), title: "another game".into(), cover: None, installable: Some(true), dlc: vec![] });
         assert_eq!(games[1].cover.as_deref(), Some("https://x/tall.jpg"));
+        assert_eq!(games[1].dlc, [Dlc { id: "dlc1".into(), title: "Fall Guys: Pack".into(), installed: false }]);
+    }
+
+    #[test]
+    fn updates() {
+        let csv = "App name,App title,Installed version,Available version,Update available,Install size,Install path,Platform\n\
+                   a,\"Game, The\",1.0,1.1,True,10,/g/a,Windows\n\
+                   b,B,2.0,2.0,False,10,/g/b,Windows\n\
+                   c,Not ours,1,2,True,1,/g/c,Windows\n";
+        assert_eq!(parse_updates(csv, &["a".into(), "b".into()]), [Update { id: "a".into(), from: "1.0".into(), to: "1.1".into() }]);
     }
 }

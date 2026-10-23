@@ -21,7 +21,9 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby play <game>       start a game, by its id or name
        lobby how <game>        say how lobby would start it, without starting it
        lobby install <game>    install a download, or a game you own on Epic or GOG
-       lobby accounts          the stores lobby is signed in to (sign in from the window)";
+       lobby accounts          the stores lobby is signed in to (sign in from the window)
+       lobby update [<game>]   which of lobby's store installs have updates; update one
+       lobby dlc <game> [<dlc>]  the DLC you own for a game lobby installed; install one";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,6 +42,9 @@ fn main() -> ExitCode {
         (Some("how"), words) if !words.is_empty() => how(&words.join(" ")),
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
+        (Some("update"), []) => check_updates(),
+        (Some("update"), words) => update(&words.join(" ")),
+        (Some("dlc"), [game, name @ ..]) => dlc(game, &name.join(" ")),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -148,6 +153,63 @@ fn how(query: &str) -> Result<(), String> {
     for warning in drives::warnings(game, &drives::mounts()) {
         println!("\nWarning: {warning}");
     }
+    Ok(())
+}
+
+/// Prints a store job's progress every 5%.
+fn progress_printer() -> impl Fn(f64) {
+    let shown = std::cell::Cell::new(-1);
+    move |p| {
+        if p as i32 / 5 != shown.get() {
+            shown.set(p as i32 / 5);
+            println!("  {p:.0}%");
+        }
+    }
+}
+
+fn check_updates() -> Result<(), String> {
+    for store in stores::Store::ALL.into_iter().filter(|s| s.account().is_some()) {
+        let names = store.installed();
+        let found = store.check_updates()?;
+        for u in &found {
+            let title = names.iter().find(|g| g.id == u.id).map_or(u.id.as_str(), |g| g.title.as_str());
+            println!("{}: {title} {} → {}", store.name(), u.from, u.to);
+        }
+        if found.is_empty() {
+            println!("{}: everything lobby installed is up to date", store.name());
+        }
+    }
+    scan().map(|_| ())
+}
+
+fn update(query: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    let (store, id) = stores::installed_in(&game).ok_or_else(|| format!("{} wasn't installed by lobby from a store.", game.name))?;
+    println!("Updating {}…", game.name);
+    store.update(&id, &progress_printer())?;
+    println!("{} is up to date.", game.name);
+    scan().map(|_| ())
+}
+
+fn dlc(query: &str, name: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    let (store, id) = stores::installed_in(&game).ok_or_else(|| format!("{} wasn't installed by lobby from a store.", game.name))?;
+    let list = store.dlc(&id)?;
+    if name.is_empty() {
+        for d in &list {
+            println!("  {}{}", d.title, if d.installed { "  (installed)" } else { "" });
+        }
+        if list.is_empty() {
+            println!("You own no DLC for {}.", game.name);
+        }
+        return Ok(());
+    }
+    let wanted = list.iter().find(|d| d.title.to_lowercase().contains(&name.to_lowercase())).ok_or_else(|| format!("No DLC you own for {} is called {name}.", game.name))?;
+    println!("Installing {}…", wanted.title);
+    store.install_dlc(&id, std::slice::from_ref(&wanted.id), &progress_printer())?;
+    println!("{} is installed.", wanted.title);
     Ok(())
 }
 

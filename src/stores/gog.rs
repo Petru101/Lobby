@@ -1,8 +1,10 @@
 //! GOG through gogdl, with its tokens in ~/.config/lobby/gogdl/auth.json: lobby's sign-in.
 //! gogdl downloads; the owned list comes from GOG's own web API, and lobby keeps its own
-//! record of what it installed (~/.local/share/lobby/gog-installed.json).
+//! record of what it installed (~/.local/share/lobby/gog-installed.json). gogdl's own files
+//! (each install's manifest, which updates patch from) go in ~/.config/lobby/heroic_gogdl
+//! (GOGDL_CONFIG_PATH), not the ~/.config/heroic_gogdl it uses by default.
 
-use super::{config_dir, get_json, output, read_json, run_with_progress, tools, Installed, Owned};
+use super::{config_dir, config_home, get_json, output, read_json, run_with_progress, tools, Dlc, Installed, Owned, Update};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,7 +27,7 @@ fn installed_file() -> PathBuf {
 
 fn gogdl() -> Result<Command, String> {
     let mut command = Command::new(tools::GOGDL.path()?);
-    command.arg("--auth-config-path").arg(auth_file());
+    command.env("GOGDL_CONFIG_PATH", config_home().join("lobby")).arg("--auth-config-path").arg(auth_file());
     Ok(command)
 }
 
@@ -78,7 +80,7 @@ pub fn owned(old: &[Owned]) -> Result<Vec<Owned>, String> {
             let before = old.iter().find(|o| o.id == id);
             let cover = before.and_then(|o| o.cover.clone());
             let wide = p.get("image").and_then(|i| i.as_str()).filter(|i| !i.is_empty()).map(|i| format!("https:{i}_784.jpg"));
-            games.push((Owned { id, title: title.to_string(), cover, installable: before.and_then(|o| o.installable) }, wide));
+            games.push((Owned { id, title: title.to_string(), cover, installable: before.and_then(|o| o.installable), dlc: Vec::new() }, wide));
         }
         let pages = v.get("totalPages").and_then(|t| t.as_u64()).unwrap_or(1);
         if page >= pages {
@@ -119,11 +121,111 @@ pub fn installed() -> Vec<Installed> {
     read_json(&installed_file())
 }
 
-/// Installs the Windows version with every owned DLC, in English when the game has it.
-pub fn install(id: &str, games: &Path, progress: &dyn Fn(f64)) -> Result<PathBuf, String> {
+/// What GOG says about a game's latest Windows build: folder_name, buildId, versionName,
+/// languages, dlcs (owned, with an id and title each), builds, dependencies.
+fn info(id: &str) -> Result<serde_json::Value, String> {
     let mut command = gogdl()?;
     command.args(["info", id, "--os", "windows"]);
-    let info: serde_json::Value = serde_json::from_str(output(command)?.lines().last().unwrap_or_default()).map_err(|e| format!("gogdl info: {e}"))?;
+    serde_json::from_str(output(command)?.lines().last().unwrap_or_default()).map_err(|e| format!("gogdl info: {e}"))
+}
+
+/// An installed GOG game's own record of itself (goggame-<id>.info in its folder): the build
+/// installed and its languages. A DLC's installed has one too.
+fn game_info(folder: &Path, id: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(&fs::read_to_string(folder.join(format!("goggame-{id}.info"))).ok()?).ok()
+}
+
+/// gogdl's record of an install (the manifest it saved, which its updates patch from): the
+/// build installed (buildId) and the DLC installed with it (HGLdlcs).
+fn manifest(id: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(&fs::read_to_string(config_home().join("lobby/heroic_gogdl/manifests").join(id)).ok()?).ok()
+}
+
+/// The build installed: lobby's record, else gogdl's, else the game's own .info.
+fn installed_build(g: &Installed) -> Option<String> {
+    g.build.clone().or_else(|| manifest(&g.id).or_else(|| game_info(&g.folder, &g.id)).and_then(|i| i.get("buildId")?.as_str().map(String::from)))
+}
+
+/// Saves lobby's record of its GOG installs, with `g` added or replacing its earlier self.
+fn record(g: Installed) -> Result<(), String> {
+    let mut list = installed();
+    list.retain(|o| o.id != g.id);
+    list.push(g);
+    fs::create_dir_all(installed_file().parent().unwrap()).map_err(|e| e.to_string())?;
+    fs::write(installed_file(), serde_json::to_string_pretty(&list).unwrap()).map_err(|e| e.to_string())
+}
+
+fn language(folder: &Path, id: &str) -> String {
+    game_info(folder, id).and_then(|i| i.get("languages")?.as_array()?.first()?.as_str().map(String::from)).unwrap_or_else(|| "en-US".into())
+}
+
+/// Lobby's installs whose build isn't GOG's latest.
+pub fn check_updates() -> Result<Vec<Update>, String> {
+    let mut found = Vec::new();
+    for g in installed() {
+        let Some(have) = installed_build(&g) else { continue };
+        let latest = info(&g.id).map_err(|e| format!("GOG didn't say whether {} has an update: {e}", g.title))?;
+        let Some(newest) = latest.get("buildId").and_then(|b| b.as_str()) else { continue };
+        if newest != have {
+            let builds = latest.get("builds").and_then(|b| b.get("items")).and_then(|i| i.as_array()).cloned().unwrap_or_default();
+            let from = builds.iter().find(|b| b.get("build_id").and_then(|i| i.as_str()) == Some(&have)).and_then(|b| b.get("version_name")?.as_str()).unwrap_or_default();
+            let to = latest.get("versionName").and_then(|v| v.as_str()).unwrap_or_default();
+            found.push(Update { id: g.id, from: from.to_string(), to: to.to_string() });
+        }
+    }
+    Ok(found)
+}
+
+/// gogdl's update patches the folder from its saved manifest to the latest build, with the
+/// installed DLC (and `more` DLC, to add some).
+fn update_with(id: &str, folder: &Path, more: &[String], progress: &dyn Fn(f64)) -> Result<(), String> {
+    let mut dlc: Vec<String> = dlc(id, folder).unwrap_or_default().into_iter().filter(|d| d.installed).map(|d| d.id).collect();
+    dlc.extend(more.iter().cloned());
+    let mut command = gogdl()?;
+    command.args(["update", id, "--platform", "windows", "--lang", &language(folder, id), "--path"]).arg(folder);
+    if !dlc.is_empty() {
+        command.args(["--with-dlcs", "--dlcs", &dlc.join(",")]);
+    }
+    run_with_progress(command, progress).map_err(|e| format!("GOG's download stopped: {e}"))
+}
+
+/// Updates to the latest build, and records it as installed (gogdl leaves its own record as
+/// it was when the new build changed no files).
+pub fn update(id: &str, folder: &Path, progress: &dyn Fn(f64)) -> Result<(), String> {
+    let latest = info(id)?.get("buildId").and_then(|b| b.as_str()).map(String::from);
+    update_with(id, folder, &[], progress)?;
+    match installed().into_iter().find(|g| g.id == id) {
+        Some(g) => record(Installed { build: latest, ..g }),
+        None => Ok(()),
+    }
+}
+
+/// The DLC the account owns for the game (from GOG), installed when gogdl's record has it or
+/// its .info is in the folder.
+pub fn dlc(id: &str, folder: &Path) -> Result<Vec<Dlc>, String> {
+    let info = info(id)?;
+    let recorded: Vec<String> = manifest(id).and_then(|m| m.get("HGLdlcs").cloned()).and_then(|d| d.as_array().cloned()).unwrap_or_default().iter().filter_map(|d| d.get("id").map(|i| i.as_str().map(String::from).unwrap_or_else(|| i.to_string()))).collect();
+    Ok(info
+        .get("dlcs")
+        .and_then(|d| d.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|d| {
+            let id = d.get("id").map(|i| i.as_str().map(String::from).unwrap_or_else(|| i.to_string()))?;
+            let title = d.get("title")?.as_str()?.to_string();
+            Some(Dlc { installed: recorded.contains(&id) || folder.join(format!("goggame-{id}.info")).is_file(), id, title })
+        })
+        .collect())
+}
+
+pub fn install_dlc(id: &str, more: &[String], progress: &dyn Fn(f64)) -> Result<(), String> {
+    let folder = installed().into_iter().find(|g| g.id == id).map(|g| g.folder).ok_or("Lobby didn't install this game.")?;
+    update_with(id, &folder, more, progress)
+}
+
+/// Installs the Windows version with every owned DLC, in English when the game has it.
+pub fn install(id: &str, games: &Path, progress: &dyn Fn(f64)) -> Result<PathBuf, String> {
+    let info = info(id)?;
     let folder_name = info.get("folder_name").and_then(|f| f.as_str()).ok_or("GOG didn't say what the game's folder is called.")?;
     let languages: Vec<&str> = info.get("languages").and_then(|l| l.as_array()).into_iter().flatten().filter_map(|l| l.as_str()).collect();
     let lang = ["en-US", "en"].into_iter().find(|l| languages.contains(l)).or(languages.first().copied()).unwrap_or("en-US");
@@ -136,10 +238,7 @@ pub fn install(id: &str, games: &Path, progress: &dyn Fn(f64)) -> Result<PathBuf
     }
     let title = super::owned(super::Store::Gog).into_iter().find(|o| o.id == id).map(|o| o.title).unwrap_or_else(|| folder_name.to_string());
     let program = gamefix::gog::read(&folder).map(|i| i.program);
-    let mut list = installed();
-    list.retain(|g| g.id != id);
-    list.push(Installed { id: id.to_string(), title, folder: folder.clone(), program });
-    fs::create_dir_all(installed_file().parent().unwrap()).map_err(|e| e.to_string())?;
-    fs::write(installed_file(), serde_json::to_string_pretty(&list).unwrap()).map_err(|e| e.to_string())?;
+    let build = info.get("buildId").and_then(|b| b.as_str()).map(String::from);
+    record(Installed { id: id.to_string(), title, folder: folder.clone(), program, build })?;
     Ok(folder)
 }

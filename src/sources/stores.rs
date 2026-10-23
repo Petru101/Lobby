@@ -10,12 +10,14 @@ pub fn games() -> Vec<Entry> {
     for store in Store::ALL {
         let owned = stores::owned(store);
         let installed = store.installed();
+        let updates = stores::updates(store);
         for g in &installed {
             let mut e = Entry::new(store.source(), g.title.clone());
             e.folder = Some(g.folder.clone());
             e.program = g.program.clone();
             e.cover = owned.iter().find(|o| o.id == g.id).and_then(|o| o.cover.clone());
             e.keys.push(Key::Store(store.id().into(), g.id.clone()));
+            e.update = updates.iter().find(|u| u.id == g.id).map(|u| u.to.clone());
             entries.push(e);
         }
         if store.account().is_none() {

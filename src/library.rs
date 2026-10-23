@@ -96,6 +96,9 @@ pub struct Entry {
     pub prefix: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<Key>,
+    /// The store's newer version, when one is waiting to be installed (lobby's store installs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<String>,
     /// Portrait cover art: a file, or a web address to fetch it from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover: Option<String>,
@@ -113,7 +116,7 @@ pub struct Entry {
 
 impl Entry {
     pub fn new(source: Source, name: impl Into<String>) -> Entry {
-        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), cover: None, icon: None, note: None, annotation: false }
+        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), update: None, cover: None, icon: None, note: None, annotation: false }
     }
 }
 
@@ -169,6 +172,11 @@ impl Game {
     }
 
     /// Its cover: a file on disk first, else a web address.
+    /// The new version a store has for it, when there's one ("" when the store doesn't name it).
+    pub fn update(&self) -> Option<&str> {
+        self.entries.iter().find_map(|e| e.update.as_deref())
+    }
+
     pub fn cover(&self) -> Option<&str> {
         if let Some(c) = &self.chosen_cover {
             return Some(c);

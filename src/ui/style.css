@@ -81,3 +81,12 @@ flowboxchild.just-installed .play-button {
   border-radius: 8px;
   padding: 6px 8px;
 }
+
+/* A store install with a newer version waiting. */
+.update-badge {
+  background: @accent_bg_color;
+  color: @accent_fg_color;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 99px;
+}
