@@ -96,6 +96,13 @@ fn main_game(item: &serde_json::Value) -> Option<String> {
     item.get("metadata")?.get("mainGameItem")?.get("releaseInfo")?.as_array()?.iter().find_map(|r| r.get("appId")?.as_str().map(String::from))
 }
 
+/// Where the game keeps its saves, as Epic writes it ({AppData}/../LocalLow/...), when it has
+/// cloud saves.
+pub fn cloud_save_folder(app: &str) -> Option<String> {
+    let item: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(config().join("metadata").join(format!("{app}.json"))).ok()?).ok()?;
+    item.get("metadata")?.get("customAttributes")?.get("CloudSaveFolder")?.get("value")?.as_str().filter(|v| !v.is_empty()).map(String::from)
+}
+
 /// legendary's installed.json: app name to what it installed.
 fn installed_json() -> BTreeMap<String, serde_json::Value> {
     read_json(&config().join("installed.json"))
@@ -169,15 +176,33 @@ pub fn install_dlc(dlc: &[String], progress: &dyn Fn(f64)) -> Result<(), String>
     Ok(())
 }
 
-/// How a game lobby installed starts: legendary signs it in to Epic (the arguments Epic's
-/// launcher passes) and runs it through `wrapper` (umu-run with the game's prefix and Proton,
-/// from its gamefix entry), with `env` set.
-pub fn launch_command(app: &str, env: &[String], wrapper: &str) -> Vec<String> {
-    let legendary = tools::LEGENDARY.file();
-    let mut command = vec!["env".to_string(), format!("LEGENDARY_CONFIG_PATH={}", config().display())];
-    command.extend(env.iter().cloned());
-    command.extend([legendary.display().to_string(), "launch".into(), app.into(), "--no-wine".into(), "--wrapper".into(), wrapper.into()]);
-    command
+/// The game's program and arguments as Epic's launcher would start it, with Epic's sign-in
+/// (legendary's `launch --json`: an exchange code for games that sign in to Epic), the
+/// folder it runs in and the environment legendary adds. Offline when Epic can't be reached.
+pub fn game_command(app: &str) -> Result<(Vec<String>, Option<PathBuf>, Vec<(String, String)>), String> {
+    let launch = |offline: bool| {
+        let mut command = legendary()?;
+        command.args(["launch", app, "--json"]);
+        if offline {
+            command.arg("--offline");
+        }
+        output(command)
+    };
+    let text = launch(false).or_else(|_| launch(true)).map_err(|e| format!("legendary couldn't say how to start it: {e}"))?;
+    parse_launch(&text)
+}
+
+fn parse_launch(text: &str) -> Result<(Vec<String>, Option<PathBuf>, Vec<(String, String)>), String> {
+    let v: serde_json::Value = serde_json::from_str(text.trim()).map_err(|e| format!("legendary launch: {e}"))?;
+    let words = |key: &str| v.get(key).and_then(|a| a.as_array()).into_iter().flatten().filter_map(|w| w.as_str().map(String::from)).collect::<Vec<_>>();
+    let exe = v.get("game_executable").and_then(|e| e.as_str()).ok_or("legendary didn't name the game's program")?;
+    let mut command = vec![exe.to_string()];
+    command.extend(words("game_parameters"));
+    command.extend(words("egl_parameters"));
+    command.extend(words("user_parameters"));
+    let cwd = v.get("working_directory").and_then(|d| d.as_str()).filter(|d| !d.is_empty()).map(PathBuf::from);
+    let env = v.get("environment").and_then(|e| e.as_object()).into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
+    Ok((command, cwd, env))
 }
 
 #[cfg(test)]
@@ -201,6 +226,15 @@ mod tests {
         assert_eq!(games[0], Owned { id: "abc".into(), title: "another game".into(), cover: None, installable: Some(true), dlc: vec![] });
         assert_eq!(games[1].cover.as_deref(), Some("https://x/tall.jpg"));
         assert_eq!(games[1].dlc, [Dlc { id: "dlc1".into(), title: "Fall Guys: Pack".into(), installed: false }]);
+    }
+
+    #[test]
+    fn launch_json() {
+        let json = r#"{"game_parameters": ["-x"], "game_executable": "/g/Dredge/DREDGE.exe", "game_directory": "/g/Dredge", "egl_parameters": ["-AUTH_LOGIN=unused", "-epicapp=abc"], "launch_command": [], "working_directory": "/g/Dredge", "user_parameters": [], "environment": {"A": "1"}, "pre_launch_command": "", "pre_launch_wait": false}"#;
+        let (command, cwd, env) = parse_launch(json).unwrap();
+        assert_eq!(command, ["/g/Dredge/DREDGE.exe", "-x", "-AUTH_LOGIN=unused", "-epicapp=abc"]);
+        assert_eq!(cwd, Some(PathBuf::from("/g/Dredge")));
+        assert_eq!(env, [("A".to_string(), "1".to_string())]);
     }
 
     #[test]

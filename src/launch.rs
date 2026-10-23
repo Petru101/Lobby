@@ -36,7 +36,7 @@ pub fn plan(game: &Game) -> Plan {
     if let Some(id) = keys().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None }) {
         return run("Steam", vec!["steam".into(), format!("steam://rungameid/{id}")], None);
     }
-    if let Some(p) = epic_plan(game) {
+    if let Some(p) = store_plan(game) {
         return p;
     }
     if let Some(p) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(desktop_plan) {
@@ -148,25 +148,40 @@ fn proton_of(prefix: &Path) -> Option<PathBuf> {
     })
 }
 
-/// An Epic game lobby installed: legendary signs it in to Epic and starts it through umu-run
-/// with what its gamefix entry runs it with (prefix, Proton, fixes).
-fn epic_plan(game: &Game) -> Option<Plan> {
-    let app = game.entries.iter().filter(|e| e.source == Source::Epic).flat_map(|e| e.keys.iter()).find_map(|k| match k {
-        Key::Store(s, app) if s == "epic" => Some(app.clone()),
-        _ => None,
-    })?;
-    let ours = crate::stores::epic::installed().into_iter().find(|g| g.id == app)?;
-    let Some((words, _)) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(|e| {
+/// A game lobby installed from a store starts through `lobby run`, which syncs its cloud saves
+/// around playing and (Epic) passes Epic's sign-in; the game itself runs as its gamefix entry
+/// runs it (prefix, Proton, fixes).
+fn store_plan(game: &Game) -> Option<Plan> {
+    let (store, _) = crate::stores::installed_in(game)?;
+    let folder = game.entries.iter().find(|e| e.source == store.source()).and_then(|e| e.folder.clone())?;
+    if gamefix_command(game).is_none() {
+        return Some(Plan::SetUp(folder));
+    }
+    let lobby = std::env::current_exe().map_or_else(|_| "lobby".to_string(), |p| p.display().to_string());
+    let how = match store {
+        crate::stores::Store::Epic => "Lobby (Epic's sign-in and cloud saves) and its gamefix setup",
+        crate::stores::Store::Gog => "Lobby (GOG cloud saves) and its gamefix setup",
+    };
+    Some(run(how, vec![lobby, "run".into(), game.id.clone()], Some(folder)))
+}
+
+/// What a game's gamefix entry runs, split: the environment it sets (NAME=value words),
+/// umu-run, then the program and its arguments; and the folder it runs in.
+pub fn gamefix_command(game: &Game) -> Option<GamefixCommand> {
+    let (words, cwd) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(|e| {
         let file = e.keys.iter().find_map(|k| if let Key::Desktop(p) = k { Some(p) } else { None })?;
         desktop_exec(&fs::read_to_string(file).ok()?)
-    }) else {
-        return Some(Plan::SetUp(ours.folder));
-    };
-    // env NAME=value ... /usr/bin/umu-run <program> <args>
+    })?;
     let umu = words.iter().position(|w| w.ends_with("umu-run"))?;
     let env = if words[0] == "env" { words[1..umu].to_vec() } else { Vec::new() };
-    let command = crate::stores::epic::launch_command(&app, &env, &words[umu]);
-    Some(run("Epic Games (legendary), through its gamefix setup", command, Some(ours.folder)))
+    Some(GamefixCommand { env, umu: words[umu].clone(), program: words[umu + 1..].to_vec(), cwd })
+}
+
+pub struct GamefixCommand {
+    pub env: Vec<String>,
+    pub umu: String,
+    pub program: Vec<String>,
+    pub cwd: Option<PathBuf>,
 }
 
 fn desktop_plan(e: &Entry) -> Option<Plan> {

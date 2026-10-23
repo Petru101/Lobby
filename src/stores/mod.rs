@@ -5,6 +5,7 @@
 
 pub mod epic;
 pub mod gog;
+pub mod saves;
 pub mod tools;
 
 use serde::{Deserialize, Serialize};
@@ -244,7 +245,7 @@ fn config_dir(tool: &str) -> PathBuf {
     config_home().join("lobby").join(tool)
 }
 
-fn cache_dir() -> PathBuf {
+pub(crate) fn cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")).join("lobby")
 }
 

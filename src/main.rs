@@ -6,6 +6,7 @@ mod drives;
 mod install;
 mod launch;
 mod library;
+mod run;
 mod sources;
 mod store;
 mod stores;
@@ -23,7 +24,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby install <game>    install a download, or a game you own on Epic or GOG
        lobby accounts          the stores lobby is signed in to (sign in from the window)
        lobby update [<game>]   which of lobby's store installs have updates; update one
-       lobby dlc <game> [<dlc>]  the DLC you own for a game lobby installed; install one";
+       lobby dlc <game> [<dlc>]  the DLC you own for a game lobby installed; install one
+       lobby saves <game> [down|up]  sync a store game's cloud saves now (down: newer from the cloud)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,6 +44,14 @@ fn main() -> ExitCode {
         (Some("how"), words) if !words.is_empty() => how(&words.join(" ")),
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
+        (Some("saves"), [game, way @ ..]) if matches!(way, [] | ["down"] | ["up"]) => sync_saves(game, way.first() == Some(&"up")),
+        // The question `lobby run` asks when saves changed both here and in the cloud (to see it).
+        (Some("ask-saves"), words) => {
+            println!("{:?}", ui::ask_which_saves(&words.join(" "), "GOG"));
+            Ok(())
+        }
+        // How Play starts a game lobby installed from a store (cloud saves around it).
+        (Some("run"), words) if !words.is_empty() => Library::load().ok_or("No library yet: run lobby scan.".to_string()).and_then(|lib| lib.find(&words.join(" ")).cloned()).and_then(|g| run::run(&g)),
         (Some("update"), []) => check_updates(),
         (Some("update"), words) => update(&words.join(" ")),
         (Some("dlc"), [game, name @ ..]) => dlc(game, &name.join(" ")),
@@ -210,6 +220,25 @@ fn dlc(query: &str, name: &str) -> Result<(), String> {
     println!("Installing {}…", wanted.title);
     store.install_dlc(&id, std::slice::from_ref(&wanted.id), &progress_printer())?;
     println!("{} is installed.", wanted.title);
+    Ok(())
+}
+
+fn sync_saves(query: &str, up: bool) -> Result<(), String> {
+    use stores::saves::{self, Direction, Synced};
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    let (store, id) = stores::installed_in(&game).ok_or_else(|| format!("{} wasn't installed by lobby from a store.", game.name))?;
+    if !saves::supported(store, &id) {
+        println!("{} doesn't keep {}'s saves in {}'s cloud.", store.name(), game.name, store.name());
+        return Ok(());
+    }
+    let gamefix = launch::gamefix_command(&game).ok_or("It has no gamefix setup yet: play it once first.")?;
+    saves::make_prefix(&gamefix.env, &gamefix.umu)?;
+    match saves::sync(store, &id, &gamefix.env, if up { Direction::Up } else { Direction::Down })? {
+        Synced::Moved(what) => println!("{what}"),
+        Synced::Nothing => println!("Nothing to move: the saves are the same here and in the cloud{}.", if up { ", or newer in the cloud" } else { ", or newer here" }),
+        Synced::Conflict => println!("The saves changed here and in the cloud since the last sync: play it from lobby to choose which to keep."),
+    }
     Ok(())
 }
 

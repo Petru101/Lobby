@@ -25,7 +25,7 @@ fn installed_file() -> PathBuf {
     crate::store::dir().join("gog-installed.json")
 }
 
-fn gogdl() -> Result<Command, String> {
+pub(crate) fn gogdl() -> Result<Command, String> {
     let mut command = Command::new(tools::GOGDL.path()?);
     command.env("GOGDL_CONFIG_PATH", config_home().join("lobby")).arg("--auth-config-path").arg(auth_file());
     Ok(command)
@@ -139,6 +139,12 @@ fn game_info(folder: &Path, id: &str) -> Option<serde_json::Value> {
 /// build installed (buildId) and the DLC installed with it (HGLdlcs).
 fn manifest(id: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&fs::read_to_string(config_home().join("lobby/heroic_gogdl/manifests").join(id)).ok()?).ok()
+}
+
+/// The game's Galaxy client id (what its cloud save settings are filed under).
+pub fn client_id(id: &str) -> Option<String> {
+    let folder = installed().into_iter().find(|g| g.id == id)?.folder;
+    manifest(id).or_else(|| game_info(&folder, id)).and_then(|m| m.get("clientId")?.as_str().map(String::from))
 }
 
 /// The build installed: lobby's record, else gogdl's, else the game's own .info.

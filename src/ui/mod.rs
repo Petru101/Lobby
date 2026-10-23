@@ -38,6 +38,60 @@ pub fn run() -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
+/// Asked by `lobby run` when a game's saves changed both here and in the store's cloud since
+/// the last sync: a small window of its own (lobby's may not be open). None: keep both as they
+/// are this time.
+pub fn ask_which_saves(game: &str, store: &str) -> Option<crate::stores::saves::Direction> {
+    use crate::stores::saves::Direction;
+    let choice: Rc<Cell<Option<Direction>>> = Rc::new(Cell::new(None));
+    let app = adw::Application::builder().application_id("io.github.Petru101.Lobby.Saves").flags(gio::ApplicationFlags::NON_UNIQUE).build();
+    let (c, game, store) = (choice.clone(), game.to_string(), store.to_string());
+    app.connect_activate(move |app| {
+        let page = adw::StatusPage::builder()
+            .icon_name("weather-overcast-symbolic")
+            .title("Which saves should it use?")
+            .description(format!("{game}'s saves changed on this computer and in {store}'s cloud since they were last synced. The ones you don't keep are replaced."))
+            .build();
+        let cloud = gtk::Button::builder().label(format!("Keep {store}'s cloud saves")).build();
+        let local = gtk::Button::builder().label("Keep this computer's saves").build();
+        let neither = gtk::Button::builder().label("Decide later (play with this computer's)").build();
+        cloud.add_css_class("pill");
+        local.add_css_class("pill");
+        neither.add_css_class("pill");
+        neither.add_css_class("flat");
+        let buttons = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).halign(gtk::Align::Center).build();
+        buttons.append(&cloud);
+        buttons.append(&local);
+        buttons.append(&neither);
+        page.set_child(Some(&buttons));
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::builder().show_title(false).build());
+        view.set_content(Some(&page));
+        let window = adw::ApplicationWindow::builder().application(app).title(format!("Lobby: {game}")).default_width(520).default_height(600).content(&view).build();
+        for (button, pick) in [(cloud, Some(Direction::KeepCloud)), (local, Some(Direction::KeepLocal)), (neither, None)] {
+            let (c, w) = (c.clone(), window.clone());
+            button.connect_clicked(move |_| {
+                c.set(pick);
+                w.close();
+            });
+        }
+        window.present();
+        if let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) {
+            let w = window.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+                let paintable = gtk::WidgetPaintable::new(Some(&w));
+                let snapshot = gtk::Snapshot::new();
+                paintable.snapshot(&snapshot, w.width() as f64, w.height() as f64);
+                let saved = snapshot.to_node().zip(w.renderer()).map(|(node, r)| r.render_texture(&node, None).save_to_png(&file));
+                eprintln!("snapshot: {saved:?}");
+                w.close();
+            });
+        }
+    });
+    app.run_with_args::<&str>(&[]);
+    choice.get()
+}
+
 /// Which games the grid shows.
 #[derive(Clone, Copy, PartialEq)]
 enum Filter {
@@ -437,7 +491,8 @@ impl Ui {
     /// A game's DLC on its page, for games lobby installed from a store: what the account owns,
     /// installed or with an Install button. Looked up when the page opens (GOG asks the store);
     /// hidden when there's none.
-    fn fill_dlc(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup, dialog: &adw::Dialog) {
+    /// Also says, in `info`, whether lobby syncs the game's cloud saves.
+    fn fill_dlc(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup, info: &adw::PreferencesGroup, dialog: &adw::Dialog) {
         let Some((store, sid)) = crate::stores::installed_in(game) else {
             group.set_visible(false);
             return;
@@ -445,9 +500,14 @@ impl Ui {
         let looking = adw::ActionRow::builder().title("Looking for DLC you own…").build();
         looking.add_suffix(&adw::Spinner::new());
         group.add(&looking);
-        let (u, group, dialog, id) = (self.clone(), group.clone(), dialog.clone(), game.id.clone());
+        let (u, group, info, dialog, id) = (self.clone(), group.clone(), info.clone(), dialog.clone(), game.id.clone());
         glib::spawn_future_local(async move {
-            let found = gio::spawn_blocking(move || store.dlc(&sid)).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+            let (found, cloud) = gio::spawn_blocking(move || (store.dlc(&sid), crate::stores::saves::supported(store, &sid))).await.unwrap_or_else(|_| (Err("it stopped with an error".into()), false));
+            if cloud {
+                let row = adw::ActionRow::builder().title("Cloud saves").subtitle(format!("Lobby brings them down from {} before you play and puts them back after you quit (when you play it from Lobby).", store.name())).build();
+                row.add_css_class("property");
+                info.add(&row);
+            }
             group.remove(&looking);
             match found {
                 Ok(list) if list.is_empty() => group.set_visible(false),
@@ -811,7 +871,7 @@ impl Ui {
                 u.update(&id);
             });
         }
-        self.fill_dlc(&game, &dlc, &dialog);
+        self.fill_dlc(&game, &dlc, &info, &dialog);
         if self.is_just_installed(&game.id) {
             let u = self.clone();
             dialog.connect_closed(move |_| {
