@@ -84,6 +84,8 @@ struct Ui {
     lib: RefCell<Library>,
     filter: Cell<Filter>,
     scanning: Cell<bool>,
+    /// Games being installed: one install each at a time.
+    installing: RefCell<Vec<String>>,
 }
 
 fn build(app: &adw::Application) {
@@ -132,7 +134,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false) });
+    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), installing: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (f, label, tip) in Filter::ALL {
@@ -319,6 +321,40 @@ impl Ui {
         let _ = lib.save();
     }
 
+    /// Unpacks or installs a download, sets it up with gamefix, then looks for games again, so
+    /// it shows as installed.
+    fn install(self: &Rc<Self>, id: &str) {
+        let Some(game) = self.game(id) else { return };
+        if self.installing.borrow().contains(&game.id) {
+            return;
+        }
+        let Some(file) = crate::install::download(&game) else {
+            self.alert(&format!("{} can't be installed", game.name), "Its download isn't there any more.");
+            return;
+        };
+        let installer = !file.extension().is_some_and(|e| ["zip", "rar", "7z", "gz", "tgz", "xz", "bz2"].contains(&e.to_string_lossy().to_lowercase().as_str()));
+        self.toast(&if installer { format!("Installing {}: its installer opens in a moment; click through it.", game.name) } else { format!("Unpacking {}…", game.name) });
+        self.installing.borrow_mut().push(game.id.clone());
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let g = game.clone();
+            let result = gio::spawn_blocking(move || crate::install::install(&g)).await.unwrap_or_else(|_| Err("The install stopped with an error.".into()));
+            u.installing.borrow_mut().retain(|i| i != &game.id);
+            match result {
+                Ok(done) => {
+                    let failed = done.lines.iter().any(|l| l.starts_with('✗'));
+                    match (&done.entry, failed) {
+                        (Some(_), false) => u.toast(&format!("{} is installed. Press Play to start it.", game.name)),
+                        (Some(_), true) => u.alert(&format!("{} is installed, with a warning", game.name), &done.lines.join("\n")),
+                        (None, _) => u.alert(&format!("{} couldn't be set up", game.name), &done.lines.join("\n")),
+                    }
+                    u.rescan();
+                }
+                Err(e) => u.alert(&format!("{} couldn't be installed", game.name), &e),
+            }
+        });
+    }
+
     fn play(self: &Rc<Self>, id: &str) {
         let Some(game) = self.game(id) else { return };
         match launch::plan(&game) {
@@ -370,10 +406,11 @@ impl Ui {
         let found = gtk::Label::builder().label(format!("Found in: {}", game.sources().iter().map(|s| s.label()).collect::<Vec<_>>().join(", "))).wrap(true).xalign(0.0).build();
         found.add_css_class("dim-label");
 
-        let play = gtk::Button::builder().label("Play").halign(gtk::Align::Start).build();
+        let download = game.kind == Kind::Download;
+        let play = gtk::Button::builder().label(if download { "Install" } else { "Play" }).halign(gtk::Align::Start).build();
         play.add_css_class("pill");
         play.add_css_class("suggested-action");
-        play.set_sensitive(!matches!(plan, Plan::Cannot(_)));
+        play.set_sensitive(download || !matches!(plan, Plan::Cannot(_)));
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).margin_top(12).build();
         buttons.append(&play);
         let change = gtk::Button::builder().label("Change cover").build();
@@ -398,7 +435,7 @@ impl Ui {
         };
         row("How it starts", &plan.describe());
         if let Some(p) = game.program() {
-            row("Program", &p.display().to_string());
+            row(if download { "Download" } else { "Program" }, &p.display().to_string());
         }
         if let Some(f) = &folder {
             row("Folder", &f.display().to_string());
@@ -430,7 +467,7 @@ impl Ui {
         let id = game.id.clone();
         play.connect_clicked(move |_| {
             d.close();
-            u.play(&id);
+            if download { u.install(&id) } else { u.play(&id) }
         });
         let u = self.clone();
         let d = dialog.clone();
@@ -665,16 +702,19 @@ fn origin(g: &Game) -> String {
 
 fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     let cover = cover_widget(g, 180, 270);
-    let play = gtk::Button::builder().icon_name("media-playback-start-symbolic").tooltip_text(format!("Play {}", g.name)).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(10).margin_bottom(10).build();
+    // Play, or Install for a download.
+    let download = g.kind == Kind::Download;
+    let (icon, tip) = if download { ("folder-download-symbolic", format!("Install {}", g.name)) } else { ("media-playback-start-symbolic", format!("Play {}", g.name)) };
+    let play = gtk::Button::builder().icon_name(icon).tooltip_text(tip).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(10).margin_bottom(10).build();
     play.add_css_class("circular");
     play.add_css_class("suggested-action");
     play.add_css_class("play-button");
-    if matches!(g.kind, Kind::Download | Kind::WrongSystem) {
+    if g.kind == Kind::WrongSystem {
         play.set_visible(false);
     }
     let u = ui.clone();
     let id = g.id.clone();
-    play.connect_clicked(move |_| u.play(&id));
+    play.connect_clicked(move |_| if download { u.install(&id) } else { u.play(&id) });
     cover.add_overlay(&play);
 
     let name = gtk::Label::builder().label(&g.name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).hexpand(true).build();

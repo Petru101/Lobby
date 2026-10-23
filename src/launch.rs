@@ -26,7 +26,7 @@ pub fn plan(game: &Game) -> Plan {
         return Plan::Cannot(format!("{note}. The game's page may have a version for Windows or Linux."));
     }
     if game.kind == Kind::Download {
-        return Plan::Cannot("It's downloaded but not installed yet; installing from lobby comes later. gamefix setup on the download installs it.".into());
+        return Plan::Cannot("It's downloaded, not installed yet. Install unpacks it into your games folder (or runs its installer) and sets it up.".into());
     }
     let keys = || game.entries.iter().flat_map(|e| e.keys.iter());
     if let Some(id) = keys().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None }) {
@@ -40,6 +40,16 @@ pub fn plan(game: &Game) -> Plan {
     }
     if let Some(id) = keys().find_map(|k| if let Key::Lutris(id) = k { Some(*id) } else { None }) {
         return run("Lutris", vec!["lutris".into(), format!("lutris:rungameid/{id}")], None);
+    }
+    // Unreal's launcher (Starship Troopers') only checks for Microsoft's VC++ runtime, which a
+    // Proton update can put back to Wine's older one, then starts the game's program: started
+    // directly, as the launcher would, it runs on Wine's. Only when Faugus adds nothing of its own.
+    let faugus_unreal = game.entries.iter().filter(|e| e.source == Source::Faugus && e.keys.iter().any(|k| matches!(k, Key::Faugus(id) if crate::sources::faugus_plain_settings(id)))).find_map(|e| {
+        let (target, args) = gamefix::binary::unreal_bootstrap(e.program.as_ref()?)?;
+        Some(umu_plan(&target, e.prefix.as_ref()?, &args, "the game's own program in Faugus's Wine prefix, past Unreal's launcher"))
+    });
+    if let Some(p) = faugus_unreal {
+        return p;
     }
     if let Some(id) = keys().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }) {
         let native = program_on_path("faugus-launcher");
@@ -59,7 +69,9 @@ pub fn plan(game: &Game) -> Plan {
     }
     // Installed into a Wine prefix by its own installer: run there, where its registry is.
     if let Some(e) = game.entries.iter().find(|e| e.prefix.is_some() && e.program.as_ref().is_some_and(|p| windows_program(p))) {
-        return umu_plan(e.program.as_ref().unwrap(), e.prefix.as_ref().unwrap());
+        let program = e.program.as_ref().unwrap();
+        let (program, args) = gamefix::binary::unreal_bootstrap(program).unwrap_or((program.clone(), String::new()));
+        return umu_plan(&program, e.prefix.as_ref().unwrap(), &args, "umu-run, in the Wine prefix it was installed into");
     }
     // A folder, or a game in one program (a loose .exe in Downloads).
     if let Some(folder) = game.entries.iter().find(|e| e.source == Source::Folder).and_then(|e| e.folder.clone().or_else(|| e.program.clone())) {
@@ -93,7 +105,7 @@ fn program_on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// umu-run with the prefix the game is in and Steam's default Proton (else umu's GE-Proton).
-fn umu_plan(program: &Path, prefix: &Path) -> Plan {
+fn umu_plan(program: &Path, prefix: &Path, args: &str, how: &str) -> Plan {
     // A Proton-style prefix (`<folder>/pfx` holding drive_c) is given to umu as its folder.
     let wineprefix = match prefix.file_name() {
         Some(n) if n == "pfx" && !prefix.is_symlink() && fs::symlink_metadata(prefix).is_ok_and(|m| m.is_dir()) => prefix.parent().unwrap_or(prefix),
@@ -113,7 +125,8 @@ fn umu_plan(program: &Path, prefix: &Path) -> Plan {
         "umu-run".into(),
         program.display().to_string(),
     ];
-    run("umu-run, in the Wine prefix it was installed into", command, program.parent().map(Path::to_path_buf))
+    let command = command.into_iter().chain(args.split_whitespace().map(String::from)).collect();
+    run(how, command, program.parent().map(Path::to_path_buf))
 }
 
 /// The Proton a prefix was made or last upgraded with: Proton's `config_info` (beside drive_c,

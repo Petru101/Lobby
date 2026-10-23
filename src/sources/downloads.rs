@@ -4,7 +4,7 @@
 //! contents are listed without unpacking it: 7-Zip for zip, 7z, tar and iso; unrar or lsar for
 //! rar (Fedora's 7-Zip leaves rar out).
 
-use crate::library::{not_a_game, Entry, Kind, Source};
+use crate::library::{not_a_game, Entry, Key, Kind, Source};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -137,6 +137,7 @@ pub fn look(file: &Path) -> Option<Entry> {
     let ext = file.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let mut e = Entry::new(Source::Folder, name);
     e.program = Some(file.to_path_buf());
+    e.keys.push(Key::Download(file.to_path_buf()));
     if ext == "exe" {
         // An installer, or a game in one program that runs as it is.
         let installer = match gamefix::binary::identify(file)? {

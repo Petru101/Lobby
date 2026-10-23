@@ -13,6 +13,8 @@ mod prefixes;
 mod steam;
 
 use crate::library::{self, Entry};
+
+pub use faugus::plain_settings as faugus_plain_settings;
 use std::path::{Path, PathBuf};
 
 pub struct Home {

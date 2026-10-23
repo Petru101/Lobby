@@ -41,6 +41,7 @@ pub fn roots(home: &Home) -> Vec<PathBuf> {
 /// Folders in a games folder that aren't games.
 fn skipped(name: &str) -> bool {
     let n = name.to_lowercase();
+    // Hidden folders, lobby's and gamefix's half-done unpacks and installs among them.
     name.starts_with('.') || n.contains("backup") || ["steamlibrary", "prefixes", "jre", "jdk", "tools", "shots", "screenshots", "saves", "umu", "lost+found", "$recycle.bin", "system volume information"].contains(&n.as_str())
 }
 
@@ -229,6 +230,10 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize) -> Vec<Found> {
     let download = [game.cd_installer, game.linux_installer, game.packed, game.disc, game.archive].into_iter().flatten().next();
     let mut e = Entry::new(Source::Folder, title(&game.root, &game.name, program.as_deref()));
     e.folder = Some(game.root.clone());
+    // Unpacked by lobby: tied to its download.
+    if let Ok(source) = fs::read_to_string(dir.join(crate::install::SOURCE_NOTE)) {
+        e.keys.push(crate::library::Key::Download(PathBuf::from(source.trim())));
+    }
     match (program, download) {
         (Some(p), _) => {
             // A Python script is only taken for a game when it uses pygame: Downloads holds

@@ -4,6 +4,17 @@ use super::{json, str_of, Home};
 use crate::library::{Entry, Key, Source};
 use std::path::PathBuf;
 
+/// Whether Faugus starts the game with nothing of its own (no launch or game arguments, no
+/// protonfix): then starting it another way loses nothing.
+pub fn plain_settings(id: &str) -> bool {
+    let Some(home) = Home::find() else { return false };
+    home.app_dirs("io.github.Faugus.faugus-launcher", "data/faugus-launcher", ".config/faugus-launcher").iter().any(|dir| {
+        json(&dir.join("games.json")).and_then(|v| v.as_array().cloned()).into_iter().flatten().any(|g| {
+            str_of(&g, "gameid") == Some(id) && ["launch_arguments", "game_arguments", "protonfix"].iter().all(|k| str_of(&g, k).is_none())
+        })
+    })
+}
+
 pub fn games(home: &Home) -> Vec<Entry> {
     let mut entries = Vec::new();
     for dir in home.app_dirs("io.github.Faugus.faugus-launcher", "data/faugus-launcher", ".config/faugus-launcher") {

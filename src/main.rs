@@ -2,8 +2,8 @@
 //! put it there, and a way to start each one.
 
 mod artwork;
+mod install;
 mod launch;
-mod peicon;
 mod library;
 mod sources;
 mod store;
@@ -17,7 +17,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby scan [--json]     look for games again and list them
        lobby list [--json]     list the games found before (scans the first time)
        lobby play <game>       start a game, by its id or name
-       lobby how <game>        say how lobby would start it, without starting it";
+       lobby how <game>        say how lobby would start it, without starting it
+       lobby install <game>    unpack or install a download and set it up";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -34,6 +35,7 @@ fn main() -> ExitCode {
         (Some("list"), []) => Library::load().map_or_else(scan, Ok).map(|lib| show(&lib, json)),
         (Some("play"), words) if !words.is_empty() => play(&words.join(" ")),
         (Some("how"), words) if !words.is_empty() => how(&words.join(" ")),
+        (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -97,6 +99,26 @@ fn play(query: &str) -> Result<(), String> {
         g.played = Some(store::now());
     }
     lib.save()
+}
+
+fn install(query: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    if game.kind != Kind::Download {
+        return Err(format!("{} isn't a download waiting to be installed.", game.name));
+    }
+    println!("Installing {}…", game.name);
+    let done = install::install(&game)?;
+    for l in &done.lines {
+        println!("  {l}");
+    }
+    // Found as installed from now on.
+    scan()?;
+    match done.entry {
+        Some(_) => println!("{} is installed: lobby play \"{}\" starts it.", game.name, game.name),
+        None => println!("{} couldn't be set up to start (see above).", game.name),
+    }
+    Ok(())
 }
 
 fn how(query: &str) -> Result<(), String> {

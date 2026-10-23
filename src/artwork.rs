@@ -356,7 +356,7 @@ pub fn fill(home: &Home, games: &mut [Game]) {
             continue;
         }
         let Some(program) = g.program().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))).map(Path::to_path_buf) else { continue };
-        if let (Some(icon), Some(e)) = (crate::peicon::icon_file(&program), g.entries.first_mut()) {
+        if let (Some(icon), Some(e)) = (icon_file(&program), g.entries.first_mut()) {
             e.icon = Some(icon);
         }
     }
@@ -371,6 +371,19 @@ pub fn fill(home: &Home, games: &mut [Game]) {
         }
         g.entries.push(e);
     }
+}
+
+/// The program's own icon (gamefix's reader), saved as a PNG in lobby's cache once, for the
+/// window to show.
+fn icon_file(program: &Path) -> Option<PathBuf> {
+    let file = cache_file().with_file_name("icons").join(format!("{}.png", crate::sha256_hex(program.as_os_str().as_encoded_bytes())));
+    if file.is_file() {
+        return Some(file);
+    }
+    let png = gamefix::peicon::icon_png(program)?;
+    fs::create_dir_all(file.parent()?).ok()?;
+    fs::write(&file, png).ok()?;
+    Some(file)
 }
 
 /// A cover to choose from, for the cover picker.

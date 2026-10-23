@@ -184,7 +184,9 @@ pub fn entries(home: &Home, found: &[Entry]) -> Vec<Entry> {
     }
     let stem = |p: &Path| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let mut matched: Vec<(&Entry, &Download)> = Vec::new();
-    for e in found.iter().filter(|e| e.source == Source::Folder) {
+    // Folders, and entries named after one: gamefix's app-menu entries and Steam shortcuts for a
+    // downloaded game (its folder then isn't scanned as a folder: the entry has it).
+    for e in found.iter().filter(|e| matches!(e.source, Source::Folder | Source::AppMenu | Source::Gamefix | Source::SteamShortcut) && e.program.is_some()) {
         let folder_name = e.folder.as_deref().map(stem).unwrap_or_default();
         let hit = downloads
             .iter()

@@ -61,6 +61,8 @@ pub enum Key {
     Faugus(String),
     /// An itch.io game page.
     Itch(String),
+    /// A download file: on the download itself, and on the folder lobby unpacked it into.
+    Download(PathBuf),
     /// A download and an installed game of the same name.
     Name(String),
 }
