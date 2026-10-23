@@ -240,7 +240,7 @@ mod tests {
     use crate::library::Entry;
 
     fn game(entries: Vec<Entry>) -> Game {
-        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None }
+        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None }
     }
 
     fn with_key(source: Source, key: Key) -> Entry {

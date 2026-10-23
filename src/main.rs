@@ -3,6 +3,7 @@
 
 mod artwork;
 mod launch;
+mod peicon;
 mod library;
 mod sources;
 mod store;

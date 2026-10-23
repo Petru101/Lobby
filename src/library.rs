@@ -125,6 +125,9 @@ pub struct Game {
     pub added: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub played: Option<u64>,
+    /// The cover the user picked (a file or an address), over any found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_cover: Option<String>,
 }
 
 impl Game {
@@ -155,6 +158,9 @@ impl Game {
 
     /// Its cover: a file on disk first, else a web address.
     pub fn cover(&self) -> Option<&str> {
+        if let Some(c) = &self.chosen_cover {
+            return Some(c);
+        }
         let covers = || self.entries.iter().filter_map(|e| e.cover.as_deref());
         covers().find(|c| c.starts_with('/') && Path::new(c).is_file()).or_else(|| covers().find(|c| c.starts_with("https://")))
     }
@@ -297,7 +303,7 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             };
             let paths: Vec<&PathBuf> = entries.iter().flat_map(|e| [e.folder.as_ref(), e.program.as_ref()]).flatten().collect();
             let missing = !paths.is_empty() && !paths.iter().any(|p| p.exists());
-            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None }
+            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None }
         })
         .collect();
     games.sort_by_key(|g| g.name.to_lowercase());

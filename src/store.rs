@@ -58,6 +58,7 @@ impl Library {
                     game.id = o.id;
                     game.added = o.added;
                     game.played = o.played;
+                    game.chosen_cover = o.chosen_cover;
                 }
                 None => game.added = now,
             }
@@ -127,7 +128,7 @@ mod tests {
     fn game(name: &str, key: Key) -> Game {
         let mut e = Entry::new(Source::Steam, name);
         e.keys.push(key);
-        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None }
+        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None }
     }
 
     #[test]
@@ -137,10 +138,12 @@ mod tests {
         let valheim = lib.games.iter().find(|g| g.name == "Valheim").unwrap().id.clone();
         assert_eq!(valheim, "valheim");
         lib.get_mut("valheim").unwrap().played = Some(5);
+        lib.get_mut("valheim").unwrap().chosen_cover = Some("/covers/valheim.png".into());
         // Renamed by its store, Brotato's drive unplugged.
         lib.update(vec![game("Valheim (Beta)", Key::SteamApp(892970))]);
         let v = lib.games.iter().find(|g| g.name == "Valheim (Beta)").unwrap();
         assert_eq!((v.id.as_str(), v.played, v.gone), ("valheim", Some(5), false));
+        assert_eq!(v.cover(), Some("/covers/valheim.png"));
         assert!(lib.games.iter().any(|g| g.name == "Brotato" && g.gone));
     }
 

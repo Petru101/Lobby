@@ -157,7 +157,9 @@ fn build(app: &adw::Application) {
         name(a).cmp(&name(b)).into()
     });
     let u = ui.clone();
-    flow.connect_child_activated(move |_, child| u.details(&child.widget_name()));
+    flow.connect_child_activated(move |_, child| {
+        u.details(&child.widget_name());
+    });
     let u = ui.clone();
     search.connect_search_changed(move |_| u.refilter());
     // Typing anywhere searches. Not while rendering a snapshot: keys typed elsewhere would land
@@ -193,7 +195,8 @@ fn build(app: &adw::Application) {
 /// For checking how the window looks without a screenshot of the desktop: with
 /// LOBBY_SNAPSHOT=<file.png> the window renders itself into that file once the scan is done
 /// and covers have had time to load (LOBBY_SNAPSHOT_DETAILS=<game id> opens that game's page
-/// first, LOBBY_SNAPSHOT_SEARCH=<text> searches, LOBBY_SNAPSHOT_FILTER=<n> picks a filter),
+/// first, LOBBY_SNAPSHOT_PICKER=<game id> its cover picker, LOBBY_SNAPSHOT_SEARCH=<text>
+/// searches, LOBBY_SNAPSHOT_FILTER=<n> picks a filter),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
@@ -213,7 +216,12 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_DETAILS") {
             u.details(&id);
         }
-        glib::timeout_future(std::time::Duration::from_secs(5)).await;
+        // The cover picker's searches take a while.
+        let picker = std::env::var("LOBBY_SNAPSHOT_PICKER").ok();
+        if let Some((id, details)) = picker.as_ref().and_then(|id| Some((id, u.details(id)?))) {
+            u.choose_cover(id, &details);
+        }
+        glib::timeout_future(std::time::Duration::from_secs(if picker.is_some() { 20 } else { 5 })).await;
         let (w, h) = (u.window.width(), u.window.height());
         let paintable = gtk::WidgetPaintable::new(Some(&u.window));
         let snapshot = gtk::Snapshot::new();
@@ -344,8 +352,8 @@ impl Ui {
     }
 
     /// A game's page: its cover, Play, where it was found and how it starts.
-    fn details(self: &Rc<Self>, id: &str) {
-        let Some(game) = self.game(id) else { return };
+    fn details(self: &Rc<Self>, id: &str) -> Option<adw::Dialog> {
+        let game = self.game(id)?;
         let plan = launch::plan(&game);
 
         let cover = cover_widget(&game, 200, 300);
@@ -361,6 +369,9 @@ impl Ui {
         play.set_sensitive(!matches!(plan, Plan::Cannot(_)));
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).margin_top(12).build();
         buttons.append(&play);
+        let change = gtk::Button::builder().label("Change cover").build();
+        change.add_css_class("pill");
+        buttons.append(&change);
         let folder = game.folder().map(Path::to_path_buf).or_else(|| game.program().and_then(Path::parent).map(Path::to_path_buf)).filter(|f| f.is_dir());
         if let Some(folder) = folder.clone() {
             let open = gtk::Button::builder().label("Open folder").build();
@@ -414,8 +425,145 @@ impl Ui {
             d.close();
             u.play(&id);
         });
+        let u = self.clone();
+        let d = dialog.clone();
+        let id = game.id.clone();
+        change.connect_clicked(move |_| u.choose_cover(&id, &d));
         dialog.present(Some(&self.window));
+        Some(dialog)
     }
+
+    /// Saves the user's cover for a game (None: back to the one found), and shows it.
+    fn set_cover(self: &Rc<Self>, id: &str, cover: Option<String>, details: &adw::Dialog) {
+        {
+            let mut lib = self.lib.borrow_mut();
+            if let Some(g) = lib.get_mut(id) {
+                g.chosen_cover = cover;
+            }
+            if let Err(e) = lib.save() {
+                self.toast(&format!("Couldn't save the library: {e}"));
+            }
+        }
+        self.fill();
+        details.close();
+        self.details(id);
+    }
+
+    /// Covers to pick from: the user's own games, Steam's and itch.io's search results for a
+    /// name (the game's at first), an image file, or back to the automatic one.
+    fn choose_cover(self: &Rc<Self>, id: &str, details: &adw::Dialog) {
+        let Some(game) = self.game(id) else { return };
+        let search = gtk::SearchEntry::builder().text(&game.name).hexpand(true).build();
+        let file = gtk::Button::builder().label("Image file…").build();
+        let auto = gtk::Button::builder().label("Automatic").tooltip_text("The cover lobby found by itself").sensitive(game.chosen_cover.is_some()).build();
+        let bar = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).margin_start(12).margin_end(12).margin_bottom(6).build();
+        bar.append(&search);
+        bar.append(&file);
+        bar.append(&auto);
+
+        let flow = gtk::FlowBox::builder().valign(gtk::Align::Start).homogeneous(true).min_children_per_line(2).max_children_per_line(8).column_spacing(12).row_spacing(12).selection_mode(gtk::SelectionMode::None).activate_on_single_click(true).margin_top(12).margin_bottom(12).margin_start(12).margin_end(12).build();
+        let stack = gtk::Stack::new();
+        let spinner = adw::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
+        stack.add_named(&spinner, Some("searching"));
+        stack.add_named(&gtk::ScrolledWindow::builder().child(&flow).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build(), Some("results"));
+        stack.add_named(&adw::StatusPage::builder().icon_name("edit-find-symbolic").title("No covers found").description("Try another name, or pick an image file.").build(), Some("none"));
+
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::new());
+        view.add_top_bar(&bar);
+        view.set_content(Some(&stack));
+        let picker = adw::Dialog::builder().title(format!("Cover for {}", game.name)).content_width(820).content_height(640).child(&view).build();
+
+        // Each search's results, in the order the searches were made: a slow one can't
+        // overwrite a newer one's.
+        let searches = Rc::new(Cell::new(0u32));
+        // The covers shown, in the grid's order.
+        let shown: Rc<RefCell<Vec<String>>> = Rc::default();
+        let (u, p, d, i, sh) = (self.clone(), picker.clone(), details.clone(), id.to_string(), shown.clone());
+        flow.connect_child_activated(move |_, child| {
+            let cover = sh.borrow().get(child.index() as usize).cloned();
+            if let Some(cover) = cover {
+                p.close();
+                u.set_cover(&i, Some(cover), &d);
+            }
+        });
+        let run = {
+            let (flow, stack, searches, shown) = (flow.clone(), stack.clone(), searches.clone(), shown.clone());
+            move |query: String| {
+                let n = searches.get() + 1;
+                searches.set(n);
+                stack.set_visible_child_name("searching");
+                let (flow, stack, searches, shown) = (flow.clone(), stack.clone(), searches.clone(), shown.clone());
+                glib::spawn_future_local(async move {
+                    let found = gio::spawn_blocking(move || crate::artwork::candidates(&query)).await.unwrap_or_default();
+                    if searches.get() != n {
+                        return;
+                    }
+                    flow.remove_all();
+                    for c in &found {
+                        flow.append(&candidate_card(c));
+                    }
+                    stack.set_visible_child_name(if found.is_empty() { "none" } else { "results" });
+                    *shown.borrow_mut() = found.into_iter().map(|c| c.cover).collect();
+                });
+            }
+        };
+        run(game.name.clone());
+        let r = run.clone();
+        search.connect_activate(move |s| r(s.text().to_string()));
+
+        let (u, p, d, i) = (self.clone(), picker.clone(), details.clone(), id.to_string());
+        auto.connect_clicked(move |_| {
+            p.close();
+            u.set_cover(&i, None, &d);
+        });
+        let (u, p, d, i) = (self.clone(), picker.clone(), details.clone(), id.to_string());
+        file.connect_clicked(move |_| {
+            let filter = gtk::FileFilter::new();
+            filter.add_mime_type("image/*");
+            filter.set_name(Some("Images"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            let chooser = gtk::FileDialog::builder().title("Choose a cover").filters(&filters).modal(true).build();
+            let (u, p, d, i) = (u.clone(), p.clone(), d.clone(), i.clone());
+            chooser.open(Some(&u.window.clone()), gio::Cancellable::NONE, move |result| {
+                let Some(path) = result.ok().and_then(|f| f.path()) else { return };
+                // A copy of its own, so the cover stays if the file is moved or deleted.
+                let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "img".into());
+                let kept = store::dir().join("covers").join(format!("{i}.{ext}"));
+                let saved = std::fs::create_dir_all(kept.parent().unwrap()).and_then(|_| std::fs::copy(&path, &kept));
+                match saved {
+                    Ok(_) => {
+                        p.close();
+                        u.set_cover(&i, Some(kept.display().to_string()), &d);
+                    }
+                    Err(e) => u.toast(&format!("Couldn't use that image: {e}")),
+                }
+            });
+        });
+        picker.present(Some(&self.window));
+    }
+}
+
+/// A cover to pick in the cover picker: the art, its title and where it's from.
+fn candidate_card(c: &crate::artwork::Candidate) -> gtk::FlowBoxChild {
+    let overlay = gtk::Overlay::builder().width_request(120).height_request(180).overflow(gtk::Overflow::Hidden).halign(gtk::Align::Center).build();
+    overlay.add_css_class("cover");
+    let back = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    back.add_css_class("cover-placeholder");
+    back.add_css_class("tint-5");
+    overlay.set_child(Some(&back));
+    add_cover(&overlay, &c.cover, 120, 180);
+    let title = gtk::Label::builder().label(&c.title).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).build();
+    title.add_css_class("caption-heading");
+    let from = gtk::Label::builder().label(&c.from).xalign(0.0).build();
+    from.add_css_class("dim-label");
+    from.add_css_class("caption");
+    let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).width_request(120).halign(gtk::Align::Center).build();
+    body.append(&overlay);
+    body.append(&title);
+    body.append(&from);
+    gtk::FlowBoxChild::builder().child(&body).tooltip_text(format!("{} ({})", c.title, c.from)).build()
 }
 
 /// "today", "yesterday", "3 days ago", or the date.
@@ -449,8 +597,16 @@ fn cover_widget(g: &Game, width: i32, height: i32) -> gtk::Overlay {
     placeholder.append(&inner);
     overlay.set_child(Some(&placeholder));
     if let Some(cover) = g.cover() {
-        // Both made now, so overlays added after (Play) stay on top. A cover wider than the
-        // card (itch.io's are 315x250) is shown whole over a blurred copy of itself.
+        add_cover(&overlay, cover, width, height);
+    }
+    overlay
+}
+
+/// The cover over what's under it, once it's read. Both pictures are made at once, so overlays
+/// added after (Play) stay on top. A cover wider than the card (itch.io's are 315x250) is shown
+/// whole over a blurred copy of itself.
+fn add_cover(overlay: &gtk::Overlay, cover: &str, width: i32, height: i32) {
+    {
         let backdrop = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).visible(false).build();
         backdrop.add_css_class("cover-backdrop");
         let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).visible(false).build();
@@ -469,7 +625,6 @@ fn cover_widget(g: &Game, width: i32, height: i32) -> gtk::Overlay {
             picture.set_visible(true);
         });
     }
-    overlay
 }
 
 /// What a card says under the name: where the game came from, in a word or two.

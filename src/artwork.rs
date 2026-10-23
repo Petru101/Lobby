@@ -12,8 +12,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Words that name an edition, not a game ("Game of the Year Edition", "Gold", "HD").
-const EDITION: &[&str] = &["the", "a", "of", "and", "edition", "goty", "game", "year", "definitive", "gold", "platinum", "complete", "collection", "enhanced", "anniversary", "deluxe", "ultimate", "remastered", "director", "directors", "cut", "hd", "classic", "special", "history", "version"];
+/// Words that name an edition, not a game ("Game of the Year Edition", "Gold", "HD"), or that
+/// some stores add to a name ("Anno 1602 A.D." on GOG).
+const EDITION: &[&str] = &["the", "a", "of", "and", "edition", "goty", "game", "year", "definitive", "gold", "platinum", "complete", "collection", "enhanced", "anniversary", "deluxe", "ultimate", "remastered", "director", "directors", "cut", "hd", "classic", "special", "history", "version", "ad"];
 
 /// Words that make a search result something other than the game.
 const NOT_THE_GAME: &[&str] = &["soundtrack", "ost", "dlc", "artbook", "pack", "expansion", "season", "pass", "editor", "sdk", "server", "tool", "tools", "demo", "playtest", "bundle", "upgrade", "costume", "skin", "skins"];
@@ -347,6 +348,18 @@ pub fn fill(home: &Home, games: &mut [Game]) {
     }
     results.extend(lookups.into_iter().filter_map(|(i, key)| cache.get(&key).filter(|f| f.cover.is_some()).map(|f| (i, f.clone()))));
 
+    let covered: Vec<usize> = results.iter().map(|(i, _)| *i).collect();
+    // Still nothing: the icon in the game's own Windows program, for its placeholder card.
+    for &i in wanted.iter().filter(|i| !covered.contains(i)) {
+        let g = &mut games[i];
+        if g.icon().is_some() {
+            continue;
+        }
+        let Some(program) = g.program().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))).map(Path::to_path_buf) else { continue };
+        if let (Some(icon), Some(e)) = (crate::peicon::icon_file(&program), g.entries.first_mut()) {
+            e.icon = Some(icon);
+        }
+    }
     for (i, f) in results {
         let g = &mut games[i];
         let mut e = Entry::new(Source::Artwork, f.name.clone().unwrap_or_else(|| g.name.clone()));
@@ -358,6 +371,60 @@ pub fn fill(home: &Home, games: &mut [Game]) {
         }
         g.entries.push(e);
     }
+}
+
+/// A cover to choose from, for the cover picker.
+pub struct Candidate {
+    pub title: String,
+    pub cover: String,
+    /// Where it's from, in a few words.
+    pub from: String,
+}
+
+/// Covers for the user to choose from: their own games named like the search, then Steam's and
+/// itch.io's results. Looser than the automatic match: the user picks.
+pub fn candidates(query: &str) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    let Some(home) = Home::find() else { return out };
+    let q = words(query);
+    if q.is_empty() {
+        return out;
+    }
+    for o in owned(&home) {
+        let t = words(&o.title);
+        if score(query, &o.title) > 0 || q.iter().all(|w| t.contains(w)) {
+            out.push(Candidate { title: o.title, cover: o.art, from: "Your games".into() });
+        }
+    }
+    out.truncate(12);
+    let term = q.join(" ");
+    if let Ok(body) = curl(&format!("https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US", query_arg(&term))) {
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let ids: Vec<(u64, String)> = json["items"].as_array().into_iter().flatten().filter_map(|i| Some((i["id"].as_u64()?, i["name"].as_str()?.to_string()))).take(8).collect();
+        for (id, name) in ids {
+            if let Ok(Item { cover: Some(cover), .. }) = steam_item(id) {
+                out.push(Candidate { title: name, cover, from: "Steam".into() });
+            }
+        }
+    }
+    if let Ok(body) = curl(&format!("https://itch.io/search?q={}", query_arg(&term))) {
+        let html = String::from_utf8_lossy(&body).into_owned();
+        let mut pages: Vec<String> = Vec::new();
+        for u in html.split("href=\"").skip(1).filter_map(|s| s.split('"').next()) {
+            let page = u.strip_prefix("https://").and_then(|r| r.split_once(".itch.io/")).filter(|(c, g)| !c.contains('/') && !g.is_empty() && !g.contains('/') && !g.contains('?'));
+            if page.is_some() && !pages.iter().any(|p| p == u) && pages.len() < 6 {
+                pages.push(u.to_string());
+            }
+        }
+        for page in pages {
+            let Ok(body) = curl(&format!("{page}/data.json")) else { continue };
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            if let (Some(title), Some(cover)) = (json["title"].as_str(), json["cover_image"].as_str()) {
+                out.push(Candidate { title: title.to_string(), cover: cover.to_string(), from: "itch.io".into() });
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -375,6 +442,7 @@ mod tests {
         assert_eq!(score("Morrowind", "The Elder Scrolls III: Morrowind® Game of the Year Edition"), 1);
         assert_eq!(score("Morrowind", "The Elder Scrolls III: Morrowind Soundtrack"), 0);
         assert_eq!(score("Anno 1602", "Anno 1602 History Edition"), 2);
+        assert_eq!(score("Anno 1602", "Anno 1602 A.D."), 2);
         assert_eq!(score("FEAR Platinum", "F.E.A.R. Platinum"), 3);
         assert_eq!(score("Cossacks Back To War", "Cossacks - Back To War"), 3);
         assert_eq!(score("Empire Earth", "Empire Earth II Gold Edition"), 0);
