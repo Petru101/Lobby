@@ -102,7 +102,10 @@ pub struct Installed {
 
 /// Installs a downloaded game and sets it up. Takes a while: unpacking, or the installer the
 /// user clicks through.
-pub fn install(game: &Game) -> Result<Installed, String> {
+pub fn install(game: &Game, progress: &dyn Fn(f64)) -> Result<Installed, String> {
+    if game.kind == Kind::Owned {
+        return install_owned(game, progress);
+    }
     let file = download(game).ok_or_else(|| format!("{}'s download isn't there any more.", game.name))?;
     let mut lines = Vec::new();
     let target = if archive_kind(&file).is_some() {
@@ -114,6 +117,31 @@ pub fn install(game: &Game) -> Result<Installed, String> {
         file.clone()
     };
     match crate::launch::set_up(&target) {
+        Ok((done, entry)) => {
+            lines.extend(done);
+            Ok(Installed { lines, entry })
+        }
+        Err(e) => {
+            lines.push(format!("✗ {e}"));
+            Ok(Installed { lines, entry: None })
+        }
+    }
+}
+
+/// The store and the game's id there, for a game owned in a store lobby is signed in to.
+pub fn owned_in(game: &Game) -> Option<(crate::stores::Store, String)> {
+    game.entries.iter().filter(|e| e.kind == Kind::Owned).flat_map(|e| e.keys.iter()).find_map(|k| match k {
+        crate::library::Key::Store(s, id) => Some((crate::stores::Store::from_id(s)?, id.clone())),
+        _ => None,
+    })
+}
+
+/// Downloads an owned game with the store's tool, then gamefix sets the folder up.
+fn install_owned(game: &Game, progress: &dyn Fn(f64)) -> Result<Installed, String> {
+    let (store, id) = owned_in(game).ok_or_else(|| format!("{} isn't owned in a store lobby is signed in to.", game.name))?;
+    let folder = store.install(&id, progress)?;
+    let mut lines = vec![format!("✓ Downloaded it from {} into {}.", store.name(), folder.display())];
+    match crate::launch::set_up(&folder) {
         Ok((done, entry)) => {
             lines.extend(done);
             Ok(Installed { lines, entry })

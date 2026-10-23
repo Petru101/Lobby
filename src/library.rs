@@ -31,10 +31,10 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Source::Steam => "Steam",
-            Source::Epic => "Epic (Heroic)",
-            Source::Gog => "GOG (Heroic)",
-            Source::Amazon => "Amazon (Heroic)",
-            Source::Heroic => "Heroic (added by hand)",
+            Source::Epic => "Epic Games",
+            Source::Gog => "GOG",
+            Source::Amazon => "Amazon",
+            Source::Heroic => "Heroic",
             Source::Lutris => "Lutris",
             Source::Faugus => "Faugus",
             Source::Itch => "itch.io",
@@ -57,6 +57,9 @@ pub enum Key {
     Desktop(PathBuf),
     /// Heroic's runner (legendary, gog, nile, sideload) and app name.
     Heroic(String, String),
+    /// A store (epic, gog, amazon) and the game's id there: on what the account owns, on
+    /// lobby's installs, and on other launchers' installs of the same game.
+    Store(String, String),
     /// Faugus's game id.
     Faugus(String),
     /// An itch.io game page.
@@ -76,6 +79,8 @@ pub enum Kind {
     Download,
     /// A download for another system (a Mac or Android version).
     WrongSystem,
+    /// Owned in a store the user signed in to, not installed.
+    Owned,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -341,6 +346,10 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
                 Kind::WrongSystem
             } else if entries.iter().all(|e| matches!(e.kind, Kind::Download | Kind::WrongSystem)) {
                 Kind::Download
+            } else if entries.iter().all(|e| matches!(e.kind, Kind::Download | Kind::WrongSystem | Kind::Owned)) {
+                // Owned, and maybe downloaded too (a GOG installer in Downloads): installing
+                // the download needs no account.
+                if entries.iter().any(|e| e.kind == Kind::Download) { Kind::Download } else { Kind::Owned }
             } else {
                 Kind::Game
             };

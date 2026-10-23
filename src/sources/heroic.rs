@@ -47,6 +47,9 @@ pub fn games(home: &Home) -> Vec<Entry> {
         let with_prefix = |mut e: Entry, runner: &str, app: &str| {
             e.prefix = prefix(&heroic, app);
             e.keys.push(Key::Heroic(runner.into(), app.into()));
+            if let Some(store) = store_of(runner) {
+                e.keys.push(Key::Store(store.into(), app.into()));
+            }
             e
         };
 
@@ -58,7 +61,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
                     continue;
                 }
                 let title = gog_titles.title(app).unwrap_or_else(|| folder_name(path));
-                let mut e = Entry::new(Source::Gog, title);
+                let mut e = Entry::new(Source::Heroic, title);
                 e.cover = gog_titles.art(app).map(|u| cover(&heroic, u));
                 e.folder = Some(PathBuf::from(path));
                 // gogdl leaves the program to GOG's .info in the game's folder.
@@ -72,7 +75,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
             for g in list {
                 let (Some(app), Some(path)) = (str_of(&g, "id"), str_of(&g, "path")) else { continue };
                 let title = nile_titles.title(app).unwrap_or_else(|| folder_name(path));
-                let mut e = Entry::new(Source::Amazon, title);
+                let mut e = Entry::new(Source::Heroic, title);
                 e.cover = nile_titles.art(app).map(|u| cover(&heroic, u));
                 e.folder = Some(PathBuf::from(path));
                 entries.push(with_prefix(e, "nile", app));
@@ -102,8 +105,9 @@ pub fn games(home: &Home) -> Vec<Entry> {
             if g.get("is_dlc").and_then(|d| d.as_bool()) == Some(true) || entries.iter().any(|e| e.folder.as_deref() == Some(Path::new(path))) {
                 continue;
             }
-            let mut e = Entry::new(Source::Epic, title);
+            let mut e = Entry::new(if heroic.is_some() { Source::Heroic } else { Source::Epic }, title);
             e.folder = Some(PathBuf::from(path));
+            e.keys.push(Key::Store("epic".into(), app.clone()));
             if let (Some(h), Some(titles)) = (&heroic, &titles) {
                 e.cover = titles.art(&app).map(|u| cover(h, u));
             }
@@ -117,6 +121,16 @@ pub fn games(home: &Home) -> Vec<Entry> {
         }
     }
     entries
+}
+
+/// The store a Heroic runner installs from, as `Key::Store` names it.
+fn store_of(runner: &str) -> Option<&'static str> {
+    match runner {
+        "legendary" => Some("epic"),
+        "gog" => Some("gog"),
+        "nile" => Some("amazon"),
+        _ => None,
+    }
 }
 
 fn folder_name(path: &str) -> String {

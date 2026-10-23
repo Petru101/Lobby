@@ -11,6 +11,7 @@ mod lutris;
 mod menu;
 mod prefixes;
 mod steam;
+mod stores;
 
 use crate::library::{self, Entry};
 
@@ -50,6 +51,7 @@ pub fn scan(home: &Home) -> Found {
     let mut entries = Vec::new();
     entries.extend(steam::apps(home));
     entries.extend(steam::shortcuts(home));
+    entries.extend(stores::games());
     entries.extend(heroic::games(home));
     entries.extend(lutris::games(home));
     entries.extend(faugus::games(home));

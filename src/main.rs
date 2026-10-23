@@ -8,6 +8,7 @@ mod launch;
 mod library;
 mod sources;
 mod store;
+mod stores;
 mod ui;
 
 use library::{Game, Kind};
@@ -19,7 +20,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby list [--json]     list the games found before (scans the first time)
        lobby play <game>       start a game, by its id or name
        lobby how <game>        say how lobby would start it, without starting it
-       lobby install <game>    unpack or install a download and set it up";
+       lobby install <game>    install a download, or a game you own on Epic or GOG
+       lobby accounts          the stores lobby is signed in to (sign in from the window)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -37,6 +39,7 @@ fn main() -> ExitCode {
         (Some("play"), words) if !words.is_empty() => play(&words.join(" ")),
         (Some("how"), words) if !words.is_empty() => how(&words.join(" ")),
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
+        (Some("accounts"), []) => accounts(),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -56,6 +59,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// Every game the sources find, merged (no saved library involved: safe off the main thread).
 pub fn find_games() -> Result<Vec<Game>, String> {
     let home = sources::Home::find().ok_or("lobby: no home folder")?;
+    stores::refresh_stale();
     let found = sources::scan(&home);
     let mut games = library::merge(found.entries, &found.roots);
     artwork::fill(&home, &mut games);
@@ -105,11 +109,17 @@ fn play(query: &str) -> Result<(), String> {
 fn install(query: &str) -> Result<(), String> {
     let lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?.clone();
-    if game.kind != Kind::Download {
-        return Err(format!("{} isn't a download waiting to be installed.", game.name));
+    if !matches!(game.kind, Kind::Download | Kind::Owned) {
+        return Err(format!("{} isn't a download or an owned game waiting to be installed.", game.name));
     }
     println!("Installing {}…", game.name);
-    let done = install::install(&game)?;
+    let shown = std::cell::Cell::new(-1);
+    let done = install::install(&game, &|p| {
+        if p as i32 / 5 != shown.get() {
+            shown.set(p as i32 / 5);
+            println!("  {p:.0}%");
+        }
+    })?;
     for l in &done.lines {
         println!("  {l}");
     }
@@ -141,6 +151,16 @@ fn how(query: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn accounts() -> Result<(), String> {
+    for store in stores::Store::ALL {
+        match store.account() {
+            Some(name) => println!("{}: signed in{}; {} games owned", store.name(), if name.is_empty() { String::new() } else { format!(" as {name}") }, stores::owned(store).len()),
+            None => println!("{}: not signed in (sign in from lobby's window: Accounts)", store.name()),
+        }
+    }
+    Ok(())
+}
+
 fn where_found(g: &Game) -> String {
     g.sources().iter().map(|s| s.label()).collect::<Vec<_>>().join(", ")
 }
@@ -150,11 +170,12 @@ fn show(lib: &Library, json: bool) {
         println!("{}", serde_json::to_string_pretty(&lib.games).unwrap());
         return;
     }
-    let sections: [(&str, Box<dyn Fn(&Game) -> bool>); 7] = [
+    let sections: [(&str, Box<dyn Fn(&Game) -> bool>); 8] = [
         ("Games", Box::new(|g: &Game| g.kind == Kind::Game && !g.missing && !g.gone && !g.unknown_to_launchers())),
         ("Games no launcher knows about", Box::new(|g: &Game| g.kind == Kind::Game && !g.missing && !g.gone && g.unknown_to_launchers())),
         ("Downloaded, not installed yet", Box::new(|g: &Game| g.kind == Kind::Download && !g.missing && !g.gone)),
         ("Downloads for another system", Box::new(|g: &Game| g.kind == Kind::WrongSystem && !g.missing && !g.gone)),
+        ("Owned in a store, not installed", Box::new(|g: &Game| g.kind == Kind::Owned && !g.gone)),
         ("Store apps", Box::new(|g: &Game| g.kind == Kind::StoreApp && !g.missing && !g.gone)),
         ("Listed somewhere, but not on disk", Box::new(|g: &Game| g.missing && !g.gone)),
         ("Not found any more (uninstalled, or on a drive that isn't plugged in)", Box::new(|g: &Game| g.gone)),

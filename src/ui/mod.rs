@@ -7,10 +7,13 @@ use crate::launch::{self, Plan};
 use crate::library::{Entry, Game, Key, Kind, Source};
 use crate::store::{self, Library};
 use adw::prelude::*;
+use webkit6::prelude::*;
 use gtk::{gdk, gio, glib};
+use crate::stores::Store;
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 const APP_ID: &str = "io.github.Petru101.Lobby";
 
@@ -44,22 +47,27 @@ enum Filter {
     Launchers,
     Drives,
     Downloads,
+    Owned,
 }
 
 impl Filter {
-    const ALL: [(Filter, &'static str, &'static str); 6] = [
+    const ALL: [(Filter, &'static str, &'static str); 7] = [
         (Filter::All, "All", "Every game on this computer"),
         (Filter::Steam, "Steam", "Installed with Steam"),
-        (Filter::Stores, "Epic · GOG · Amazon", "Installed through Heroic"),
+        (Filter::Stores, "Epic · GOG · Amazon", "Installed from Epic Games, GOG or Amazon (by Lobby, or by Heroic before)"),
         (Filter::Launchers, "Other launchers", "Lutris, Faugus, Steam shortcuts, the app menu and gamefix"),
         (Filter::Drives, "Only on your drives", "Games no launcher knows about: found in folders and Windows setups"),
         (Filter::Downloads, "Downloads", "Downloaded but not installed yet"),
+        (Filter::Owned, "Not installed", "Games you own on Epic or GOG that aren't installed (sign in with Accounts)"),
     ];
 
     fn wants(self, g: &Game) -> bool {
         let has = |s: &[Source]| g.entries.iter().any(|e| s.contains(&e.source));
         if self == Filter::Downloads {
             return matches!(g.kind, Kind::Download | Kind::WrongSystem);
+        }
+        if self == Filter::Owned {
+            return g.kind == Kind::Owned;
         }
         g.kind == Kind::Game
             && match self {
@@ -68,7 +76,7 @@ impl Filter {
                 Filter::Stores => has(&[Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]),
                 Filter::Launchers => !has(&[Source::Steam, Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]) && !g.unknown_to_launchers(),
                 Filter::Drives => g.unknown_to_launchers(),
-                Filter::Downloads => unreachable!(),
+                Filter::Downloads | Filter::Owned => unreachable!(),
             }
     }
 }
@@ -84,8 +92,11 @@ struct Ui {
     lib: RefCell<Library>,
     filter: Cell<Filter>,
     scanning: Cell<bool>,
-    /// Games being installed: one install each at a time.
-    installing: RefCell<Vec<String>>,
+    /// Games being installed (one install each at a time), with how far each is: 0 to 100, or
+    /// below 0 when the tool doesn't say (unpacking an archive).
+    installing: RefCell<Vec<(String, Arc<Mutex<f64>>)>>,
+    /// The progress bars on the cards of games being installed.
+    bars: RefCell<Vec<(String, gtk::ProgressBar)>>,
     /// The game installed last, with its card's "Installed" badge: it stays on the Downloads
     /// page, first, so it doesn't vanish from where it was installed, until it's opened or
     /// another page is picked.
@@ -98,6 +109,8 @@ fn build(app: &adw::Application) {
     let header = adw::HeaderBar::builder().title_widget(&title).build();
     let rescan_button = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Look for games again (F5)").build();
     header.pack_start(&rescan_button);
+    let accounts_button = gtk::Button::builder().icon_name("avatar-default-symbolic").tooltip_text("Store accounts: Epic Games and GOG").build();
+    header.pack_start(&accounts_button);
     let search = gtk::SearchEntry::builder().placeholder_text("Search games").width_chars(28).build();
     header.pack_end(&search);
 
@@ -138,7 +151,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), installing: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (f, label, tip) in Filter::ALL {
@@ -155,7 +168,7 @@ fn build(app: &adw::Application) {
         button.connect_toggled(move |b| {
             if b.is_active() {
                 u.filter.set(f);
-                if f != Filter::Downloads {
+                if !matches!(f, Filter::Downloads | Filter::Owned) {
                     u.forget_installed();
                 }
                 u.refilter();
@@ -186,6 +199,8 @@ fn build(app: &adw::Application) {
     }
     let u = ui.clone();
     rescan_button.connect_clicked(move |_| u.rescan());
+    let u = ui.clone();
+    accounts_button.connect_clicked(move |_| u.accounts());
 
     let action = gio::SimpleAction::new("search", None);
     let s = search.clone();
@@ -214,7 +229,8 @@ fn build(app: &adw::Application) {
 /// and covers have had time to load (LOBBY_SNAPSHOT_DETAILS=<game id> opens that game's page
 /// first, LOBBY_SNAPSHOT_PICKER=<game id> its cover picker, LOBBY_SNAPSHOT_SEARCH=<text>
 /// searches, LOBBY_SNAPSHOT_FILTER=<n> picks a filter, LOBBY_SNAPSHOT_INSTALLED=<game id>
-/// shows that game as just installed),
+/// shows that game as just installed, LOBBY_SNAPSHOT_ACCOUNTS=1 the accounts,
+/// LOBBY_SNAPSHOT_SIGNIN=epic|gog a store's sign-in page),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
@@ -234,6 +250,19 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_INSTALLED") {
             u.just_installed.replace(Some((id, None)));
             u.fill();
+        }
+        if std::env::var_os("LOBBY_SNAPSHOT_ACCOUNTS").is_some() {
+            u.accounts();
+        }
+        // The page itself as WebKit draws it (<file>.page.png): some pages don't show in the
+        // window's snapshot.
+        if let Some(store) = std::env::var("LOBBY_SNAPSHOT_SIGNIN").ok().and_then(|s| Store::from_id(&s)) {
+            let web = u.sign_in(store);
+            let page = file.with_extension("page.png");
+            glib::timeout_future(std::time::Duration::from_secs(8)).await;
+            web.snapshot(webkit6::SnapshotRegion::Visible, webkit6::SnapshotOptions::NONE, gio::Cancellable::NONE, move |r| {
+                eprintln!("page snapshot: {:?}", r.map(|t| t.save_to_png(&page)));
+            });
         }
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_DETAILS") {
             u.details(&id);
@@ -259,7 +288,7 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
 impl Ui {
     fn shows(&self, g: &Game) -> bool {
         let filter = self.filter.get();
-        if g.gone || g.missing || !(filter.wants(g) || filter == Filter::Downloads && self.is_just_installed(&g.id)) {
+        if g.gone || g.missing || !(filter.wants(g) || matches!(filter, Filter::Downloads | Filter::Owned) && self.is_just_installed(&g.id)) {
             return false;
         }
         let q = self.search.text().to_lowercase();
@@ -295,7 +324,8 @@ impl Ui {
     /// One card per game, rebuilt from the library.
     fn fill(self: &Rc<Self>) {
         self.flow.remove_all();
-        for g in self.lib.borrow().games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem)) {
+        self.bars.borrow_mut().clear();
+        for g in self.lib.borrow().games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem | Kind::Owned)) {
             self.flow.append(&card(self, g));
         }
         self.refilter();
@@ -350,25 +380,45 @@ impl Ui {
         let _ = lib.save();
     }
 
-    /// Unpacks or installs a download, sets it up with gamefix, then looks for games again, so
-    /// it shows as installed.
+    fn is_installing(&self, id: &str) -> bool {
+        self.installing.borrow().iter().any(|(i, _)| i == id)
+    }
+
+    /// Unpacks or installs a download, or downloads a game owned in a store, sets it up with
+    /// gamefix, then looks for games again, so it shows as installed. The card shows how far
+    /// it is meanwhile.
     fn install(self: &Rc<Self>, id: &str) {
         let Some(game) = self.game(id) else { return };
-        if self.installing.borrow().contains(&game.id) {
+        if self.is_installing(&game.id) {
             return;
         }
-        let Some(file) = crate::install::download(&game) else {
-            self.alert(&format!("{} can't be installed", game.name), "Its download isn't there any more.");
-            return;
-        };
-        let installer = !file.extension().is_some_and(|e| ["zip", "rar", "7z", "gz", "tgz", "xz", "bz2"].contains(&e.to_string_lossy().to_lowercase().as_str()));
-        self.toast(&if installer { format!("Installing {}: its installer opens in a moment; click through it.", game.name) } else { format!("Unpacking {}…", game.name) });
-        self.installing.borrow_mut().push(game.id.clone());
+        if game.kind == Kind::Owned {
+            let store = crate::install::owned_in(&game).map_or("the store", |(s, _)| s.name());
+            self.toast(&format!("Downloading {} from {store}…", game.name));
+        } else {
+            let Some(file) = crate::install::download(&game) else {
+                self.alert(&format!("{} can't be installed", game.name), "Its download isn't there any more.");
+                return;
+            };
+            let installer = !file.extension().is_some_and(|e| ["zip", "rar", "7z", "gz", "tgz", "xz", "bz2"].contains(&e.to_string_lossy().to_lowercase().as_str()));
+            self.toast(&if installer { format!("Installing {}: its installer opens in a moment; click through it.", game.name) } else { format!("Unpacking {}…", game.name) });
+        }
+        let progress = Arc::new(Mutex::new(-1.0));
+        self.installing.borrow_mut().push((game.id.clone(), progress.clone()));
+        self.fill();
+        let u = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+            u.show_progress();
+            if u.installing.borrow().is_empty() { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        });
         let u = self.clone();
         glib::spawn_future_local(async move {
             let g = game.clone();
-            let result = gio::spawn_blocking(move || crate::install::install(&g)).await.unwrap_or_else(|_| Err("The install stopped with an error.".into()));
-            u.installing.borrow_mut().retain(|i| i != &game.id);
+            let result = gio::spawn_blocking(move || crate::install::install(&g, &|p| *progress.lock().unwrap() = p)).await.unwrap_or_else(|_| Err("The install stopped with an error.".into()));
+            u.installing.borrow_mut().retain(|(i, _)| i != &game.id);
+            if result.is_err() {
+                u.fill();
+            }
             match result {
                 Ok(done) => {
                     let failed = done.lines.iter().any(|l| l.starts_with('✗'));
@@ -384,6 +434,139 @@ impl Ui {
                 }
                 Err(e) => u.alert(&format!("{} couldn't be installed", game.name), &e),
             }
+        });
+    }
+
+    /// Each installing game's card: how far it is.
+    fn show_progress(&self) {
+        let installing = self.installing.borrow();
+        for (id, bar) in self.bars.borrow().iter() {
+            let Some((_, p)) = installing.iter().find(|(i, _)| i == id) else { continue };
+            let p = *p.lock().unwrap();
+            if p < 0.0 {
+                bar.pulse();
+                bar.set_text(Some("Installing…"));
+            } else {
+                bar.set_fraction(p / 100.0);
+                bar.set_text(Some(&format!("Downloading {p:.0}%")));
+            }
+        }
+    }
+
+    /// The stores lobby can sign in to, signed in or not.
+    fn accounts(self: &Rc<Self>) {
+        let group = adw::PreferencesGroup::builder()
+            .title("Store accounts")
+            .description("Sign in to see the games you own and install them from here. Steam games come from the Steam app, which keeps doing its own downloads, updates and cloud saves.")
+            .build();
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::new());
+        let page = adw::PreferencesPage::new();
+        page.add(&group);
+        view.set_content(Some(&page));
+        let dialog = adw::Dialog::builder().title("Accounts").content_width(560).content_height(420).child(&view).build();
+        for store in Store::ALL {
+            let row = adw::ActionRow::builder().title(store.name()).build();
+            let account = store.account();
+            let button = gtk::Button::builder().label(if account.is_some() { "Sign out" } else { "Sign in" }).valign(gtk::Align::Center).build();
+            match &account {
+                Some(name) => {
+                    let who = if name.is_empty() { String::new() } else { format!(" as {name}") };
+                    row.set_subtitle(&format!("Signed in{who} · {} games owned", crate::stores::owned(store).len()));
+                }
+                None => {
+                    row.set_subtitle("Not signed in");
+                    button.add_css_class("suggested-action");
+                }
+            }
+            row.add_suffix(&button);
+            group.add(&row);
+            let u = self.clone();
+            let d = dialog.clone();
+            let signed_in = account.is_some();
+            button.connect_clicked(move |_| {
+                d.close();
+                if signed_in {
+                    let u = u.clone();
+                    glib::spawn_future_local(async move {
+                        match gio::spawn_blocking(move || store.sign_out()).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                            Ok(()) => u.toast(&format!("Signed out of {}.", store.name())),
+                            Err(e) => u.alert(&format!("Couldn't sign out of {}", store.name()), &e),
+                        }
+                        u.rescan();
+                    });
+                } else {
+                    u.sign_in(store);
+                }
+            });
+        }
+        dialog.present(Some(&self.window));
+    }
+
+    /// The store's own sign-in page, in a browser view that keeps nothing (no cookies, no
+    /// history): once it hands over the sign-in code, the store tool signs in with it.
+    fn sign_in(self: &Rc<Self>, store: Store) -> webkit6::WebView {
+        let session = webkit6::NetworkSession::new_ephemeral();
+        let web = webkit6::WebView::builder().network_session(&session).vexpand(true).hexpand(true).build();
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::new());
+        view.set_content(Some(&web));
+        let dialog = adw::Dialog::builder().title(format!("Sign in to {}", store.name())).content_width(600).content_height(800).child(&view).build();
+        let done = Rc::new(Cell::new(false));
+        let u = self.clone();
+        let d = dialog.clone();
+        web.connect_load_changed(move |web, event| {
+            let Some(url) = web.uri().map(|u| u.to_string()) else { return };
+            if done.get() {
+                return;
+            }
+            let finish = {
+                let (u, d, done) = (u.clone(), d.clone(), done.clone());
+                move |code: String| {
+                    if !done.replace(true) {
+                        d.close();
+                        u.finish_sign_in(store, code);
+                    }
+                }
+            };
+            if let Some(code) = crate::stores::code_in(store, &url, None) {
+                finish(code);
+            } else if store == Store::Epic && event == webkit6::LoadEvent::Finished && url.starts_with("https://www.epicgames.com/id/api/redirect") {
+                // Epic's last page is JSON holding the code.
+                web.evaluate_javascript("document.body.innerText", None, None, gio::Cancellable::NONE, move |r| {
+                    if let Some(code) = r.ok().and_then(|v| crate::stores::code_in(store, &url, Some(&v.to_str()))) {
+                        finish(code);
+                    }
+                });
+            }
+        });
+        // "Sign in with Google/Steam/Xbox" opens a new window: shown in this one instead.
+        web.connect_create(|web, action| {
+            if let Some(uri) = action.request().and_then(|r| r.uri()) {
+                web.load_uri(&uri);
+            }
+            None
+        });
+        web.load_uri(store.sign_in_page());
+        dialog.present(Some(&self.window));
+        web
+    }
+
+    fn finish_sign_in(self: &Rc<Self>, store: Store, code: String) {
+        self.toast(&format!("Signing in to {}…", store.name()));
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let result = gio::spawn_blocking(move || {
+                store.sign_in(&code)?;
+                store.refresh_owned().map(|g| g.len())
+            })
+            .await
+            .unwrap_or_else(|_| Err("it stopped with an error".into()));
+            match result {
+                Ok(n) => u.toast(&format!("Signed in to {}: you own {n} games there. The ones not installed are under Not installed.", store.name())),
+                Err(e) => u.alert(&format!("Couldn't sign in to {}", store.name()), &e),
+            }
+            u.rescan();
         });
     }
 
@@ -442,7 +625,7 @@ impl Ui {
         let found = gtk::Label::builder().label(format!("Found in: {}", game.sources().iter().map(|s| s.label()).collect::<Vec<_>>().join(", "))).wrap(true).xalign(0.0).build();
         found.add_css_class("dim-label");
 
-        let download = game.kind == Kind::Download;
+        let download = matches!(game.kind, Kind::Download | Kind::Owned);
         let play = gtk::Button::builder().label(if download { "Install" } else { "Play" }).halign(gtk::Align::Start).build();
         play.add_css_class("pill");
         play.add_css_class("suggested-action");
@@ -731,6 +914,10 @@ fn origin(g: &Game) -> String {
     if g.kind == Kind::Download {
         return "Not installed yet".into();
     }
+    if g.kind == Kind::Owned {
+        let store = crate::install::owned_in(g).map_or("A store", |(s, _)| s.name());
+        return format!("{store} · not installed");
+    }
     if g.unknown_to_launchers() {
         return if g.entries.iter().any(|e| e.source == Source::Itch) { "itch.io · on your drive".into() } else { "On your drive".into() };
     }
@@ -755,7 +942,7 @@ fn origin(g: &Game) -> String {
 fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     let cover = cover_widget(g, 180, 270);
     // Play, or Install for a download.
-    let download = g.kind == Kind::Download;
+    let download = matches!(g.kind, Kind::Download | Kind::Owned);
     let (icon, tip) = if download { ("folder-download-symbolic", format!("Install {}", g.name)) } else { ("media-playback-start-symbolic", format!("Play {}", g.name)) };
     let play = gtk::Button::builder().icon_name(icon).tooltip_text(tip).halign(gtk::Align::End).valign(gtk::Align::End).margin_end(10).margin_bottom(10).build();
     play.add_css_class("circular");
@@ -768,6 +955,13 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     let id = g.id.clone();
     play.connect_clicked(move |_| if download { u.install(&id) } else { u.play(&id) });
     cover.add_overlay(&play);
+    if ui.is_installing(&g.id) {
+        play.set_visible(false);
+        let bar = gtk::ProgressBar::builder().show_text(true).text("Installing…").valign(gtk::Align::End).margin_start(10).margin_end(10).margin_bottom(10).build();
+        bar.add_css_class("install-progress");
+        cover.add_overlay(&bar);
+        ui.bars.borrow_mut().push((g.id.clone(), bar));
+    }
     let just_installed = ui.is_just_installed(&g.id);
     if just_installed {
         let badge = gtk::Label::builder().label("Installed").halign(gtk::Align::Start).valign(gtk::Align::Start).margin_start(10).margin_top(10).build();

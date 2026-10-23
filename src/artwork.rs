@@ -75,6 +75,10 @@ fn owned(home: &Home) -> Vec<Owned> {
             }
         }
     }
+    // The accounts signed in to in lobby.
+    for store in crate::stores::Store::ALL {
+        out.extend(crate::stores::owned(store).into_iter().filter_map(|o| Some(Owned { title: o.title, art: o.cover? })));
+    }
     // Lutris's Epic list: the tall box art among the key images.
     for dir in home.app_dirs("net.lutris.Lutris", "data/lutris", ".local/share/lutris") {
         let Ok(db) = rusqlite::Connection::open_with_flags(dir.join("pga.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { continue };

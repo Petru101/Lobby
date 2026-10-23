@@ -28,9 +28,16 @@ pub fn plan(game: &Game) -> Plan {
     if game.kind == Kind::Download {
         return Plan::Cannot("It's downloaded, not installed yet. Install unpacks it into your games folder (or runs its installer) and sets it up.".into());
     }
+    if game.kind == Kind::Owned {
+        let store = game.entries.iter().find(|e| e.kind == Kind::Owned).map_or("a store", |e| e.source.label());
+        return Plan::Cannot(format!("You own it on {store}; it isn't installed. Install downloads it into your games folder and sets it up."));
+    }
     let keys = || game.entries.iter().flat_map(|e| e.keys.iter());
     if let Some(id) = keys().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None }) {
         return run("Steam", vec!["steam".into(), format!("steam://rungameid/{id}")], None);
+    }
+    if let Some(p) = epic_plan(game) {
+        return p;
     }
     if let Some(p) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(desktop_plan) {
         return p;
@@ -139,6 +146,27 @@ fn proton_of(prefix: &Path) -> Option<PathBuf> {
         let tool = PathBuf::from(tool);
         tool.join("proton").is_file().then_some(tool)
     })
+}
+
+/// An Epic game lobby installed: legendary signs it in to Epic and starts it through umu-run
+/// with what its gamefix entry runs it with (prefix, Proton, fixes).
+fn epic_plan(game: &Game) -> Option<Plan> {
+    let app = game.entries.iter().filter(|e| e.source == Source::Epic).flat_map(|e| e.keys.iter()).find_map(|k| match k {
+        Key::Store(s, app) if s == "epic" => Some(app.clone()),
+        _ => None,
+    })?;
+    let ours = crate::stores::epic::installed().into_iter().find(|g| g.id == app)?;
+    let Some((words, _)) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(|e| {
+        let file = e.keys.iter().find_map(|k| if let Key::Desktop(p) = k { Some(p) } else { None })?;
+        desktop_exec(&fs::read_to_string(file).ok()?)
+    }) else {
+        return Some(Plan::SetUp(ours.folder));
+    };
+    // env NAME=value ... /usr/bin/umu-run <program> <args>
+    let umu = words.iter().position(|w| w.ends_with("umu-run"))?;
+    let env = if words[0] == "env" { words[1..umu].to_vec() } else { Vec::new() };
+    let command = crate::stores::epic::launch_command(&app, &env, &words[umu]);
+    Some(run("Epic Games (legendary), through its gamefix setup", command, Some(ours.folder)))
 }
 
 fn desktop_plan(e: &Entry) -> Option<Plan> {
