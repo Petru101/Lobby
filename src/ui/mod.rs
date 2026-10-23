@@ -490,6 +490,7 @@ fn origin(g: &Game) -> String {
         Source::Lutris => "Lutris",
         Source::Faugus => "Faugus",
         Source::Itch => "itch.io",
+        Source::Artwork => "On your drive",
         Source::SteamShortcut => "Steam shortcut",
         Source::Gamefix | Source::AppMenu => "App menu",
         Source::Prefix | Source::Folder => "On your drive",

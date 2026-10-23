@@ -1,6 +1,7 @@
 //! lobby: one library of every game on the computer, whichever store or launcher (or none)
 //! put it there, and a way to start each one.
 
+mod artwork;
 mod launch;
 mod library;
 mod sources;
@@ -52,7 +53,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
 pub fn find_games() -> Result<Vec<Game>, String> {
     let home = sources::Home::find().ok_or("lobby: no home folder")?;
     let found = sources::scan(&home);
-    Ok(library::merge(found.entries, &found.roots))
+    let mut games = library::merge(found.entries, &found.roots);
+    artwork::fill(&home, &mut games);
+    Ok(games)
 }
 
 fn scan() -> Result<Library, String> {

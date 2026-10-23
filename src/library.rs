@@ -17,6 +17,9 @@ pub enum Source {
     Faugus,
     /// The itch.io page a game was downloaded from (not a launcher: names and covers).
     Itch,
+    /// A cover (and maybe the name) found for a game that had none: a game the user owns in a
+    /// store, itch.io's or Steam's search.
+    Artwork,
     Gamefix,
     SteamShortcut,
     AppMenu,
@@ -35,6 +38,7 @@ impl Source {
             Source::Lutris => "Lutris",
             Source::Faugus => "Faugus",
             Source::Itch => "itch.io",
+            Source::Artwork => "cover found online",
             Source::Gamefix => "gamefix",
             Source::SteamShortcut => "Steam shortcut",
             Source::AppMenu => "app menu",
@@ -133,7 +137,7 @@ impl Game {
 
     /// Only found by looking through folders: no launcher knows it.
     pub fn unknown_to_launchers(&self) -> bool {
-        self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch))
+        self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch | Source::Artwork))
     }
 
     /// Entries for the game itself first, then downloads of it.
