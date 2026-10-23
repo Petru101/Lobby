@@ -1,7 +1,6 @@
 //! Cover art for the cards: read and shrunk off the main thread, web covers downloaded once
 //! into ~/.cache/lobby/covers.
 
-use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -40,9 +39,8 @@ fn decode(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
     Some((rgba.width(), rgba.height(), rgba.into_raw()))
 }
 
-/// Shows the cover in the picture once it's ready; calls `failed` if there's none to show.
-pub fn load(picture: &gtk::Picture, cover: String, failed: impl FnOnce() + 'static) {
-    let picture = picture.downgrade();
+/// Calls `ready` with the cover once it's read (None: there's none to show).
+pub fn load(cover: String, ready: impl FnOnce(Option<gdk::MemoryTexture>) + 'static) {
     glib::spawn_future_local(async move {
         let decoded = gio::spawn_blocking(move || {
             let path = if cover.starts_with("https://") { fetch(&cover)? } else { PathBuf::from(&cover) };
@@ -51,13 +49,6 @@ pub fn load(picture: &gtk::Picture, cover: String, failed: impl FnOnce() + 'stat
         .await
         .ok()
         .flatten();
-        let Some(picture) = picture.upgrade() else { return };
-        match decoded {
-            Some((w, h, bytes)) => {
-                let texture = gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(bytes), w as usize * 4);
-                picture.set_paintable(Some(&texture));
-            }
-            None => failed(),
-        }
+        ready(decoded.map(|(w, h, bytes)| gdk::MemoryTexture::new(w as i32, h as i32, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(bytes), w as usize * 4)));
     });
 }

@@ -5,6 +5,7 @@ mod faugus;
 mod folders;
 mod gamefix;
 mod heroic;
+mod itch;
 mod lutris;
 mod menu;
 mod prefixes;
@@ -55,6 +56,9 @@ pub fn scan(home: &Home) -> Found {
     let roots = folders::roots(home);
     let (found, folder_prefixes) = folders::scan(&roots, &entries);
     entries.extend(found);
+    // Names and covers for what came from itch.io.
+    let itch = itch::entries(home, &entries);
+    entries.extend(itch);
 
     // Every prefix any source mentions, the usual places prefixes are kept, and the ones the
     // folder scan came across.

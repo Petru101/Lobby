@@ -15,6 +15,8 @@ pub enum Source {
     Heroic,
     Lutris,
     Faugus,
+    /// The itch.io page a game was downloaded from (not a launcher: names and covers).
+    Itch,
     Gamefix,
     SteamShortcut,
     AppMenu,
@@ -32,6 +34,7 @@ impl Source {
             Source::Heroic => "Heroic (added by hand)",
             Source::Lutris => "Lutris",
             Source::Faugus => "Faugus",
+            Source::Itch => "itch.io",
             Source::Gamefix => "gamefix",
             Source::SteamShortcut => "Steam shortcut",
             Source::AppMenu => "app menu",
@@ -52,6 +55,8 @@ pub enum Key {
     Heroic(String, String),
     /// Faugus's game id.
     Faugus(String),
+    /// An itch.io game page.
+    Itch(String),
     /// A download and an installed game of the same name.
     Name(String),
 }
@@ -128,7 +133,7 @@ impl Game {
 
     /// Only found by looking through folders: no launcher knows it.
     pub fn unknown_to_launchers(&self) -> bool {
-        self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix))
+        self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch))
     }
 
     /// Entries for the game itself first, then downloads of it.

@@ -160,7 +160,11 @@ fn build(app: &adw::Application) {
     flow.connect_child_activated(move |_, child| u.details(&child.widget_name()));
     let u = ui.clone();
     search.connect_search_changed(move |_| u.refilter());
-    search.set_key_capture_widget(Some(&window));
+    // Typing anywhere searches. Not while rendering a snapshot: keys typed elsewhere would land
+    // here if the window takes focus.
+    if std::env::var_os("LOBBY_SNAPSHOT").is_none() {
+        search.set_key_capture_widget(Some(&window));
+    }
     let u = ui.clone();
     rescan_button.connect_clicked(move |_| u.rescan());
 
@@ -189,7 +193,8 @@ fn build(app: &adw::Application) {
 /// For checking how the window looks without a screenshot of the desktop: with
 /// LOBBY_SNAPSHOT=<file.png> the window renders itself into that file once the scan is done
 /// and covers have had time to load (LOBBY_SNAPSHOT_DETAILS=<game id> opens that game's page
-/// first, LOBBY_SNAPSHOT_SEARCH=<text> searches), then quits.
+/// first, LOBBY_SNAPSHOT_SEARCH=<text> searches, LOBBY_SNAPSHOT_FILTER=<n> picks a filter),
+/// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
     let u = ui.clone();
@@ -199,6 +204,11 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         }
         if let Ok(text) = std::env::var("LOBBY_SNAPSHOT_SEARCH") {
             u.search.set_text(&text);
+        }
+        // LOBBY_SNAPSHOT_FILTER=<n>: the n-th filter (0 = All).
+        if let Some((f, ..)) = std::env::var("LOBBY_SNAPSHOT_FILTER").ok().and_then(|n| n.parse::<usize>().ok()).and_then(|n| Filter::ALL.get(n)) {
+            u.filter.set(*f);
+            u.refilter();
         }
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_DETAILS") {
             u.details(&id);
@@ -439,10 +449,25 @@ fn cover_widget(g: &Game, width: i32, height: i32) -> gtk::Overlay {
     placeholder.append(&inner);
     overlay.set_child(Some(&placeholder));
     if let Some(cover) = g.cover() {
-        let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).build();
+        // Both made now, so overlays added after (Play) stay on top. A cover wider than the
+        // card (itch.io's are 315x250) is shown whole over a blurred copy of itself.
+        let backdrop = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).visible(false).build();
+        backdrop.add_css_class("cover-backdrop");
+        let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).visible(false).build();
+        overlay.add_overlay(&backdrop);
         overlay.add_overlay(&picture);
-        let p = picture.clone();
-        covers::load(&picture, cover.to_string(), move || p.set_visible(false));
+        let ratio = width as f64 / height as f64;
+        covers::load(cover.to_string(), move |texture| {
+            let Some(texture) = texture else { return };
+            let wide = texture.width() as f64 / texture.height() as f64 > ratio * 1.15;
+            if wide {
+                backdrop.set_paintable(Some(&texture));
+                backdrop.set_visible(true);
+                picture.set_content_fit(gtk::ContentFit::Contain);
+            }
+            picture.set_paintable(Some(&texture));
+            picture.set_visible(true);
+        });
     }
     overlay
 }
@@ -453,7 +478,7 @@ fn origin(g: &Game) -> String {
         return "Not installed yet".into();
     }
     if g.unknown_to_launchers() {
-        return "On your drive".into();
+        return if g.entries.iter().any(|e| e.source == Source::Itch) { "itch.io · on your drive".into() } else { "On your drive".into() };
     }
     let s = g.sources();
     let label = |src: Source| match src {
@@ -464,6 +489,7 @@ fn origin(g: &Game) -> String {
         Source::Heroic => "Heroic",
         Source::Lutris => "Lutris",
         Source::Faugus => "Faugus",
+        Source::Itch => "itch.io",
         Source::SteamShortcut => "Steam shortcut",
         Source::Gamefix | Source::AppMenu => "App menu",
         Source::Prefix | Source::Folder => "On your drive",

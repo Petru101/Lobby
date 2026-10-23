@@ -16,6 +16,10 @@ flowboxchild.game-card {
   border-radius: 12px;
 }
 
+.cover-backdrop {
+  filter: blur(14px) brightness(0.55) saturate(1.2);
+}
+
 .cover-name {
   color: white;
   font-weight: 800;
