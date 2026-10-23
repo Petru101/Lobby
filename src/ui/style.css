@@ -49,3 +49,16 @@ flowboxchild:hover .play-button,
 flowboxchild:focus-within .play-button {
   opacity: 1;
 }
+
+/* The game just installed, kept first on the Downloads page: its Play button always shows. */
+.installed-badge {
+  background: @success_bg_color;
+  color: @success_fg_color;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 99px;
+}
+
+flowboxchild.just-installed .play-button {
+  opacity: 1;
+}

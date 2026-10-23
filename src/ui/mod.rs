@@ -86,6 +86,10 @@ struct Ui {
     scanning: Cell<bool>,
     /// Games being installed: one install each at a time.
     installing: RefCell<Vec<String>>,
+    /// The game installed last, with its card's "Installed" badge: it stays on the Downloads
+    /// page, first, so it doesn't vanish from where it was installed, until it's opened or
+    /// another page is picked.
+    just_installed: RefCell<Option<(String, Option<gtk::Widget>)>>,
 }
 
 fn build(app: &adw::Application) {
@@ -134,7 +138,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), installing: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), installing: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (f, label, tip) in Filter::ALL {
@@ -151,6 +155,9 @@ fn build(app: &adw::Application) {
         button.connect_toggled(move |b| {
             if b.is_active() {
                 u.filter.set(f);
+                if f != Filter::Downloads {
+                    u.forget_installed();
+                }
                 u.refilter();
             }
         });
@@ -163,7 +170,8 @@ fn build(app: &adw::Application) {
     flow.set_sort_func(move |a, b| {
         let lib = u.lib.borrow();
         let name = |c: &gtk::FlowBoxChild| lib.games.iter().find(|g| g.id == c.widget_name()).map(|g| g.name.to_lowercase()).unwrap_or_default();
-        name(a).cmp(&name(b)).into()
+        let first = |c: &gtk::FlowBoxChild| !u.is_just_installed(&c.widget_name());
+        (first(a), name(a)).cmp(&(first(b), name(b))).into()
     });
     let u = ui.clone();
     flow.connect_child_activated(move |_, child| {
@@ -205,7 +213,8 @@ fn build(app: &adw::Application) {
 /// LOBBY_SNAPSHOT=<file.png> the window renders itself into that file once the scan is done
 /// and covers have had time to load (LOBBY_SNAPSHOT_DETAILS=<game id> opens that game's page
 /// first, LOBBY_SNAPSHOT_PICKER=<game id> its cover picker, LOBBY_SNAPSHOT_SEARCH=<text>
-/// searches, LOBBY_SNAPSHOT_FILTER=<n> picks a filter),
+/// searches, LOBBY_SNAPSHOT_FILTER=<n> picks a filter, LOBBY_SNAPSHOT_INSTALLED=<game id>
+/// shows that game as just installed),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
@@ -221,6 +230,10 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if let Some((f, ..)) = std::env::var("LOBBY_SNAPSHOT_FILTER").ok().and_then(|n| n.parse::<usize>().ok()).and_then(|n| Filter::ALL.get(n)) {
             u.filter.set(*f);
             u.refilter();
+        }
+        if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_INSTALLED") {
+            u.just_installed.replace(Some((id, None)));
+            u.fill();
         }
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_DETAILS") {
             u.details(&id);
@@ -245,11 +258,27 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
 
 impl Ui {
     fn shows(&self, g: &Game) -> bool {
-        if g.gone || g.missing || !self.filter.get().wants(g) {
+        let filter = self.filter.get();
+        if g.gone || g.missing || !(filter.wants(g) || filter == Filter::Downloads && self.is_just_installed(&g.id)) {
             return false;
         }
         let q = self.search.text().to_lowercase();
         q.split_whitespace().all(|w| g.name.to_lowercase().contains(w))
+    }
+
+    fn is_just_installed(&self, id: &str) -> bool {
+        self.just_installed.borrow().as_ref().is_some_and(|(i, _)| i == id)
+    }
+
+    /// The game installed last goes back to being like any other.
+    fn forget_installed(&self) {
+        if let Some((_, Some(badge))) = self.just_installed.take() {
+            badge.set_visible(false);
+            if let Some(card) = badge.ancestor(gtk::FlowBoxChild::static_type()) {
+                card.remove_css_class("just-installed");
+            }
+        }
+        self.flow.invalidate_sort();
     }
 
     fn refilter(&self) {
@@ -348,6 +377,9 @@ impl Ui {
                         (Some(_), true) => u.alert(&format!("{} is installed, with a warning", game.name), &done.lines.join("\n")),
                         (None, _) => u.alert(&format!("{} couldn't be set up", game.name), &done.lines.join("\n")),
                     }
+                    if done.entry.is_some() {
+                        u.just_installed.replace(Some((game.id.clone(), None)));
+                    }
                     u.rescan();
                 }
                 Err(e) => u.alert(&format!("{} couldn't be installed", game.name), &e),
@@ -357,6 +389,10 @@ impl Ui {
 
     fn play(self: &Rc<Self>, id: &str) {
         let Some(game) = self.game(id) else { return };
+        if self.is_just_installed(id) {
+            self.forget_installed();
+            self.refilter();
+        }
         match launch::plan(&game) {
             Plan::Run { command, cwd, .. } => match launch::start(&command, cwd.as_deref(), &store::log_file(&game.id)) {
                 Ok(()) => {
@@ -473,6 +509,13 @@ impl Ui {
         let d = dialog.clone();
         let id = game.id.clone();
         change.connect_clicked(move |_| u.choose_cover(&id, &d));
+        if self.is_just_installed(&game.id) {
+            let u = self.clone();
+            dialog.connect_closed(move |_| {
+                u.forget_installed();
+                u.refilter();
+            });
+        }
         dialog.present(Some(&self.window));
         Some(dialog)
     }
@@ -716,6 +759,15 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     let id = g.id.clone();
     play.connect_clicked(move |_| if download { u.install(&id) } else { u.play(&id) });
     cover.add_overlay(&play);
+    let just_installed = ui.is_just_installed(&g.id);
+    if just_installed {
+        let badge = gtk::Label::builder().label("Installed").halign(gtk::Align::Start).valign(gtk::Align::Start).margin_start(10).margin_top(10).build();
+        badge.add_css_class("installed-badge");
+        cover.add_overlay(&badge);
+        if let Some((_, b)) = ui.just_installed.borrow_mut().as_mut() {
+            *b = Some(badge.upcast());
+        }
+    }
 
     let name = gtk::Label::builder().label(&g.name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).hexpand(true).build();
     name.add_css_class("card-name");
@@ -728,5 +780,8 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     body.append(&from);
     let child = gtk::FlowBoxChild::builder().child(&body).name(&g.id).tooltip_text(&g.name).build();
     child.add_css_class("game-card");
+    if just_installed {
+        child.add_css_class("just-installed");
+    }
     child
 }
