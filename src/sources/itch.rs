@@ -6,7 +6,7 @@
 //! ~/.cache/lobby/itch.json.
 
 use super::Home;
-use crate::library::{Entry, Key, Kind, Source};
+use crate::library::{same_name, Entry, Key, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -125,31 +125,6 @@ fn read_firefox(places: &Path, cache: &Path) -> Vec<(PathBuf, String)> {
     out
 }
 
-/// A name with only its letters and digits.
-fn plain(s: &str) -> String {
-    s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
-}
-
-/// A download's name and a folder's name are the same game's: equal, or one starts with the
-/// other and what's left is a version or a platform ("Shoot'n'Slaughter 0.0.0.4",
-/// "BrickMan32-Bit", "Potato Dungeon 64 bit").
-fn same_name(download: &str, folder: &str) -> bool {
-    let (d, f) = (plain(download), plain(folder));
-    // Names that say what a file is, not which game.
-    let generic = |n: &str| ["game", "games", "setup", "install", "installer", "windows", "linux", "build", "release", "demo", "download"].contains(&n);
-    if d.len() < 4 || f.len() < 4 || generic(&d) || generic(&f) {
-        return false;
-    }
-    if d == f {
-        return true;
-    }
-    let (long, short) = if d.len() > f.len() { (&d, &f) } else { (&f, &d) };
-    let Some(rest) = long.strip_prefix(short.as_str()) else { return false };
-    short.len() >= 5 && ["", "v", "ver", "version", "build", "demo", "windows", "win", "win32", "win64", "linux", "x64", "x86", "32bit", "64bit", "bit", "beta", "alpha", "final", "release", "pc"].iter().any(|w| {
-        rest.strip_prefix(w).is_some_and(|r| r.chars().all(|c| c.is_ascii_digit() || "bit".contains(c)))
-    })
-}
-
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Page {
     title: Option<String>,
@@ -226,7 +201,9 @@ pub fn entries(home: &Home, found: &[Entry]) -> Vec<Entry> {
         .map(|(e, d)| {
             let page = pages.get(&d.page).cloned().unwrap_or_default();
             let mut itch = Entry::new(Source::Itch, page.title.unwrap_or_else(|| e.name.clone()));
-            itch.kind = if e.kind == Kind::Download { Kind::Download } else { Kind::Game };
+            // A download's page names it, but doesn't install it (or make a Mac version run).
+            itch.kind = e.kind;
+            itch.note = e.note.clone();
             itch.program = e.program.clone();
             itch.folder = e.folder.clone();
             itch.cover = page.cover;
@@ -246,16 +223,6 @@ mod tests {
         assert_eq!(game_page("https://fr0ke.itch.io/project-pitt-demo#download").as_deref(), Some("https://fr0ke.itch.io/project-pitt-demo"));
         assert_eq!(game_page("https://www.reddit.com/r/witcher/"), None);
         assert_eq!(game_page("https://itch.io/games"), None);
-    }
-
-    #[test]
-    fn names() {
-        assert!(same_name("Shoot'n'Slaughter 0.0.0.4", "shootnslaughter"));
-        assert!(same_name("BoxingPunGame", "boxingpungame"));
-        assert!(same_name("Potato Dungeon 64 bit", "potatodungeon"));
-        assert!(same_name("PB_ver.1.03", "pb_ver.1.03"));
-        assert!(!same_name("Dungeon", "Dungeon Colony"));
-        assert!(!same_name("game", "game"));
     }
 
     #[test]

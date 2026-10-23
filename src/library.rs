@@ -72,6 +72,8 @@ pub enum Kind {
     StoreApp,
     /// An installer, disc image or archive: downloaded, not installed yet.
     Download,
+    /// A download for another system (a Mac or Android version).
+    WrongSystem,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,6 +95,9 @@ pub struct Entry {
     /// A small icon, for games without a cover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<PathBuf>,
+    /// Something to say about it ("Mac version: won't run here").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Only says something about a game another entry found (gamefix's record of a shortcut it
     /// made): dropped when nothing else matches it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -101,7 +106,7 @@ pub struct Entry {
 
 impl Entry {
     pub fn new(source: Source, name: impl Into<String>) -> Entry {
-        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), cover: None, icon: None, annotation: false }
+        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), cover: None, icon: None, note: None, annotation: false }
     }
 }
 
@@ -216,23 +221,57 @@ fn tool_shortcut(e: &Entry) -> bool {
 }
 
 /// A name with only its letters and digits, for telling copies of one game apart from others.
-fn plain(name: &str) -> String {
+pub fn plain(name: &str) -> String {
     name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
 }
+
+/// A download's name and a folder's name are the same game's: equal, or one starts with the
+/// other and what's left is a version or a platform ("Shoot'n'Slaughter 0.0.0.4",
+/// "BrickMan32-Bit", "Potato Dungeon 64 bit").
+pub fn same_name(download: &str, folder: &str) -> bool {
+    let (d, f) = (plain(download), plain(folder));
+    // Names that say what a file is, not which game.
+    let generic = |n: &str| ["game", "games", "setup", "install", "installer", "windows", "linux", "build", "release", "demo", "download"].contains(&n);
+    if d.len() < 4 || f.len() < 4 || generic(&d) || generic(&f) {
+        return false;
+    }
+    if d == f {
+        return true;
+    }
+    let (long, short) = if d.len() > f.len() { (&d, &f) } else { (&f, &d) };
+    let Some(rest) = long.strip_prefix(short.as_str()) else { return false };
+    short.len() >= 5 && ["", "v", "ver", "version", "build", "demo", "windows", "win", "win32", "win64", "linux", "x64", "x86", "32bit", "64bit", "bit", "beta", "alpha", "final", "release", "pc"].iter().any(|w| {
+        rest.strip_prefix(w).is_some_and(|r| r.chars().all(|c| c.is_ascii_digit() || "bit".contains(c)))
+    })
+}
+
 
 /// Tidies entries (paths written one way, prefixes told apart from game folders) and merges
 /// those naming the same game.
 pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
     entries.retain(|e| !not_a_game(&e.name) && !tool_shortcut(e));
     // A download of a game that is installed belongs with it (the-mammoth's zip beside its
-    // unpacked folder).
-    let installed: Vec<String> = entries.iter().filter(|e| e.kind == Kind::Game).map(|e| plain(&e.name)).collect();
-    let downloaded: Vec<String> = entries.iter().filter(|e| e.kind == Kind::Download).map(|e| plain(&e.name)).collect();
-    for e in &mut entries {
-        let name = plain(&e.name);
-        if (e.kind == Kind::Download && installed.contains(&name)) || (e.kind == Kind::Game && downloaded.contains(&name)) {
-            e.keys.push(Key::Name(name));
+    // unpacked folder, "Shoot'n'Slaughter 0.0.0.4.rar" beside shootnslaughter): its name is the
+    // game's or its folder's, give or take a version.
+    // A folder's name counts for games named after their folder: a launcher's games have names,
+    // and their folder may hold several (Black & White and Creature Isle share one).
+    let names = |e: &Entry| -> Vec<String> {
+        let folder = e.folder.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).filter(|_| matches!(e.source, Source::Folder | Source::Itch));
+        std::iter::once(e.name.clone()).chain(folder).collect()
+    };
+    let installed: Vec<(usize, Vec<String>)> = entries.iter().enumerate().filter(|(_, e)| e.kind == Kind::Game).map(|(i, e)| (i, names(e))).collect();
+    let mut ties: Vec<(usize, usize)> = Vec::new();
+    for (d, e) in entries.iter().enumerate().filter(|(_, e)| e.kind == Kind::Download) {
+        for (g, game_names) in &installed {
+            if game_names.iter().any(|n| same_name(&e.name, n)) {
+                ties.push((d, *g));
+            }
         }
+    }
+    for (d, g) in ties {
+        let key = Key::Name(format!("{d}"));
+        entries[d].keys.push(key.clone());
+        entries[g].keys.push(key);
     }
     for e in &mut entries {
         e.folder = e.folder.as_deref().map(norm);
@@ -296,7 +335,9 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             let name = named.name.clone();
             let kind = if entries.iter().any(|e| e.kind == Kind::StoreApp) {
                 Kind::StoreApp
-            } else if entries.iter().all(|e| e.kind == Kind::Download) {
+            } else if entries.iter().all(|e| e.kind == Kind::WrongSystem) {
+                Kind::WrongSystem
+            } else if entries.iter().all(|e| matches!(e.kind, Kind::Download | Kind::WrongSystem)) {
                 Kind::Download
             } else {
                 Kind::Game
@@ -429,6 +470,16 @@ mod tests {
             &[PathBuf::from("/home/u")],
         );
         assert_eq!(games.len(), 2);
+    }
+
+    #[test]
+    fn same_names() {
+        assert!(same_name("Shoot'n'Slaughter 0.0.0.4", "shootnslaughter"));
+        assert!(same_name("BoxingPunGame", "boxingpungame"));
+        assert!(same_name("Potato Dungeon 64 bit", "potatodungeon"));
+        assert!(same_name("PB_ver.1.03", "pb_ver.1.03"));
+        assert!(!same_name("Dungeon", "Dungeon Colony"));
+        assert!(!same_name("game", "game"));
     }
 
     #[test]

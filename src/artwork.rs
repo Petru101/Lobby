@@ -271,7 +271,7 @@ fn cache_file() -> PathBuf {
 
 /// Adds a cover (and, when sure, the right name) to every game that has none.
 pub fn fill(home: &Home, games: &mut [Game]) {
-    let wanted: Vec<usize> = (0..games.len()).filter(|&i| games[i].kind == Kind::Game && games[i].cover().is_none() && !games[i].gone).collect();
+    let wanted: Vec<usize> = (0..games.len()).filter(|&i| matches!(games[i].kind, Kind::Game | Kind::Download) && games[i].cover().is_none() && !games[i].gone).collect();
     if wanted.is_empty() {
         return;
     }

@@ -1,6 +1,7 @@
 //! The places games are found: launchers' own lists, app-menu entries, folders of games and
 //! Wine prefixes. Each source reads what's there and never changes anything.
 
+mod downloads;
 mod faugus;
 mod folders;
 mod gamefix;

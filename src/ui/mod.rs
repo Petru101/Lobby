@@ -15,13 +15,20 @@ use std::rc::Rc;
 const APP_ID: &str = "io.github.Petru101.Lobby";
 
 pub fn run() -> glib::ExitCode {
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    // A checking run (LOBBY_SNAPSHOT) is a copy of its own: otherwise it would hand over to the
+    // user's open Lobby and quit.
+    let flags = if std::env::var_os("LOBBY_SNAPSHOT").is_some() { gio::ApplicationFlags::NON_UNIQUE } else { gio::ApplicationFlags::empty() };
+    let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
     app.connect_startup(|_| {
         let css = gtk::CssProvider::new();
         css.load_from_string(include_str!("style.css"));
         gtk::style_context_add_provider_for_display(&gdk::Display::default().expect("a display"), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
     });
-    app.connect_activate(build);
+    // Opened again while running: the window there is, brought forward.
+    app.connect_activate(|app| match app.active_window() {
+        Some(window) => window.present(),
+        None => build(app),
+    });
     app.set_accels_for_action("win.search", &["<Control>f"]);
     app.set_accels_for_action("win.rescan", &["<Control>r", "F5"]);
     app.set_accels_for_action("window.close", &["<Control>w", "<Control>q"]);
@@ -52,7 +59,7 @@ impl Filter {
     fn wants(self, g: &Game) -> bool {
         let has = |s: &[Source]| g.entries.iter().any(|e| s.contains(&e.source));
         if self == Filter::Downloads {
-            return g.kind == Kind::Download;
+            return matches!(g.kind, Kind::Download | Kind::WrongSystem);
         }
         g.kind == Kind::Game
             && match self {
@@ -257,7 +264,7 @@ impl Ui {
     /// One card per game, rebuilt from the library.
     fn fill(self: &Rc<Self>) {
         self.flow.remove_all();
-        for g in self.lib.borrow().games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download)) {
+        for g in self.lib.borrow().games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem)) {
             self.flow.append(&card(self, g));
         }
         self.refilter();
@@ -629,6 +636,9 @@ fn add_cover(overlay: &gtk::Overlay, cover: &str, width: i32, height: i32) {
 
 /// What a card says under the name: where the game came from, in a word or two.
 fn origin(g: &Game) -> String {
+    if g.kind == Kind::WrongSystem {
+        return g.entries.iter().find_map(|e| e.note.clone()).unwrap_or_else(|| "For another system".into());
+    }
     if g.kind == Kind::Download {
         return "Not installed yet".into();
     }
@@ -659,7 +669,7 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     play.add_css_class("circular");
     play.add_css_class("suggested-action");
     play.add_css_class("play-button");
-    if g.kind == Kind::Download {
+    if matches!(g.kind, Kind::Download | Kind::WrongSystem) {
         play.set_visible(false);
     }
     let u = ui.clone();

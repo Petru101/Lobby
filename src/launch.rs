@@ -22,6 +22,9 @@ fn is_gamefix_entry(e: &Entry) -> bool {
 
 /// How a game starts, from the entries it was found by, best first.
 pub fn plan(game: &Game) -> Plan {
+    if let Some(note) = game.entries.iter().find_map(|e| e.note.as_ref()).filter(|_| game.kind == Kind::WrongSystem) {
+        return Plan::Cannot(format!("{note}. The game's page may have a version for Windows or Linux."));
+    }
     if game.kind == Kind::Download {
         return Plan::Cannot("It's downloaded but not installed yet; installing from lobby comes later. gamefix setup on the download installs it.".into());
     }
@@ -58,7 +61,8 @@ pub fn plan(game: &Game) -> Plan {
     if let Some(e) = game.entries.iter().find(|e| e.prefix.is_some() && e.program.as_ref().is_some_and(|p| windows_program(p))) {
         return umu_plan(e.program.as_ref().unwrap(), e.prefix.as_ref().unwrap());
     }
-    if let Some(folder) = game.entries.iter().find(|e| e.source == Source::Folder).and_then(|e| e.folder.clone()) {
+    // A folder, or a game in one program (a loose .exe in Downloads).
+    if let Some(folder) = game.entries.iter().find(|e| e.source == Source::Folder).and_then(|e| e.folder.clone().or_else(|| e.program.clone())) {
         return Plan::SetUp(folder);
     }
     Plan::Cannot("Nothing that knows how to start it was found (no launcher lists it, and its files aren't in a game folder).".into())

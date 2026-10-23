@@ -124,10 +124,11 @@ fn show(lib: &Library, json: bool) {
         println!("{}", serde_json::to_string_pretty(&lib.games).unwrap());
         return;
     }
-    let sections: [(&str, Box<dyn Fn(&Game) -> bool>); 6] = [
+    let sections: [(&str, Box<dyn Fn(&Game) -> bool>); 7] = [
         ("Games", Box::new(|g: &Game| g.kind == Kind::Game && !g.missing && !g.gone && !g.unknown_to_launchers())),
         ("Games no launcher knows about", Box::new(|g: &Game| g.kind == Kind::Game && !g.missing && !g.gone && g.unknown_to_launchers())),
         ("Downloaded, not installed yet", Box::new(|g: &Game| g.kind == Kind::Download && !g.missing && !g.gone)),
+        ("Downloads for another system", Box::new(|g: &Game| g.kind == Kind::WrongSystem && !g.missing && !g.gone)),
         ("Store apps", Box::new(|g: &Game| g.kind == Kind::StoreApp && !g.missing && !g.gone)),
         ("Listed somewhere, but not on disk", Box::new(|g: &Game| g.missing && !g.gone)),
         ("Not found any more (uninstalled, or on a drive that isn't plugged in)", Box::new(|g: &Game| g.gone)),

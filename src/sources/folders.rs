@@ -58,7 +58,8 @@ pub fn scan(roots: &[PathBuf], known: &[Entry]) -> (Vec<Entry>, Vec<PathBuf>) {
     for root in roots {
         for entry in fs::read_dir(root).into_iter().flatten().flatten() {
             let path = entry.path();
-            if entry.file_type().is_ok_and(|t| t.is_dir()) && !skipped(&entry.file_name().to_string_lossy()) && !roots.contains(&library::norm(&path)) {
+            let dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            if (dir && !skipped(&entry.file_name().to_string_lossy()) && !roots.contains(&library::norm(&path))) || (!dir && super::downloads::wanted(&path)) {
                 candidates.push(path);
             }
         }
@@ -179,6 +180,10 @@ impl Cache {
 }
 
 fn look(dir: &Path, known: &[PathBuf], depth: usize) -> Vec<Found> {
+    // A loose download: an archive, an installer, a disc image.
+    if depth == 0 && dir.is_file() {
+        return vec![super::downloads::look(dir).map_or(Found::Nothing, Found::Game)];
+    }
     let norm = library::norm(dir);
     if known.contains(&norm) {
         return vec![];
