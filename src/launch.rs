@@ -164,7 +164,7 @@ fn store_plan(game: &Game) -> Option<Plan> {
     };
     let how = match store {
         crate::stores::Store::Epic => format!("Lobby (Epic's sign-in and cloud saves), {setup}"),
-        crate::stores::Store::Gog => format!("Lobby (GOG cloud saves), {setup}"),
+        crate::stores::Store::Gog => format!("Lobby (GOG cloud saves, when the game has them), {setup}"),
     };
     Some(run(&how, vec![lobby, "run".into(), game.id.clone()], Some(folder)))
 }

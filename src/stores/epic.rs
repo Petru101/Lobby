@@ -163,6 +163,14 @@ pub fn update(app: &str, progress: &dyn Fn(f64)) -> Result<(), String> {
     run_with_progress(command, progress).map_err(|e| format!("Epic's update stopped: {e}"))
 }
 
+/// legendary deletes the files its manifest lists (the game's and its DLC's), then the folder
+/// when nothing else is left in it.
+pub fn uninstall(app: &str) -> Result<(), String> {
+    let mut command = legendary()?;
+    command.args(["-y", "uninstall", app]);
+    output(command).map(|_| ()).map_err(|e| format!("legendary couldn't uninstall it: {e}"))
+}
+
 /// The DLC owned for a game, from the owned list; installed when legendary has it installed.
 pub fn dlc(app: &str) -> Vec<Dlc> {
     let installed = installed_json();

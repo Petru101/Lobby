@@ -216,6 +216,23 @@ pub fn update(id: &str, folder: &Path, progress: &dyn Fn(f64)) -> Result<(), Str
     }
 }
 
+/// Deletes the game's folder (GOG's own .info in it says it's this game's) and lobby's and
+/// gogdl's records of it.
+pub fn uninstall(id: &str) -> Result<(), String> {
+    let g = installed().into_iter().find(|g| g.id == id).ok_or("Lobby didn't install this game.")?;
+    if g.folder.exists() {
+        if !g.folder.join(format!("goggame-{id}.info")).is_file() && g.platform.is_none() {
+            return Err(format!("{} doesn't look like the game's folder (GOG's goggame-{id}.info isn't in it), so lobby didn't delete it.", g.folder.display()));
+        }
+        fs::remove_dir_all(&g.folder).map_err(|e| format!("Couldn't delete {}: {e}", g.folder.display()))?;
+    }
+    let mut list = installed();
+    list.retain(|o| o.id != id);
+    fs::write(installed_file(), serde_json::to_string_pretty(&list).unwrap()).map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(manifests_dir().join(id));
+    Ok(())
+}
+
 /// The DLC the account owns for the game (from GOG), installed when gogdl's record has it or
 /// its .info is in the folder.
 pub fn dlc(id: &str, folder: &Path) -> Result<Vec<Dlc>, String> {

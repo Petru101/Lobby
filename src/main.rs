@@ -9,6 +9,7 @@ mod library;
 mod run;
 mod sources;
 mod store;
+mod uninstall;
 mod stores;
 mod ui;
 
@@ -26,6 +27,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby update [<game>]   which of lobby's store installs have updates; update one
        lobby dlc <game> [<dlc>]  the DLC you own for a game lobby installed; install one
        lobby saves <game> [down|up|keep-cloud|keep-local]  sync a store game's cloud saves now
+       lobby uninstall <game> [--keep-prefix]  delete a game lobby installed (and its Wine prefix)
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
 
 fn main() -> ExitCode {
@@ -46,6 +48,7 @@ fn main() -> ExitCode {
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
+        (Some("uninstall"), words) if !words.is_empty() => uninstall_game(&words.join(" "), args.iter().any(|a| a == "--keep-prefix")),
         (Some("saves"), [game, way @ ..]) if way.len() <= 1 => sync_saves(game, way.first().copied().unwrap_or("down")),
         // The question `lobby run` asks when saves changed both here and in the cloud (to see it).
         (Some("ask-saves"), words) => {
@@ -256,6 +259,16 @@ fn sync_saves(query: &str, way: &str) -> Result<(), String> {
         Synced::Conflict => println!("The saves changed here and in the cloud since the last sync: lobby saves {query:?} keep-cloud (or keep-local), or play it from lobby's window to choose."),
     }
     Ok(())
+}
+
+fn uninstall_game(query: &str, keep_prefix: bool) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    println!("Uninstalling {}…", game.name);
+    for l in uninstall::uninstall(&game, &lib.games, !keep_prefix)? {
+        println!("  {l}");
+    }
+    scan().map(|_| ())
 }
 
 fn take_over_heroic() -> Result<(), String> {

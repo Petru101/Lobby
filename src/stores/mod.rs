@@ -138,6 +138,22 @@ impl Store {
         }
     }
 
+    /// Deletes an installed game's files and lobby's records of it (its prefix is the
+    /// caller's: `uninstall::uninstall`).
+    pub fn uninstall(self, id: &str) -> Result<(), String> {
+        match self {
+            Store::Epic => epic::uninstall(id)?,
+            Store::Gog => gog::uninstall(id)?,
+        }
+        let mut all: BTreeMap<String, WineSetup> = read_json(&wine_setups_file());
+        if all.remove(&format!("{}:{id}", self.id())).is_some() {
+            fs::write(wine_setups_file(), serde_json::to_string_pretty(&all).unwrap()).map_err(|e| e.to_string())?;
+        }
+        let mut left = updates(self);
+        left.retain(|u| u.id != id);
+        save_updates(self, &left)
+    }
+
     /// Lobby's installs from this store.
     pub fn installed(self) -> Vec<Installed> {
         match self {

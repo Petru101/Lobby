@@ -148,7 +148,7 @@ struct Ui {
     scanning: Cell<bool>,
     /// Games being installed (one install each at a time), with how far each is: 0 to 100, or
     /// below 0 when the tool doesn't say (unpacking an archive).
-    installing: RefCell<Vec<(String, Arc<Mutex<f64>>)>>,
+    installing: RefCell<Vec<(String, Arc<Mutex<f64>>, &'static str)>>,
     /// The progress bars on the cards of games being installed.
     bars: RefCell<Vec<(String, gtk::ProgressBar)>>,
     /// The game installed last, with its card's "Installed" badge: it stays on the Downloads
@@ -284,7 +284,8 @@ fn build(app: &adw::Application) {
 /// first, LOBBY_SNAPSHOT_PICKER=<game id> its cover picker, LOBBY_SNAPSHOT_SEARCH=<text>
 /// searches, LOBBY_SNAPSHOT_FILTER=<n> picks a filter, LOBBY_SNAPSHOT_INSTALLED=<game id>
 /// shows that game as just installed, LOBBY_SNAPSHOT_ACCOUNTS=1 the accounts,
-/// LOBBY_SNAPSHOT_SIGNIN=epic|gog a store's sign-in page),
+/// LOBBY_SNAPSHOT_SIGNIN=epic|gog a store's sign-in page, LOBBY_SNAPSHOT_UNINSTALL=<game id>
+/// the question before uninstalling it),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
@@ -320,6 +321,9 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         }
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_DETAILS") {
             u.details(&id);
+        }
+        if let Some((id, details)) = std::env::var("LOBBY_SNAPSHOT_UNINSTALL").ok().and_then(|id| Some((id.clone(), u.details(&id)?))) {
+            u.ask_uninstall(&id, &details);
         }
         // The cover picker's searches take a while.
         let picker = std::env::var("LOBBY_SNAPSHOT_PICKER").ok();
@@ -441,7 +445,7 @@ impl Ui {
     }
 
     fn is_installing(&self, id: &str) -> bool {
-        self.installing.borrow().iter().any(|(i, _)| i == id)
+        self.installing.borrow().iter().any(|(i, ..)| i == id)
     }
 
     /// Unpacks or installs a download, or downloads a game owned in a store, sets it up with
@@ -466,7 +470,7 @@ impl Ui {
         let u = self.clone();
         glib::spawn_future_local(async move {
             let g = game.clone();
-            let result = u.with_progress(&game.id, move |p| crate::install::install(&g, p)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
+            let result = u.with_progress(&game.id, "Installing…", move |p| crate::install::install(&g, p)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
             if result.is_err() {
                 u.fill();
             }
@@ -485,6 +489,95 @@ impl Ui {
                 }
                 Err(e) => u.alert(&format!("{} couldn't be installed", game.name), &e),
             }
+        });
+    }
+
+    /// Uninstalling, at the bottom of a game's page: a button when lobby can, else who can.
+    fn uninstall_group(self: &Rc<Self>, game: &Game, page: &Rc<RefCell<Option<adw::Dialog>>>) -> adw::PreferencesGroup {
+        use crate::uninstall::How;
+        let group = adw::PreferencesGroup::new();
+        let row = adw::ActionRow::builder().title("Uninstall").build();
+        match crate::uninstall::how(game) {
+            How::Not(why) => row.set_subtitle(&why),
+            how => {
+                row.set_subtitle(match how {
+                    How::Steam(_) => "Steam uninstalls it (it asks first).",
+                    _ => "Deletes its files, its app-menu entry, and if you like its Wine prefix.",
+                });
+                let button = gtk::Button::builder().label("Uninstall…").valign(gtk::Align::Center).build();
+                button.add_css_class("destructive-action");
+                row.add_suffix(&button);
+                let (u, page, id, steam) = (self.clone(), page.clone(), game.id.clone(), matches!(how, How::Steam(_)));
+                button.connect_clicked(move |_| {
+                    let Some(page) = page.borrow().clone() else { return };
+                    if steam {
+                        page.close();
+                        u.uninstall(&id, false);
+                    } else {
+                        u.ask_uninstall(&id, &page);
+                    }
+                });
+            }
+        }
+        group.add(&row);
+        group
+    }
+
+    /// Asks before uninstalling: what goes, and whether its Wine prefix goes too (not when
+    /// another game runs in it).
+    fn ask_uninstall(self: &Rc<Self>, id: &str, page: &adw::Dialog) {
+        let Some(game) = self.game(id) else { return };
+        let folder = game.folder().or_else(|| game.program().and_then(Path::parent)).map(|f| f.display().to_string()).unwrap_or_default();
+        let alert = adw::AlertDialog::new(Some(&format!("Uninstall {}?", game.name)), Some(&format!("Its files in {folder} are deleted.")));
+        alert.add_responses(&[("cancel", "Cancel"), ("uninstall", "Uninstall")]);
+        alert.set_response_appearance("uninstall", adw::ResponseAppearance::Destructive);
+        alert.set_default_response(Some("cancel"));
+        let check = gtk::CheckButton::builder().label("Also delete its Wine prefix").build();
+        if let Some(prefix) = crate::uninstall::prefix(&game) {
+            let shared = crate::uninstall::prefix_shared_with(&prefix, &game, &self.lib.borrow().games);
+            let cloud = crate::stores::installed_in(&game).filter(|(s, i)| crate::stores::saves::supported(*s, i)).map(|(s, _)| s.name());
+            let note = if !shared.is_empty() {
+                check.set_sensitive(false);
+                let names = if shared.len() > 3 { format!("{} other games ({}, …)", shared.len(), shared[..3].join(", ")) } else { shared.join(", ") };
+                format!("Its Wine prefix stays: {names} run in it too.")
+            } else {
+                check.set_active(true);
+                match cloud {
+                    Some(store) => format!("{}: its settings and saves on this computer. Its saves go to {store}'s cloud first.", prefix.display()),
+                    None => format!("{}: its settings and saves on this computer, which go with it.", prefix.display()),
+                }
+            };
+            let label = gtk::Label::builder().label(&note).wrap(true).xalign(0.0).build();
+            label.add_css_class("dim-label");
+            let extra = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
+            extra.append(&check);
+            extra.append(&label);
+            alert.set_extra_child(Some(&extra));
+        }
+        let (u, page, id) = (self.clone(), page.clone(), id.to_string());
+        alert.connect_response(Some("uninstall"), move |_, _| {
+            page.close();
+            u.uninstall(&id, check.is_active());
+        });
+        alert.present(Some(&self.window));
+    }
+
+    fn uninstall(self: &Rc<Self>, id: &str, with_prefix: bool) {
+        let Some(game) = self.game(id) else { return };
+        if self.is_installing(&game.id) {
+            return;
+        }
+        let all = self.lib.borrow().games.clone();
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let g = game.clone();
+            let result = u.with_progress(&game.id, "Uninstalling…", move |_| crate::uninstall::uninstall(&g, &all, with_prefix)).await.unwrap_or_else(|| Err("it stopped with an error".into()));
+            match result {
+                Ok(done) if done.iter().all(|l| l.starts_with('✓') || l.starts_with("Steam")) => u.toast(&format!("{}: {}", game.name, if done.iter().any(|l| l.starts_with("Steam")) { "Steam asks you to confirm." } else { "uninstalled." })),
+                Ok(done) => u.alert(&format!("{} is uninstalled", game.name), &done.join("\n")),
+                Err(e) => u.alert(&format!("{} couldn't be uninstalled", game.name), &e),
+            }
+            u.rescan();
         });
     }
 
@@ -537,9 +630,10 @@ impl Ui {
 
     /// Runs a long job for a game off the main thread (an install, an update, DLC), its card
     /// showing how far it is meanwhile. None: the job stopped with an error.
-    async fn with_progress<T: Send + 'static>(self: &Rc<Self>, id: &str, task: impl FnOnce(&dyn Fn(f64)) -> T + Send + 'static) -> Option<T> {
+    /// `what` is said while the job doesn't say how far it is ("Installing…").
+    async fn with_progress<T: Send + 'static>(self: &Rc<Self>, id: &str, what: &'static str, task: impl FnOnce(&dyn Fn(f64)) -> T + Send + 'static) -> Option<T> {
         let progress = Arc::new(Mutex::new(-1.0));
-        self.installing.borrow_mut().push((id.to_string(), progress.clone()));
+        self.installing.borrow_mut().push((id.to_string(), progress.clone(), what));
         self.fill();
         let u = self.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
@@ -547,7 +641,7 @@ impl Ui {
             if u.installing.borrow().is_empty() { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
         });
         let result = gio::spawn_blocking(move || task(&|p| *progress.lock().unwrap() = p)).await.ok();
-        self.installing.borrow_mut().retain(|(i, _)| i != id);
+        self.installing.borrow_mut().retain(|(i, ..)| i != id);
         result
     }
 
@@ -561,7 +655,7 @@ impl Ui {
         self.toast(&format!("Updating {}…", game.name));
         let u = self.clone();
         glib::spawn_future_local(async move {
-            match u.with_progress(&game.id, move |p| store.update(&sid, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
+            match u.with_progress(&game.id, "Updating…", move |p| store.update(&sid, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
                 Ok(()) => u.toast(&format!("{} is up to date.", game.name)),
                 Err(e) => u.alert(&format!("{} couldn't be updated", game.name), &e),
             }
@@ -581,7 +675,7 @@ impl Ui {
         let u = self.clone();
         glib::spawn_future_local(async move {
             let ids = vec![dlc.id.clone()];
-            match u.with_progress(&game.id, move |p| store.install_dlc(&sid, &ids, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
+            match u.with_progress(&game.id, "Installing…", move |p| store.install_dlc(&sid, &ids, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
                 Ok(()) => u.toast(&format!("{} is installed.", dlc.title)),
                 Err(e) => u.alert(&format!("{} couldn't be installed", dlc.title), &e),
             }
@@ -593,11 +687,11 @@ impl Ui {
     fn show_progress(&self) {
         let installing = self.installing.borrow();
         for (id, bar) in self.bars.borrow().iter() {
-            let Some((_, p)) = installing.iter().find(|(i, _)| i == id) else { continue };
+            let Some((_, p, what)) = installing.iter().find(|(i, ..)| i == id) else { continue };
             let p = *p.lock().unwrap();
             if p < 0.0 {
                 bar.pulse();
-                bar.set_text(Some("Installing…"));
+                bar.set_text(Some(what));
             } else {
                 bar.set_fraction(p / 100.0);
                 bar.set_text(Some(&format!("Downloading {p:.0}%")));
@@ -804,6 +898,8 @@ impl Ui {
         let found = gtk::Label::builder().label(format!("Found in: {}", game.sources().iter().map(|s| s.label()).collect::<Vec<_>>().join(", "))).wrap(true).xalign(0.0).build();
         found.add_css_class("dim-label");
 
+        // The page's dialog, for buttons made before it is.
+        let dialog_slot: Rc<RefCell<Option<adw::Dialog>>> = Rc::default();
         let download = matches!(game.kind, Kind::Download | Kind::Owned);
         let play = gtk::Button::builder().label(if download { "Install" } else { "Play" }).halign(gtk::Align::Start).build();
         play.add_css_class("pill");
@@ -875,11 +971,15 @@ impl Ui {
         content.append(&info);
         let dlc = adw::PreferencesGroup::builder().title("DLC").build();
         content.append(&dlc);
+        if game.kind == Kind::Game {
+            content.append(&self.uninstall_group(&game, &dialog_slot));
+        }
 
         let view = adw::ToolbarView::new();
         view.add_top_bar(&adw::HeaderBar::new());
         view.set_content(Some(&gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build()));
         let dialog = adw::Dialog::builder().title(&game.name).content_width(720).child(&view).build();
+        dialog_slot.replace(Some(dialog.clone()));
         let u = self.clone();
         let d = dialog.clone();
         let id = game.id.clone();
