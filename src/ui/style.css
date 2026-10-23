@@ -62,3 +62,14 @@ flowboxchild:focus-within .play-button {
 flowboxchild.just-installed .play-button {
   opacity: 1;
 }
+
+/* A drive that keeps the game from working, on its page. */
+.drive-warning {
+  background: alpha(@warning_bg_color, 0.15);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.drive-warning image {
+  color: @warning_color;
+}

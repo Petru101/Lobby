@@ -2,6 +2,7 @@
 //! put it there, and a way to start each one.
 
 mod artwork;
+mod drives;
 mod install;
 mod launch;
 mod library;
@@ -133,6 +134,9 @@ fn how(query: &str) -> Result<(), String> {
         }
         launch::Plan::SetUp(folder) => println!("{}: no launcher knows it; gamefix sets up {} first (an app-menu entry), then that starts it.", game.name, folder.display()),
         launch::Plan::Cannot(why) => println!("{}: {why}", game.name),
+    }
+    for warning in drives::warnings(game, &drives::mounts()) {
+        println!("\nWarning: {warning}");
     }
     Ok(())
 }

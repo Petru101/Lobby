@@ -492,6 +492,15 @@ impl Ui {
         top.append(&text);
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(24).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
         content.append(&top);
+        for warning in crate::drives::warnings(&game, &crate::drives::mounts()) {
+            let icon = gtk::Image::builder().icon_name("dialog-warning-symbolic").valign(gtk::Align::Start).build();
+            let text = gtk::Label::builder().label(&warning).wrap(true).xalign(0.0).hexpand(true).build();
+            let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).build();
+            row.add_css_class("drive-warning");
+            row.append(&icon);
+            row.append(&text);
+            content.append(&row);
+        }
         content.append(&info);
 
         let view = adw::ToolbarView::new();
