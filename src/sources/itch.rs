@@ -63,41 +63,64 @@ fn file_from_uri(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
 }
 
-/// Firefox's downloads from itch.io pages. The database is read from a copy (Firefox keeps it
-/// locked), made again only when Firefox changed it.
+/// Firefox's downloads from itch.io pages. Firefox keeps its database locked, so it's read from
+/// a copy, deleted right after: lobby keeps only the itch.io downloads found
+/// (~/.cache/lobby/itch-downloads.json), read again when Firefox changes the database.
 fn downloads(home: &Home) -> Vec<Download> {
-    let mut out = Vec::new();
     let cache = cache_dir();
-    for (n, places) in histories(home).into_iter().enumerate() {
-        let copy = cache.join(format!("firefox-{n}.sqlite"));
-        let stamp = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let saved_file = cache.join("itch-downloads.json");
+    let mut saved: HashMap<String, Saved> = fs::read_to_string(&saved_file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let mut out = Vec::new();
+    for places in histories(home) {
+        let key = places.display().to_string();
+        let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+        let stamp = mtime(&places).max(mtime(&places.with_extension("sqlite-wal")));
+        if saved.get(&key).is_none_or(|s| s.stamp != stamp) {
+            saved.insert(key.clone(), Saved { stamp, downloads: read_firefox(&places, &cache) });
+        }
+        out.extend(saved[&key].downloads.iter().map(|(file, page)| Download { file: file.clone(), page: page.clone() }));
+    }
+    let _ = fs::create_dir_all(&cache);
+    if let Ok(text) = serde_json::to_string(&saved) {
+        let _ = fs::write(&saved_file, text);
+    }
+    out
+}
+
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    stamp: u64,
+    downloads: Vec<(PathBuf, String)>,
+}
+
+fn read_firefox(places: &Path, cache: &Path) -> Vec<(PathBuf, String)> {
+    let copy = cache.join(format!("firefox-{}.sqlite", std::process::id()));
+    let side = |ext: &str| copy.with_extension(format!("sqlite-{ext}"));
+    let _ = fs::create_dir_all(cache);
+    let mut out = Vec::new();
+    if fs::copy(places, &copy).is_ok() {
         let wal = places.with_extension("sqlite-wal");
-        let fresh = stamp(&copy).is_some_and(|c| Some(c) >= stamp(&places) && (stamp(&wal).is_none() || Some(c) >= stamp(&wal)));
-        if !fresh {
-            let _ = fs::create_dir_all(&cache);
-            let _ = fs::remove_file(copy.with_extension("sqlite-wal"));
-            if fs::copy(&places, &copy).is_err() {
-                continue;
-            }
-            if wal.is_file() {
-                let _ = fs::copy(&wal, copy.with_extension("sqlite-wal"));
+        if wal.is_file() {
+            let _ = fs::copy(&wal, side("wal"));
+        }
+        if let Ok(db) = rusqlite::Connection::open(&copy) {
+            // A download is a visit of type 7 whose from_visit is the page the link was on.
+            if let Ok(mut q) = db.prepare(
+                "SELECT a.content, (SELECT pp.url FROM moz_historyvisits v JOIN moz_historyvisits fv ON fv.id = v.from_visit JOIN moz_places pp ON pp.id = fv.place_id WHERE v.place_id = p.id AND v.visit_type = 7 LIMIT 1)
+                 FROM moz_annos a JOIN moz_anno_attributes n ON n.id = a.anno_attribute_id JOIN moz_places p ON p.id = a.place_id
+                 WHERE n.name = 'downloads/destinationFileURI'",
+            ) {
+                let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)));
+                for (dest, from) in rows.into_iter().flatten().flatten() {
+                    if let (Some(file), Some(page)) = (file_from_uri(&dest), from.as_deref().and_then(game_page)) {
+                        out.push((file, page));
+                    }
+                }
             }
         }
-        let Ok(db) = rusqlite::Connection::open(&copy) else { continue };
-        // A download is a visit of type 7 whose from_visit is the page the link was on.
-        let Ok(mut q) = db.prepare(
-            "SELECT a.content, (SELECT pp.url FROM moz_historyvisits v JOIN moz_historyvisits fv ON fv.id = v.from_visit JOIN moz_places pp ON pp.id = fv.place_id WHERE v.place_id = p.id AND v.visit_type = 7 LIMIT 1)
-             FROM moz_annos a JOIN moz_anno_attributes n ON n.id = a.anno_attribute_id JOIN moz_places p ON p.id = a.place_id
-             WHERE n.name = 'downloads/destinationFileURI'",
-        ) else {
-            continue;
-        };
-        let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)));
-        for (dest, from) in rows.into_iter().flatten().flatten() {
-            if let (Some(file), Some(page)) = (file_from_uri(&dest), from.as_deref().and_then(game_page)) {
-                out.push(Download { file, page });
-            }
-        }
+    }
+    for f in [copy.clone(), side("wal"), side("shm")] {
+        let _ = fs::remove_file(f);
     }
     out
 }
