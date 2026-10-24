@@ -11,7 +11,7 @@ set -o pipefail
 dir=$(cd "$(dirname "$0")/.." && pwd)
 out=$(realpath -m "$1"); shift
 if [ "$SNAPSHOT_SCREEN" != kwin ]; then
-    probe=$(host-spawn sh -c 'timeout 20 gamescope --backend headless -W 64 -H 64 -- true 2>&1')
+    probe=$(host-spawn sh -c 'timeout 20 setpriv --no-new-privs gamescope --backend headless -W 64 -H 64 -- true 2>&1')
     case "$probe" in *"vkCreateDevice failed"*) SNAPSHOT_SCREEN=kwin ;; esac
 fi
 if [ "$SNAPSHOT_SCREEN" = kwin ]; then
@@ -34,5 +34,5 @@ if [ "$SNAPSHOT_SCREEN" = kwin ]; then
     rm -rf "$session" "$runtime"
     exit $status
 fi
-exec timeout 150 host-spawn gamescope --backend headless -W 1280 -H 860 -w 1280 -h 860 -- \
+exec timeout 150 host-spawn setpriv --no-new-privs gamescope --backend headless -W 1280 -H 860 -w 1280 -h 860 -- \
     env GDK_BACKEND=x11 LOBBY_SNAPSHOT="$out" "$@" "$dir/target/release/lobby"
