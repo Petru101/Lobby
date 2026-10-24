@@ -49,20 +49,20 @@ pub struct Found {
 
 pub fn scan(home: &Home) -> Found {
     let mut entries = Vec::new();
-    entries.extend(steam::apps(home));
-    entries.extend(steam::shortcuts(home));
-    entries.extend(stores::games());
-    entries.extend(heroic::games(home));
-    entries.extend(lutris::games(home));
-    entries.extend(faugus::games(home));
-    entries.extend(gamefix::records(home));
-    entries.extend(menu::entries(home));
+    entries.extend(crate::log::timed("scan: Steam games", || steam::apps(home)));
+    entries.extend(crate::log::timed("scan: Steam shortcuts", || steam::shortcuts(home)));
+    entries.extend(crate::log::timed("scan: lobby's store games", || stores::games()));
+    entries.extend(crate::log::timed("scan: Heroic", || heroic::games(home)));
+    entries.extend(crate::log::timed("scan: Lutris", || lutris::games(home)));
+    entries.extend(crate::log::timed("scan: Faugus", || faugus::games(home)));
+    entries.extend(crate::log::timed("scan: gamefix records", || gamefix::records(home)));
+    entries.extend(crate::log::timed("scan: app menu", || menu::entries(home)));
 
     let roots = folders::roots(home);
-    let (found, folder_prefixes) = folders::scan(&roots, &entries);
+    let (found, folder_prefixes) = crate::log::timed("scan: folders", || folders::scan(&roots, &entries));
     entries.extend(found);
     // Names and covers for what came from itch.io.
-    let itch = itch::entries(home, &entries);
+    let itch = crate::log::timed("scan: itch.io", || itch::entries(home, &entries));
     entries.extend(itch);
 
     // Every prefix any source mentions, the usual places prefixes are kept, and the ones the
@@ -71,7 +71,7 @@ pub fn scan(home: &Home) -> Found {
     pfxs.extend(entries.iter().filter_map(|e| e.folder.as_deref().and_then(library::prefix_in)));
     pfxs.extend(folder_prefixes);
     pfxs.extend(prefixes::usual(home));
-    entries.extend(prefixes::scan(pfxs));
+    entries.extend(crate::log::timed("scan: Wine prefixes", || prefixes::scan(pfxs)));
 
     let mut wide = roots.clone();
     wide.push(home.home.clone());

@@ -173,21 +173,31 @@ fn language(folder: &Path, id: &str) -> String {
     game_info(folder, id).and_then(|i| i.get("languages")?.as_array()?.first()?.as_str().map(String::from)).unwrap_or_else(|| "en-US".into())
 }
 
-/// Lobby's installs whose build isn't GOG's latest.
+/// Lobby's installs whose build isn't GOG's latest, asked about four at a time (one gogdl
+/// run each takes a second or two).
 pub fn check_updates() -> Result<Vec<Update>, String> {
-    let mut found = Vec::new();
-    for g in installed() {
-        let Some(have) = installed_build(&g) else { continue };
-        let latest = info_for(&g.id, g.platform.as_deref().unwrap_or("windows")).map_err(|e| format!("GOG didn't say whether {} has an update: {e}", g.title))?;
-        let Some(newest) = latest.get("buildId").and_then(|b| b.as_str()) else { continue };
-        if newest != have {
-            let builds = latest.get("builds").and_then(|b| b.get("items")).and_then(|i| i.as_array()).cloned().unwrap_or_default();
-            let from = builds.iter().find(|b| b.get("build_id").and_then(|i| i.as_str()) == Some(&have)).and_then(|b| b.get("version_name")?.as_str()).unwrap_or_default();
-            let to = latest.get("versionName").and_then(|v| v.as_str()).unwrap_or_default();
-            found.push(Update { id: g.id, from: from.to_string(), to: to.to_string() });
-        }
+    let games = installed();
+    let mut answers: Vec<Result<Option<Update>, String>> = Vec::new();
+    for chunk in games.chunks(4) {
+        std::thread::scope(|s| {
+            let running: Vec<_> = chunk.iter().map(|g| s.spawn(move || check_update(g))).collect();
+            answers.extend(running.into_iter().map(|r| r.join().unwrap_or_else(|_| Err("it stopped with an error".into()))));
+        });
     }
-    Ok(found)
+    answers.into_iter().filter_map(Result::transpose).collect()
+}
+
+fn check_update(g: &Installed) -> Result<Option<Update>, String> {
+    let Some(have) = installed_build(g) else { return Ok(None) };
+    let latest = info_for(&g.id, g.platform.as_deref().unwrap_or("windows")).map_err(|e| format!("GOG didn't say whether {} has an update: {e}", g.title))?;
+    let Some(newest) = latest.get("buildId").and_then(|b| b.as_str()) else { return Ok(None) };
+    if newest == have {
+        return Ok(None);
+    }
+    let builds = latest.get("builds").and_then(|b| b.get("items")).and_then(|i| i.as_array()).cloned().unwrap_or_default();
+    let from = builds.iter().find(|b| b.get("build_id").and_then(|i| i.as_str()) == Some(&have)).and_then(|b| b.get("version_name")?.as_str()).unwrap_or_default();
+    let to = latest.get("versionName").and_then(|v| v.as_str()).unwrap_or_default();
+    Ok(Some(Update { id: g.id.clone(), from: from.to_string(), to: to.to_string() }))
 }
 
 /// gogdl's update patches the folder from its saved manifest to the latest build, with the

@@ -6,6 +6,7 @@ mod drives;
 mod install;
 mod launch;
 mod library;
+mod log;
 mod run;
 mod sources;
 mod store;
@@ -77,16 +78,18 @@ pub fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// Every game the sources find, merged (no saved library involved: safe off the main thread).
+/// Store lists are as last saved: `stores::refresh_stale` brings them up to date (the window
+/// does that after showing the scan, as it takes a while).
 pub fn find_games() -> Result<Vec<Game>, String> {
     let home = sources::Home::find().ok_or("lobby: no home folder")?;
-    stores::refresh_stale();
     let found = sources::scan(&home);
-    let mut games = library::merge(found.entries, &found.roots);
-    artwork::fill(&home, &mut games);
+    let mut games = log::timed("scan: merging", || library::merge(found.entries, &found.roots));
+    log::timed("scan: covers", || artwork::fill(&home, &mut games));
     Ok(games)
 }
 
 fn scan() -> Result<Library, String> {
+    log::timed("scan: store lists and updates", stores::refresh_stale);
     let games = find_games()?;
     let mut lib = Library::load().unwrap_or_default();
     lib.update(games);
@@ -185,7 +188,7 @@ fn progress_printer() -> impl Fn(f64) {
 fn check_updates() -> Result<(), String> {
     for store in stores::Store::ALL.into_iter().filter(|s| s.account().is_some()) {
         let names = store.installed();
-        let found = match store.check_updates() {
+        let found = match log::timed(&format!("update check: {}", store.name()), || store.check_updates()) {
             Ok(found) => found,
             Err(e) => {
                 println!("{}: {e}", store.name());

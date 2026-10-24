@@ -100,10 +100,10 @@ fn gamefix_record(game: &Game) -> Option<PathBuf> {
 /// Undoes gamefix's setup (its app-menu entry, Steam shortcut, icons). gamefix finds its
 /// record by the game's name, so the game is given the record's name.
 fn undo_gamefix(game: &Game, folder: &Path, done: &mut Vec<String>) -> Result<(), String> {
-    let Some(record) = gamefix_record(game) else { return Ok(()) };
-    let Some(mut g) = gamefix::scan::scan(folder) else { return Ok(()) };
+    let Some(record) = crate::log::timed("uninstall: finding gamefix's record", || gamefix_record(game)) else { return Ok(()) };
+    let Some(mut g) = crate::log::timed("uninstall: gamefix scan", || gamefix::scan::scan(folder)) else { return Ok(()) };
     g.name = record.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let undone = gamefix::setup::undo(&g)?;
+    let undone = crate::log::timed("uninstall: gamefix's undo", || gamefix::setup::undo(&g))?;
     done.extend(undone.into_iter().filter(|l| !l.contains("Wine prefix")).map(|l| format!("✓ {l}")));
     let _ = fs::remove_file(&record);
     Ok(())
@@ -112,9 +112,10 @@ fn undo_gamefix(game: &Game, folder: &Path, done: &mut Vec<String>) -> Result<()
 /// Uninstalls the game; with `with_prefix`, its prefix too when no other game runs in it.
 /// Returns what it did, a line each.
 pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<String>, String> {
+    crate::log::line(&format!("uninstall {}", game.name));
     let mut done = Vec::new();
-    let how = how(game);
-    let prefix = prefix(game);
+    let how = crate::log::timed("uninstall: what kind of install", || how(game));
+    let prefix = crate::log::timed("uninstall: its prefix", || prefix(game));
     let folder = match &how {
         How::Store(store, id) => store.installed().into_iter().find(|g| &g.id == id).map(|g| g.folder),
         How::Folder(f) => Some(f.clone()),
@@ -129,7 +130,7 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
     // (when the store keeps them).
     let mut delete_prefix = None;
     if let (true, Some(p)) = (with_prefix, &prefix) {
-        let shared = prefix_shared_with(p, game, all);
+        let shared = crate::log::timed("uninstall: other games in its prefix", || prefix_shared_with(p, game, all));
         if !shared.is_empty() {
             done.push(format!("Kept its Wine prefix {}: {} run in it too.", p.display(), shared.join(", ")));
         } else if !deletable_prefix(p) {
@@ -137,9 +138,9 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
         } else {
             let mut safe = true;
             if let How::Store(store, id) = &how {
-                if saves::supported(*store, id) {
+                if crate::log::timed("uninstall: cloud saves?", || saves::supported(*store, id)) {
                     let env = crate::launch::wine_command(game).map(|w| w.env).unwrap_or_default();
-                    match saves::sync(*store, id, &env, Direction::Up) {
+                    match crate::log::timed("uninstall: saves up", || saves::sync(*store, id, &env, Direction::Up)) {
                         Ok(saves::Synced::Conflict) => {
                             safe = false;
                             done.push(format!("Kept its Wine prefix {}: its saves there and in {}'s cloud both changed since the last sync. Play it once from lobby to choose which to keep.", p.display(), store.name()));
@@ -159,21 +160,21 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
     }
 
     if let Some(folder) = &folder {
-        undo_gamefix(game, folder, &mut done)?;
+        crate::log::timed("uninstall: gamefix undo", || undo_gamefix(game, folder, &mut done))?;
     }
     match &how {
         How::Store(store, id) => {
-            store.uninstall(id)?;
+            crate::log::timed("uninstall: store's uninstall", || store.uninstall(id))?;
             done.push(format!("✓ Removed its files ({}).", folder.as_ref().map_or_else(String::new, |f| f.display().to_string())));
         }
         How::Folder(f) => {
-            fs::remove_dir_all(f).map_err(|e| format!("Couldn't delete {}: {e}", f.display()))?;
+            crate::log::timed("uninstall: deleting the folder", || fs::remove_dir_all(f)).map_err(|e| format!("Couldn't delete {}: {e}", f.display()))?;
             done.push(format!("✓ Deleted {}.", f.display()));
         }
         _ => {}
     }
     if let Some(p) = delete_prefix {
-        fs::remove_dir_all(&p).map_err(|e| format!("Couldn't delete its Wine prefix {}: {e}", p.display()))?;
+        crate::log::timed("uninstall: deleting the prefix", || fs::remove_dir_all(&p)).map_err(|e| format!("Couldn't delete its Wine prefix {}: {e}", p.display()))?;
         done.push(format!("✓ Deleted its Wine prefix {} (its settings and saves on this computer).", p.display()));
     } else if let (false, Some(p)) = (with_prefix, &prefix) {
         done.push(format!("Kept its Wine prefix {} (its settings and saves).", p.display()));

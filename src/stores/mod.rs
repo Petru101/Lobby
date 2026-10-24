@@ -331,8 +331,13 @@ fn owned_when(store: Store) -> u64 {
     fs::read_to_string(owned_file(store)).ok().and_then(|t| serde_json::from_str::<OwnedList>(&t).ok()).map_or(0, |l| l.when)
 }
 
-/// Brings each signed-in store's owned list up to date when it's more than a few hours old (a
-/// scan does this; a failure keeps the saved list).
+/// Whether a signed-in store's owned list is more than a few hours old.
+pub fn stale() -> bool {
+    Store::ALL.into_iter().any(|s| s.account().is_some() && crate::store::now().saturating_sub(owned_when(s)) > 6 * 3600)
+}
+
+/// Brings each signed-in store's owned list and update check up to date when they're more than
+/// a few hours old (a failure keeps the saved ones).
 pub fn refresh_stale() {
     for store in Store::ALL {
         if store.account().is_some() && crate::store::now().saturating_sub(owned_when(store)) > 6 * 3600 {

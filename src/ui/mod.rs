@@ -146,6 +146,11 @@ struct Ui {
     lib: RefCell<Library>,
     filter: Cell<Filter>,
     scanning: Cell<bool>,
+    /// A rescan was asked for during a scan (after an uninstall, say): another runs after it,
+    /// since that scan may have read the disk before the change.
+    scan_again: Cell<bool>,
+    /// Store lists and update checks are being brought up to date in the background.
+    refreshing_stores: Cell<bool>,
     /// Games being installed (one install each at a time), with how far each is: 0 to 100, or
     /// below 0 when the tool doesn't say (unpacking an archive).
     installing: RefCell<Vec<(String, Arc<Mutex<f64>>, &'static str)>>,
@@ -205,7 +210,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (f, label, tip) in Filter::ALL {
@@ -407,12 +412,14 @@ impl Ui {
 
     fn rescan(self: &Rc<Self>) {
         if self.scanning.replace(true) {
+            self.scan_again.set(true);
             return;
         }
         self.rescan_button.set_sensitive(false);
         let u = self.clone();
         glib::spawn_future_local(async move {
-            let found = gio::spawn_blocking(crate::find_games).await;
+            crate::log::line("scan starts");
+            let found = gio::spawn_blocking(|| crate::log::timed("scan", crate::find_games)).await;
             u.scanning.set(false);
             u.rescan_button.set_sensitive(true);
             match found {
@@ -428,6 +435,25 @@ impl Ui {
                 Ok(Err(e)) => u.alert("Couldn't look for games", &e),
                 Err(_) => u.alert("Couldn't look for games", "The scan stopped with an error."),
             }
+            if u.scan_again.take() {
+                u.rescan();
+            } else {
+                u.refresh_stores();
+            }
+        });
+    }
+
+    /// Store lists and update checks more than a few hours old are fetched again in the
+    /// background (a minute or so), then the library is looked at again.
+    fn refresh_stores(self: &Rc<Self>) {
+        if !crate::stores::stale() || self.refreshing_stores.replace(true) {
+            return;
+        }
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let _ = gio::spawn_blocking(|| crate::log::timed("store lists and updates", crate::stores::refresh_stale)).await;
+            u.refreshing_stores.set(false);
+            u.rescan();
         });
     }
 
@@ -533,9 +559,9 @@ impl Ui {
         alert.set_response_appearance("uninstall", adw::ResponseAppearance::Destructive);
         alert.set_default_response(Some("cancel"));
         let check = gtk::CheckButton::builder().label("Also delete its Wine prefix").build();
-        if let Some(prefix) = crate::uninstall::prefix(&game) {
-            let shared = crate::uninstall::prefix_shared_with(&prefix, &game, &self.lib.borrow().games);
-            let cloud = crate::stores::installed_in(&game).filter(|(s, i)| crate::stores::saves::supported(*s, i)).map(|(s, _)| s.name());
+        if let Some(prefix) = crate::log::timed("question: its prefix", || crate::uninstall::prefix(&game)) {
+            let shared = crate::log::timed("question: other games in its prefix", || crate::uninstall::prefix_shared_with(&prefix, &game, &self.lib.borrow().games));
+            let cloud = crate::log::timed("question: cloud saves?", || crate::stores::installed_in(&game).filter(|(s, i)| crate::stores::saves::supported(*s, i)).map(|(s, _)| s.name()));
             let note = if !shared.is_empty() {
                 check.set_sensitive(false);
                 let names = if shared.len() > 3 { format!("{} other games ({}, …)", shared.len(), shared[..3].join(", ")) } else { shared.join(", ") };
@@ -572,6 +598,14 @@ impl Ui {
         glib::spawn_future_local(async move {
             let g = game.clone();
             let result = u.with_progress(&game.id, "Uninstalling…", move |_| crate::uninstall::uninstall(&g, &all, with_prefix)).await.unwrap_or_else(|| Err("it stopped with an error".into()));
+            // Its card goes now; the scan that follows shows what's left (a store game as not
+            // installed).
+            if result.is_ok() && !matches!(crate::uninstall::how(&game), crate::uninstall::How::Steam(_)) {
+                if let Some(g) = u.lib.borrow_mut().get_mut(&game.id) {
+                    g.gone = true;
+                }
+                u.refilter();
+            }
             match result {
                 Ok(done) if done.iter().all(|l| l.starts_with('✓') || l.starts_with("Steam")) => u.toast(&format!("{}: {}", game.name, if done.iter().any(|l| l.starts_with("Steam")) { "Steam asks you to confirm." } else { "uninstalled." })),
                 Ok(done) => u.alert(&format!("{} is uninstalled", game.name), &done.join("\n")),
