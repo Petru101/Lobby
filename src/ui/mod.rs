@@ -959,6 +959,7 @@ impl Ui {
         });
         let at = Rc::new(Cell::new(0usize));
         let (d, u) = (dialog.clone(), self.clone());
+        let claimed_games = games.clone();
         next.connect_clicked(move |b| {
             let i = at.get() + 1;
             if i >= games.len() {
@@ -973,11 +974,27 @@ impl Ui {
             web.load_uri(&target(&games[i]));
         });
         // Closed (Done or the window's close): the owned list is fetched again, so what was
-        // claimed shows as owned.
+        // claimed shows as owned, and the user is told which games are theirs now.
         dialog.connect_closed(move |_| {
-            let u = u.clone();
+            let (u, games) = (u.clone(), claimed_games.clone());
+            u.toast("Checking your Epic library…");
             glib::spawn_future_local(async move {
-                let _ = gio::spawn_blocking(|| crate::stores::Store::Epic.refresh_owned()).await;
+                let owned = gio::spawn_blocking(|| crate::stores::Store::Epic.refresh_owned().map(|_| crate::stores::epic::owned_items())).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+                match owned {
+                    Ok(items) => {
+                        let (got, not): (Vec<_>, Vec<_>) = games.iter().partition(|g| crate::free::owned(g, &items));
+                        let names = |l: &[&crate::free::FreeGame]| l.iter().map(|g| g.title.clone()).collect::<Vec<_>>().join(", ");
+                        let mut said = Vec::new();
+                        if !got.is_empty() {
+                            said.push(format!("{} {} in your Epic library now: Not installed has {}.", names(&got), if got.len() == 1 { "is" } else { "are" }, if got.len() == 1 { "it" } else { "them" }));
+                        }
+                        if !not.is_empty() {
+                            said.push(format!("Not added: {}.", names(&not)));
+                        }
+                        u.toast(&said.join(" "));
+                    }
+                    Err(e) => u.toast(&format!("Couldn't check your Epic library: {e}")),
+                }
                 u.rescan();
             });
         });
