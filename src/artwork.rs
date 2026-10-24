@@ -121,7 +121,7 @@ fn curl(url: &str) -> Result<Vec<u8>, Failed> {
     if out.status.success() { Ok(out.stdout) } else { Err(Failed) }
 }
 
-fn query_arg(s: &str) -> String {
+pub(crate) fn query_arg(s: &str) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 

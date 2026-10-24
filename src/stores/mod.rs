@@ -429,7 +429,7 @@ fn output(mut command: Command) -> Result<String, String> {
 
 /// A web request with the account's token, its answer as JSON. The token goes to curl on its
 /// standard input, not its command line (where other programs could see it).
-fn get_json(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
+pub(crate) fn get_json(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
     let mut command = Command::new("curl");
     command.args(["-sSf", "--max-time", "30", "-A", "lobby", url]);
     if token.is_some() {

@@ -3,6 +3,7 @@
 
 mod artwork;
 mod drives;
+mod free;
 mod install;
 mod launch;
 mod library;
@@ -29,6 +30,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby dlc <game> [<dlc>]  the DLC you own for a game lobby installed; install one
        lobby saves <game> [down|up|keep-cloud|keep-local]  sync a store game's cloud saves now
        lobby uninstall <game> [--keep-prefix]  delete a game lobby installed (and its Wine prefix)
+       lobby free              games free to keep now and next (claim them from the window)
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
 
 fn main() -> ExitCode {
@@ -49,6 +51,7 @@ fn main() -> ExitCode {
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
+        (Some("free"), []) => free_games(),
         (Some("uninstall"), words) if !words.is_empty() => uninstall_game(&words.join(" "), args.iter().any(|a| a == "--keep-prefix")),
         (Some("saves"), [game, way @ ..]) if way.len() <= 1 => sync_saves(game, way.first().copied().unwrap_or("down")),
         // The question `lobby run` asks when saves changed both here and in the cloud (to see it).
@@ -272,6 +275,16 @@ fn uninstall_game(query: &str, keep_prefix: bool) -> Result<(), String> {
         println!("  {l}");
     }
     scan().map(|_| ())
+}
+
+fn free_games() -> Result<(), String> {
+    let games = free::list()?;
+    let epic = stores::epic::owned_items();
+    for g in &games {
+        let state = if g.from.is_some() { "" } else if free::owned(g, &epic) { "  (in your library)" } else { "  (not claimed)" };
+        println!("{}: {}, {}{state}", g.store, g.title, free::when(g));
+    }
+    Ok(())
 }
 
 fn take_over_heroic() -> Result<(), String> {

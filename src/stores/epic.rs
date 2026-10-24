@@ -103,6 +103,38 @@ pub fn cloud_save_folder(app: &str) -> Option<String> {
     item.get("metadata")?.get("customAttributes")?.get("CloudSaveFolder")?.get("value")?.as_str().filter(|v| !v.is_empty()).map(String::from)
 }
 
+/// What the account owns on Epic, from legendary's saved details: every catalog item (games,
+/// DLC, anything), and the namespaces of its games.
+pub struct OwnedItems {
+    pub items: Vec<String>,
+    pub game_namespaces: Vec<String>,
+}
+
+pub fn owned_items() -> OwnedItems {
+    let saved = saved_items();
+    let items = saved.iter().filter_map(|i| i.get("metadata")?.get("id")?.as_str().map(String::from)).collect();
+    let game_namespaces = saved.iter().filter(|i| is_game(i)).filter_map(|i| i.get("metadata")?.get("namespace")?.as_str().map(String::from)).collect();
+    OwnedItems { items, game_namespaces }
+}
+
+/// An address that signs lobby's browser window in to Epic's website with lobby's Epic
+/// sign-in, then goes to `then` (no password: legendary's session gives a one-time exchange
+/// code, which Epic's site accepts; Epic's own launcher signs its store pages in this way).
+pub fn web_sign_in(then: &str) -> Result<String, String> {
+    // `auth` with a sign-in saved checks it, renewing the token when it has run out (and
+    // stops there; with none valid it would ask for a new one: no input, so it fails).
+    let mut command = legendary()?;
+    let out = command.args(["auth", "--disable-webview"]).stdin(std::process::Stdio::null()).env("NO_COLOR", "1").output().map_err(|e| e.to_string())?;
+    if !String::from_utf8_lossy(&out.stderr).contains("still valid") {
+        return Err("Epic's sign-in has run out: sign in again under Accounts.".into());
+    }
+    let user: serde_json::Value = read_json(&config().join("user.json"));
+    let token = user.get("access_token").and_then(|t| t.as_str()).ok_or("Lobby isn't signed in to Epic: sign in under Accounts.")?;
+    let answer = super::get_json("https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/exchange", Some(token))?;
+    let code = answer.get("code").and_then(|c| c.as_str()).ok_or("Epic didn't give a sign-in code.")?;
+    Ok(format!("https://www.epicgames.com/id/exchange?exchangeCode={code}&redirectUrl={}", crate::artwork::query_arg(then)))
+}
+
 /// legendary's installed.json: app name to what it installed.
 fn installed_json() -> BTreeMap<String, serde_json::Value> {
     read_json(&config().join("installed.json"))

@@ -151,6 +151,7 @@ struct Ui {
     scan_again: Cell<bool>,
     /// Store lists and update checks are being brought up to date in the background.
     refreshing_stores: Cell<bool>,
+    free_button: gtk::Button,
     /// Games being installed (one install each at a time), with how far each is: 0 to 100, or
     /// below 0 when the tool doesn't say (unpacking an archive).
     installing: RefCell<Vec<(String, Arc<Mutex<f64>>, &'static str)>>,
@@ -170,6 +171,8 @@ fn build(app: &adw::Application) {
     header.pack_start(&rescan_button);
     let accounts_button = gtk::Button::builder().icon_name("avatar-default-symbolic").tooltip_text("Store accounts: Epic Games and GOG").build();
     header.pack_start(&accounts_button);
+    let free_button = gtk::Button::builder().label("Free games").tooltip_text("Games free to keep right now on Epic, GOG and Steam").build();
+    header.pack_start(&free_button);
     let search = gtk::SearchEntry::builder().placeholder_text("Search games").width_chars(28).build();
     header.pack_end(&search);
 
@@ -210,7 +213,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (f, label, tip) in Filter::ALL {
@@ -260,6 +263,8 @@ fn build(app: &adw::Application) {
     rescan_button.connect_clicked(move |_| u.rescan());
     let u = ui.clone();
     accounts_button.connect_clicked(move |_| u.accounts());
+    let u = ui.clone();
+    free_button.connect_clicked(move |_| u.free_games());
 
     let action = gio::SimpleAction::new("search", None);
     let s = search.clone();
@@ -290,7 +295,8 @@ fn build(app: &adw::Application) {
 /// searches, LOBBY_SNAPSHOT_FILTER=<n> picks a filter, LOBBY_SNAPSHOT_INSTALLED=<game id>
 /// shows that game as just installed, LOBBY_SNAPSHOT_ACCOUNTS=1 the accounts,
 /// LOBBY_SNAPSHOT_SIGNIN=epic|gog a store's sign-in page, LOBBY_SNAPSHOT_UNINSTALL=<game id>
-/// the question before uninstalling it),
+/// the question before uninstalling it, LOBBY_SNAPSHOT_FREE=1 the free games,
+/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
@@ -330,12 +336,30 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if let Some((id, details)) = std::env::var("LOBBY_SNAPSHOT_UNINSTALL").ok().and_then(|id| Some((id.clone(), u.details(&id)?))) {
             u.ask_uninstall(&id, &details);
         }
+        if std::env::var_os("LOBBY_SNAPSHOT_FREE").is_some() {
+            u.free_games();
+        }
+        // LOBBY_SNAPSHOT_CLAIM=<title>: that free game's claim page (signed in; nothing is
+        // pressed), also saved as WebKit draws it (<out>.page.png).
+        let claiming = std::env::var("LOBBY_SNAPSHOT_CLAIM").ok();
+        if let Some(title) = &claiming {
+            let t = title.clone();
+            let games = gio::spawn_blocking(move || crate::free::list().unwrap_or_default().into_iter().filter(|g| g.title == t).collect::<Vec<_>>()).await.unwrap_or_default();
+            if let Some(web) = u.claim(games) {
+                glib::timeout_future(std::time::Duration::from_secs(25)).await;
+                let page = file.with_extension("page.png");
+                web.snapshot(webkit6::SnapshotRegion::Visible, webkit6::SnapshotOptions::NONE, gio::Cancellable::NONE, move |r| {
+                    eprintln!("page snapshot: {:?}", r.map(|t| t.save_to_png(&page)));
+                });
+            }
+        }
         // The cover picker's searches take a while.
         let picker = std::env::var("LOBBY_SNAPSHOT_PICKER").ok();
         if let Some((id, details)) = picker.as_ref().and_then(|id| Some((id, u.details(id)?))) {
             u.choose_cover(id, &details);
         }
-        glib::timeout_future(std::time::Duration::from_secs(if picker.is_some() { 20 } else { 5 })).await;
+        let slow = picker.is_some() || std::env::var_os("LOBBY_SNAPSHOT_FREE").is_some();
+        glib::timeout_future(std::time::Duration::from_secs(if slow { 20 } else { 5 })).await;
         let (w, h) = (u.window.width(), u.window.height());
         let paintable = gtk::WidgetPaintable::new(Some(&u.window));
         let snapshot = gtk::Snapshot::new();
@@ -439,6 +463,7 @@ impl Ui {
                 u.rescan();
             } else {
                 u.refresh_stores();
+                u.check_free();
             }
         });
     }
@@ -731,6 +756,232 @@ impl Ui {
                 bar.set_text(Some(&format!("Downloading {p:.0}%")));
             }
         }
+    }
+
+    /// What's free to keep now and next, each with whether the account has it and a way to
+    /// claim it: Epic's in lobby's window (the user places the order), the rest in the browser.
+    fn free_games(self: &Rc<Self>) {
+        let flow = gtk::FlowBox::builder().valign(gtk::Align::Start).homogeneous(true).min_children_per_line(2).max_children_per_line(6).column_spacing(12).row_spacing(18).selection_mode(gtk::SelectionMode::None).build();
+        let status = adw::StatusPage::builder().title("Looking for free games…").build();
+        status.set_child(Some(&adw::Spinner::builder().width_request(32).height_request(32).build()));
+        let stack = gtk::Stack::new();
+        stack.add_named(&status, Some("looking"));
+        let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
+        page.append(&flow);
+        stack.add_named(&gtk::ScrolledWindow::builder().child(&page).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build(), Some("list"));
+        let header = adw::HeaderBar::new();
+        let claim_all = gtk::Button::builder().label("Claim all").visible(false).build();
+        claim_all.add_css_class("suggested-action");
+        header.pack_start(&claim_all);
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&header);
+        view.set_content(Some(&stack));
+        let dialog = adw::Dialog::builder().title("Free games").content_width(860).content_height(700).child(&view).build();
+        dialog.present(Some(&self.window));
+
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let found = gio::spawn_blocking(|| crate::free::list().map(|games| (games, crate::stores::epic::owned_items()))).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+            let (games, items) = match found {
+                Ok(f) => f,
+                Err(e) => {
+                    status.set_title("Couldn't look for free games");
+                    status.set_description(Some(&e));
+                    status.set_child(None::<&gtk::Widget>);
+                    return;
+                }
+            };
+            let signed_in = crate::stores::Store::Epic.account().is_some();
+            let mut to_claim = Vec::new();
+            for g in &games {
+                let owned = crate::free::owned(g, &items);
+                if !owned && g.from.is_none() && signed_in && g.store == crate::stores::Store::Epic.name() {
+                    to_claim.push(g.clone());
+                }
+                flow.append(&u.free_card(g, owned, &items.items, signed_in, &dialog));
+            }
+            if !to_claim.is_empty() {
+                claim_all.set_label(&format!("Claim all on Epic ({})", to_claim.len()));
+                claim_all.set_visible(true);
+                let (u, d) = (u.clone(), dialog.clone());
+                claim_all.connect_clicked(move |_| {
+                    d.close();
+                    u.claim(to_claim.clone());
+                });
+            }
+            stack.set_visible_child_name("list");
+        });
+    }
+
+    /// How many games are free to keep now that the account doesn't have (on the header's
+    /// button), and a desktop notification for new ones.
+    fn check_free(self: &Rc<Self>) {
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            // A checking run (LOBBY_SNAPSHOT) neither notifies nor marks anything announced.
+            let checking = std::env::var_os("LOBBY_SNAPSHOT").is_some();
+            let Ok(Ok((count, new))) = gio::spawn_blocking(move || {
+                crate::free::list().map(|games| {
+                    let epic = crate::stores::epic::owned_items();
+                    let count = games.iter().filter(|g| g.from.is_none() && !crate::free::owned(g, &epic)).count();
+                    (count, if checking { Vec::new() } else { crate::free::not_announced(&games, &epic) })
+                })
+            })
+            .await
+            else {
+                return;
+            };
+            u.free_button.set_label(&if count > 0 { format!("Free games ({count})") } else { "Free games".to_string() });
+            if !new.is_empty() {
+                let names: Vec<String> = new.iter().map(|g| format!("{} ({}, {})", g.title, g.store, crate::free::when(g))).collect();
+                let _ = std::process::Command::new("notify-send").args(["-a", "Lobby", "Free to keep", &names.join("\n")]).stdin(std::process::Stdio::null()).spawn();
+            }
+        });
+    }
+
+    fn free_card(self: &Rc<Self>, g: &crate::free::FreeGame, owned: bool, items_owned: &[String], signed_in: bool, dialog: &adw::Dialog) -> gtk::FlowBoxChild {
+        use crate::free::Claim;
+        let overlay = gtk::Overlay::builder().width_request(120).height_request(180).overflow(gtk::Overflow::Hidden).halign(gtk::Align::Center).build();
+        overlay.add_css_class("cover");
+        let back = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        back.add_css_class("cover-placeholder");
+        back.add_css_class("tint-0");
+        overlay.set_child(Some(&back));
+        if let Some(cover) = &g.cover {
+            add_cover(&overlay, cover, 120, 180);
+        }
+        let title = gtk::Label::builder().label(&g.title).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).build();
+        title.add_css_class("caption-heading");
+        let when = gtk::Label::builder().label(format!("{} · {}", g.store, crate::free::when(g))).xalign(0.0).wrap(true).max_width_chars(1).build();
+        when.add_css_class("dim-label");
+        when.add_css_class("caption");
+        let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).width_request(140).halign(gtk::Align::Center).build();
+        body.append(&overlay);
+        body.append(&title);
+        body.append(&when);
+        let epic = matches!(g.claim, Claim::EpicCheckout { .. } | Claim::EpicPage(_));
+        if owned {
+            let have = gtk::Label::builder().label("In your library").xalign(0.0).build();
+            have.add_css_class("success");
+            have.add_css_class("caption");
+            body.append(&have);
+        }
+        // Owned by its game, not this offer's own item: Epic may still add it (another
+        // edition), so it can be claimed anyway.
+        let anyway = owned && signed_in && g.from.is_none() && matches!(g.claim, Claim::EpicCheckout { .. }) && !g.items.is_empty() && !g.items.iter().all(|i| items_owned.contains(i));
+        if anyway {
+            let button = gtk::Button::builder().label("Claim anyway").halign(gtk::Align::Start).build();
+            button.add_css_class("flat");
+            button.add_css_class("caption");
+            body.append(&button);
+            let (u, d, game) = (self.clone(), dialog.clone(), g.clone());
+            button.connect_clicked(move |_| {
+                d.close();
+                u.claim(vec![game.clone()]);
+            });
+        } else if !owned && g.from.is_none() {
+            let label = if epic && signed_in { "Claim" } else if epic { "Sign in to Epic to claim" } else { "Open in browser" };
+            let button = gtk::Button::builder().label(label).margin_top(4).sensitive(!epic || signed_in).build();
+            button.add_css_class("pill");
+            if epic {
+                button.add_css_class("suggested-action");
+            }
+            body.append(&button);
+            let (u, d, game) = (self.clone(), dialog.clone(), g.clone());
+            button.connect_clicked(move |_| match &game.claim {
+                Claim::Browser(url) => gtk::UriLauncher::new(url).launch(Some(&u.window), gio::Cancellable::NONE, |_| {}),
+                _ => {
+                    d.close();
+                    u.claim(vec![game.clone()]);
+                }
+            });
+        }
+        gtk::FlowBoxChild::builder().child(&body).tooltip_text(&g.title).build()
+    }
+
+    /// Claims Epic's free games one after the other in lobby's window, signed in to Epic's site
+    /// with lobby's Epic sign-in: each opens at its checkout (or store page), the user places
+    /// the order (and answers Epic's captcha when it asks), then goes on with Next. Lobby never
+    /// presses anything on Epic's pages. Afterwards the owned list is fetched again.
+    fn claim(self: &Rc<Self>, games: Vec<crate::free::FreeGame>) -> Option<webkit6::WebView> {
+        use crate::free::Claim;
+        if games.is_empty() {
+            return None;
+        }
+        let target = |g: &crate::free::FreeGame| match &g.claim {
+            Claim::EpicCheckout { namespace, offer } => crate::free::epic_checkout(namespace, offer),
+            Claim::EpicPage(url) | Claim::Browser(url) => url.clone(),
+        };
+        let session = webkit6::NetworkSession::new_ephemeral();
+        let web = webkit6::WebView::builder().network_session(&session).vexpand(true).hexpand(true).build();
+        web.connect_create(|web, action| {
+            if let Some(uri) = action.request().and_then(|r| r.uri()) {
+                web.load_uri(&uri);
+            }
+            None
+        });
+        let header = adw::HeaderBar::new();
+        let next = gtk::Button::builder().label(if games.len() > 1 { "Next game" } else { "Done" }).build();
+        next.add_css_class("suggested-action");
+        header.pack_end(&next);
+        let note = gtk::Label::builder().label("Place the order yourself; Lobby only opens the page.").build();
+        note.add_css_class("dim-label");
+        header.pack_start(&note);
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&header);
+        view.set_content(Some(&web));
+        let name = |games: &[crate::free::FreeGame], i: usize| format!("Claim {} ({} of {})", games[i].title, i + 1, games.len());
+        let dialog = adw::Dialog::builder().title(name(&games, 0)).content_width(1000).content_height(820).child(&view).build();
+        dialog.present(Some(&self.window));
+
+        // The first page through Epic's sign-in; the window stays signed in for the rest. Epic's
+        // sign-in only goes on to Epic's own pages: another (GamerPower's link, which forwards
+        // to Epic's store) is opened once the store's home page has loaded signed in.
+        let first = target(&games[0]);
+        let epic_page = |u: &str| u.starts_with("https://www.epicgames.com/") || u.starts_with("https://store.epicgames.com/");
+        let after_sign_in = Rc::new(RefCell::new((!epic_page(&first)).then(|| first.clone())));
+        let then = if epic_page(&first) { first } else { "https://store.epicgames.com/".to_string() };
+        let pending = after_sign_in.clone();
+        web.connect_load_changed(move |web, event| {
+            if event == webkit6::LoadEvent::Finished && web.uri().is_some_and(|u| u.starts_with("https://store.epicgames.com/")) {
+                if let Some(url) = pending.borrow_mut().take() {
+                    web.load_uri(&url);
+                }
+            }
+        });
+        let w = web.clone();
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || crate::stores::epic::web_sign_in(&then)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                Ok(url) => w.load_uri(&url),
+                Err(e) => u.alert("Couldn't sign in to Epic's store", &e),
+            }
+        });
+        let at = Rc::new(Cell::new(0usize));
+        let (d, u) = (dialog.clone(), self.clone());
+        next.connect_clicked(move |b| {
+            let i = at.get() + 1;
+            if i >= games.len() {
+                d.close();
+                return;
+            }
+            at.set(i);
+            d.set_title(&name(&games, i));
+            if i + 1 == games.len() {
+                b.set_label("Done");
+            }
+            web.load_uri(&target(&games[i]));
+        });
+        // Closed (Done or the window's close): the owned list is fetched again, so what was
+        // claimed shows as owned.
+        dialog.connect_closed(move |_| {
+            let u = u.clone();
+            glib::spawn_future_local(async move {
+                let _ = gio::spawn_blocking(|| crate::stores::Store::Epic.refresh_owned()).await;
+                u.rescan();
+            });
+        });
+        Some(view.content().and_downcast::<webkit6::WebView>()?)
     }
 
     /// The stores lobby can sign in to, signed in or not.
