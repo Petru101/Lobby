@@ -560,7 +560,30 @@ impl Ui {
         let u = self.clone();
         glib::spawn_future_local(async move {
             let g = game.clone();
-            let result = u.with_progress(&game.id, "Installing…", move |p| crate::install::install(&g, p)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
+            let placed = u.with_progress(&game.id, "Installing…", move |p| crate::install::place(&g, p)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
+            let result = match placed {
+                Ok(placed) => {
+                    // Java or a runner from Flathub first, when the game needs one: asked.
+                    let target = placed.target.clone();
+                    let need = gio::spawn_blocking(move || launch::setup_need(&target).map(|n| {
+                        let described = n.describe();
+                        (n, described)
+                    }))
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some((need, (what, size))) = need {
+                        if u.ask_install_need(&game.name, &what, size.as_deref()).await {
+                            let installed = u.with_progress(&game.id, "Installing…", move |_| need.install()).await.unwrap_or_else(|| Err("it stopped with an error".into()));
+                            if let Err(e) = installed {
+                                u.alert(&format!("{what} couldn't be installed"), &e);
+                            }
+                        }
+                    }
+                    u.with_progress(&game.id, "Setting up…", move |_| crate::install::set_up(placed)).await.ok_or_else(|| "gamefix stopped with an error.".to_string())
+                }
+                Err(e) => Err(e),
+            };
             if result.is_err() {
                 u.fill();
             }

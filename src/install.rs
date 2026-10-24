@@ -100,31 +100,47 @@ pub struct Installed {
     pub entry: Option<PathBuf>,
 }
 
-/// Installs a downloaded game and sets it up. Takes a while: unpacking, or the installer the
-/// user clicks through.
-pub fn install(game: &Game, progress: &dyn Fn(f64)) -> Result<Installed, String> {
+/// A game's files in place, not set up yet: the folder (or the installer, which gamefix runs),
+/// and the name to set it up under (None: gamefix names it after what it installs).
+pub struct Placed {
+    pub target: PathBuf,
+    pub name: Option<String>,
+    lines: Vec<String>,
+}
+
+/// Puts a game's files in place: a download unpacked into the games folder (an installer or a
+/// disc image stays as it is), or an owned game downloaded from its store. Takes a while.
+/// What the game needs to run (`launch::setup_need`) is asked about after this, before
+/// `set_up`.
+pub fn place(game: &Game, progress: &dyn Fn(f64)) -> Result<Placed, String> {
     if game.kind == Kind::Owned {
-        return install_owned(game, progress);
+        let (store, id) = owned_in(game).ok_or_else(|| format!("{} isn't owned in a store lobby is signed in to.", game.name))?;
+        let folder = store.install(&id, progress)?;
+        let lines = vec![format!("✓ Downloaded it from {} into {}.", store.name(), folder.display())];
+        return Ok(Placed { target: folder, name: Some(game.name.clone()), lines });
     }
     let file = download(game).ok_or_else(|| format!("{}'s download isn't there any more.", game.name))?;
-    let mut lines = Vec::new();
     // An unpacked game is named as lobby names it; an installer or a disc image is run by
     // gamefix, which names it after what it installs.
-    let (target, name) = if archive_kind(&file).is_some() {
+    if archive_kind(&file).is_some() {
         let folder = unpack_into_games(game, &file)?;
-        lines.push(format!("✓ Unpacked it into {}.", folder.display()));
-        (folder, Some(game.name.as_str()))
-    } else {
-        (file.clone(), None)
-    };
-    match crate::launch::set_up(&target, name) {
+        let lines = vec![format!("✓ Unpacked it into {}.", folder.display())];
+        return Ok(Placed { target: folder, name: Some(game.name.clone()), lines });
+    }
+    Ok(Placed { target: file, name: None, lines: Vec::new() })
+}
+
+/// gamefix sets the placed game up (an app-menu entry with its fixes, which starts it).
+pub fn set_up(placed: Placed) -> Installed {
+    let mut lines = placed.lines;
+    match crate::launch::set_up(&placed.target, placed.name.as_deref()) {
         Ok((done, entry)) => {
             lines.extend(done);
-            Ok(Installed { lines, entry })
+            Installed { lines, entry }
         }
         Err(e) => {
             lines.push(format!("✗ {e}"));
-            Ok(Installed { lines, entry: None })
+            Installed { lines, entry: None }
         }
     }
 }
@@ -135,23 +151,6 @@ pub fn owned_in(game: &Game) -> Option<(crate::stores::Store, String)> {
         crate::library::Key::Store(s, id) => Some((crate::stores::Store::from_id(s)?, id.clone())),
         _ => None,
     })
-}
-
-/// Downloads an owned game with the store's tool, then gamefix sets the folder up.
-fn install_owned(game: &Game, progress: &dyn Fn(f64)) -> Result<Installed, String> {
-    let (store, id) = owned_in(game).ok_or_else(|| format!("{} isn't owned in a store lobby is signed in to.", game.name))?;
-    let folder = store.install(&id, progress)?;
-    let mut lines = vec![format!("✓ Downloaded it from {} into {}.", store.name(), folder.display())];
-    match crate::launch::set_up(&folder, Some(&game.name)) {
-        Ok((done, entry)) => {
-            lines.extend(done);
-            Ok(Installed { lines, entry })
-        }
-        Err(e) => {
-            lines.push(format!("✗ {e}"));
-            Ok(Installed { lines, entry: None })
-        }
-    }
 }
 
 #[cfg(test)]

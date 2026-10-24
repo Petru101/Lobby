@@ -151,13 +151,23 @@ fn install(query: &str) -> Result<(), String> {
         return Err(format!("{} isn't a download or an owned game waiting to be installed.", game.name));
     }
     println!("Installing {}…", game.name);
-    let shown = std::cell::Cell::new(-1);
-    let done = install::install(&game, &|p| {
-        if p as i32 / 5 != shown.get() {
-            shown.set(p as i32 / 5);
-            println!("  {p:.0}%");
+    let placed = install::place(&game, &progress_printer())?;
+    // What it needs to run (Java, a runner from Flathub): asked on the terminal.
+    if let Some(need) = launch::setup_need(&placed.target) {
+        let (what, size) = need.describe();
+        let size = size.map(|s| format!(" ({s} to download)")).unwrap_or_default();
+        print!("{} needs {what}, which isn't installed. Install it{size} for you only? [y/N] ", game.name);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut answer = String::new();
+        let yes = std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes");
+        if yes {
+            println!("Installing {what}…");
+            need.install()?;
+        } else {
+            println!();
         }
-    })?;
+    }
+    let done = install::set_up(placed);
     for l in &done.lines {
         println!("  {l}");
     }

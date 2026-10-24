@@ -31,8 +31,11 @@ pub fn how(game: &Game) -> How {
     if let Some(id) = keys().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None }) {
         return How::Steam(id);
     }
+    // The folder lobby unpacked into or gamefix installed into: the game's folder or one up to
+    // three above it (an archive's top folder holding the game's own: MoleTest/Mole Test/).
     let made = |f: &Path| f.join(crate::install::SOURCE_NOTE).is_file() || f.join("gamefix-install.txt").is_file();
-    if let Some(folder) = game.entries.iter().filter_map(|e| e.folder.clone().or_else(|| e.program.as_deref().and_then(Path::parent).map(Path::to_path_buf))).find(|f| made(f)) {
+    let places = game.entries.iter().flat_map(|e| [e.folder.clone(), e.program.as_deref().and_then(Path::parent).map(Path::to_path_buf)]).flatten();
+    if let Some(folder) = places.flat_map(|f| f.ancestors().take(4).map(Path::to_path_buf).collect::<Vec<_>>()).find(|f| made(f)) {
         return How::Folder(folder);
     }
     let launcher = game.entries.iter().find(|e| matches!(e.source, crate::library::Source::Heroic | crate::library::Source::Lutris | crate::library::Source::Faugus)).map(|e| e.source.label());
