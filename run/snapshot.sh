@@ -5,7 +5,8 @@
 # ADW_DEBUG_COLOR_SCHEME=prefer-dark ...)
 # The screen is gamescope's; when its Vulkan won't start (the NVIDIA driver sometimes refuses
 # new devices), or with SNAPSHOT_SCREEN=kwin, KWin's virtual one in a D-Bus session of its own
-# (so it can't touch the desktop's KWin), with GTK and WebKit drawing in software.
+# and a runtime folder of its own (so it can't touch the desktop's KWin, sockets or portal
+# mounts), with GTK and WebKit drawing in software.
 set -o pipefail
 dir=$(cd "$(dirname "$0")/.." && pwd)
 out=$(realpath -m "$1"); shift
@@ -18,13 +19,19 @@ if [ "$SNAPSHOT_SCREEN" = kwin ]; then
     {
         echo '#!/bin/sh'
         printf 'exec env GDK_BACKEND=wayland GSK_RENDERER=cairo GTK_A11Y=none WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 LOBBY_SNAPSHOT=%q' "$out"
-        printf ' %q' "$@"
+        [ $# -gt 0 ] && printf ' %q' "$@"
         printf ' %q\n' "$dir/target/release/lobby"
     } > "$session"
     chmod +x "$session"
-    timeout 150 host-spawn dbus-run-session -- kwin_wayland --virtual --socket "lobby-snapshot-$$" --width 1280 --height 860 --exit-with-session "$session"
+    # A runtime folder of its own too: portals started in that session mount and unmount there
+    # (sharing the desktop's, its document portal unmounted the desktop's /run/user/1000/doc
+    # on exit once).
+    runtime=$(mktemp -d "${TMPDIR:-/tmp}/lobby-snapshot-runtime-XXXXXX")
+    chmod 700 "$runtime"
+    timeout 150 host-spawn env XDG_RUNTIME_DIR="$runtime" dbus-run-session -- kwin_wayland --virtual --socket lobby-snapshot --width 1280 --height 860 --exit-with-session "$session"
     status=$?
-    rm -f "$session"
+    host-spawn sh -c "fusermount3 -u '$runtime/doc' 2>/dev/null; fusermount -u '$runtime/doc' 2>/dev/null; true"
+    rm -rf "$session" "$runtime"
     exit $status
 fi
 exec timeout 150 host-spawn gamescope --backend headless -W 1280 -H 860 -w 1280 -h 860 -- \
