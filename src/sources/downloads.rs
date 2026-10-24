@@ -13,6 +13,11 @@ const ARCHIVES: &[&str] = &["zip", "rar", "7z", "gz", "tgz", "xz", "bz2", "iso"]
 /// Whether lobby looks at the file at all.
 pub fn wanted(path: &Path) -> bool {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    // A split archive is looked at by its first part.
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if name.rsplit_once(".part").is_some_and(|(_, part)| part.trim_end_matches(".rar").parse::<u32>().is_ok_and(|n| n > 1)) {
+        return false;
+    }
     ext == "exe" || ext == "jar" || ARCHIVES.contains(&ext.as_str())
 }
 
@@ -31,7 +36,7 @@ fn runnable_jar(file: &Path) -> bool {
 }
 
 /// Words in a download's name that make it something for a game, not one.
-const NOT_A_GAME: &[&str] = &["patch", "fix", "mod", "mods", "trainer", "soundtrack", "ost", "wallpaper", "wallpapers", "manual", "save", "saves", "update", "redist", "dlc", "checksum", "plugin"];
+const NOT_A_GAME: &[&str] = &["patch", "fix", "mod", "mods", "trainer", "soundtrack", "ost", "wallpaper", "wallpapers", "manual", "save", "saves", "update", "redist", "dlc", "checksum", "plugin", "plugins", "tool", "tools", "addon", "addons", "asset", "assets", "assetpack", "blender", "texture", "textures", "documentation", "exiftool", "sdk"];
 
 /// The command's output lines, or None if it failed or took over 60 s. Never waits for input
 /// (an encrypted archive would otherwise ask for a password).
@@ -67,6 +72,20 @@ enum Holds {
     Android,
     Mod,
     Other,
+}
+
+/// Whether an archive's files show a game engine: Unity, Unreal, Godot, GameMaker, RPG Maker,
+/// Ren'Py, LÖVE, NW.js, MonoGame/FNA, Steam's or GOG's files.
+fn engine_files(names: &[String]) -> bool {
+    names.iter().map(|n| n.to_lowercase().replace('\\', "/")).any(|n| {
+        let file = n.rsplit('/').next().unwrap_or(&n).to_string();
+        ["unityplayer.dll", "unityplayer.so", "data.win", "game.ini", "nw.pak", "monogame.framework.dll", "fna.dll", "steam_api.dll", "steam_api64.dll", "libsteam_api.so"].contains(&file.as_str())
+            || [".pck", ".love", ".rgssad", ".rgss2a", ".rgss3a", ".rpa"].iter().any(|e| file.ends_with(e))
+            || file.starts_with("goggame-")
+            // Unity's data folder by Unity's own files in it (plenty of tools have a "*_data/").
+            || (n.contains("_data/") && ["globalgamemanagers", "resources.assets", "level0", "data.unity3d", "maindata"].contains(&file.as_str()))
+            || n.contains("/engine/binaries/") || n.starts_with("engine/binaries/") || n.contains("/renpy/") || n.starts_with("renpy/")
+    })
 }
 
 fn holds(names: &[String]) -> Holds {
@@ -131,6 +150,7 @@ pub fn title(file: &Path) -> String {
             || l.chars().all(|c| c.is_ascii_digit())
             || (l.starts_with('v') && l.len() > 1 && l[1..].chars().all(|c| c.is_ascii_digit()))
             // "beta5", "build002": a stage and its number.
+            || ["steamrip", "com", "part"].contains(&l.trim_end_matches(|c: char| c.is_ascii_digit()))
             || ["win", "win32", "win64", "windows", "windows64", "linux", "x64", "x86", "64bit", "32bit", "64bits", "32bits", "bit", "bits", "build", "release", "final", "prealpha", "alpha", "beta", "setup", "installer", "pc", "ver", "en", "iso", "version", "mac", "osx", "macos", "android"].contains(&l.trim_end_matches(|c: char| c.is_ascii_digit()))
     };
     while words.len() > 1 && drop(words[words.len() - 1]) {
@@ -141,7 +161,9 @@ pub fn title(file: &Path) -> String {
 }
 
 /// A loose file as a game download, or nothing.
-pub fn look(file: &Path) -> Option<Entry> {
+/// `strict` (a dumping ground of a folder: an old Downloads): only an archive showing a game
+/// engine counts, and no loose .exe (tools and installers of all sorts).
+pub fn look(file: &Path, strict: bool) -> Option<Entry> {
     let name = title(file);
     let words: Vec<String> = name.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
     let plain: String = words.concat();
@@ -161,6 +183,9 @@ pub fn look(file: &Path) -> Option<Entry> {
         return Some(e);
     }
     if ext == "exe" {
+        if strict {
+            return None;
+        }
         // An installer, or a game in one program that runs as it is.
         let installer = match gamefix::binary::identify(file)? {
             gamefix::binary::Binary::Pe(pe) => pe.installer.is_some() || plain.contains("setup") || plain.contains("install"),
@@ -170,6 +195,9 @@ pub fn look(file: &Path) -> Option<Entry> {
         return Some(e);
     }
     let names = contents(file)?;
+    if strict && !engine_files(&names) {
+        return None;
+    }
     match holds(&names) {
         Holds::Game if ext != "iso" || game_disc(&names) => e.kind = Kind::Download,
         // Downloaded by mistake, most likely: say so rather than leave it out.
@@ -200,6 +228,27 @@ mod tests {
         assert_eq!(title(Path::new("/d/StarshipAssassinSetup_beta5.exe")), "StarshipAssassinSetup");
         assert_eq!(title(Path::new("/d/minato-linux.tar.gz")), "minato");
         assert_eq!(title(Path::new("/d/Black-White_Win_EN_ISO-Version.zip")), "Black White");
+        assert_eq!(title(Path::new("/d/Plague-Inc-Evolved-SteamRIP.com.rar")), "Plague Inc Evolved");
+        assert_eq!(title(Path::new("/d/Some.Game.part1.rar")), "Some Game");
+    }
+
+    #[test]
+    fn split_archives() {
+        assert!(wanted(Path::new("/d/x.part1.rar")));
+        assert!(!wanted(Path::new("/d/x.part2.rar")));
+        assert!(wanted(Path::new("/d/Partition Wars.zip")));
+    }
+
+    #[test]
+    fn engines_in_archives() {
+        let names = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(engine_files(&names(&["Spilled/game/UnityPlayer.dll", "Spilled/game/Spilled!.exe"])));
+        assert!(engine_files(&names(&["Old/Old.exe", "Old/Old_Data/mainData"])));
+        assert!(!engine_files(&names(&["HOps/operators/misc/pizza_ops_data/__init__.py", "retopoflow/docs/_data/keymaps.yml"])));
+        assert!(engine_files(&names(&["G/Engine/Binaries/Win64/x.exe", "G/G.exe"])));
+        assert!(engine_files(&names(&["game.pck", "game.exe"])));
+        assert!(!engine_files(&names(&["rufus-4.6.exe"])));
+        assert!(!engine_files(&names(&["exiftool(-k).exe", "exiftool_files/perl.exe"])));
     }
 
     #[test]

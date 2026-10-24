@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Source {
     Steam,
+    /// A game in a Steam library Steam doesn't list (an old Windows install's).
+    SteamElsewhere,
     Epic,
     Gog,
     Amazon,
@@ -31,6 +33,7 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Source::Steam => "Steam",
+            Source::SteamElsewhere => "a Steam library Steam doesn't use",
             Source::Epic => "Epic Games",
             Source::Gog => "GOG",
             Source::Amazon => "Amazon",

@@ -3,14 +3,14 @@
 
 mod downloads;
 mod faugus;
-mod folders;
+pub mod folders;
 mod gamefix;
 mod heroic;
 mod itch;
 mod lutris;
 mod menu;
 mod prefixes;
-mod steam;
+pub mod steam;
 mod stores;
 
 use crate::library::{self, Entry};
@@ -50,6 +50,7 @@ pub struct Found {
 pub fn scan(home: &Home) -> Found {
     let mut entries = Vec::new();
     entries.extend(crate::log::timed("scan: Steam games", || steam::apps(home)));
+    entries.extend(crate::log::timed("scan: Steam libraries Steam doesn't list", || steam::stray_apps(home)));
     entries.extend(crate::log::timed("scan: Steam shortcuts", || steam::shortcuts(home)));
     entries.extend(crate::log::timed("scan: lobby's store games", || stores::games()));
     entries.extend(crate::log::timed("scan: Heroic", || heroic::games(home)));
@@ -59,7 +60,9 @@ pub fn scan(home: &Home) -> Found {
     entries.extend(crate::log::timed("scan: app menu", || menu::entries(home)));
 
     let roots = folders::roots(home);
-    let (found, folder_prefixes) = crate::log::timed("scan: folders", || folders::scan(&roots, &entries));
+    let games = crate::places::Places::load().games;
+    let strict = folders::strict_roots(home);
+    let (found, folder_prefixes) = crate::log::timed("scan: folders", || folders::scan(&roots, &strict, &games, &entries));
     entries.extend(found);
     // Names and covers for what came from itch.io.
     let itch = crate::log::timed("scan: itch.io", || itch::entries(home, &entries));

@@ -146,9 +146,9 @@ impl Filter {
         g.kind == Kind::Game
             && match self {
                 Filter::All => true,
-                Filter::Steam => has(&[Source::Steam]),
+                Filter::Steam => has(&[Source::Steam, Source::SteamElsewhere]),
                 Filter::Stores => has(&[Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]),
-                Filter::Launchers => !has(&[Source::Steam, Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]) && !g.unknown_to_launchers(),
+                Filter::Launchers => !has(&[Source::Steam, Source::SteamElsewhere, Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]) && !g.unknown_to_launchers(),
                 Filter::Drives => g.unknown_to_launchers(),
                 Filter::Downloads | Filter::Owned => unreachable!(),
             }
@@ -191,6 +191,8 @@ fn build(app: &adw::Application) {
     header.pack_start(&rescan_button);
     let accounts_button = gtk::Button::builder().icon_name("avatar-default-symbolic").tooltip_text("Store accounts: Epic Games and GOG").build();
     header.pack_start(&accounts_button);
+    let places_button = gtk::Button::builder().icon_name("folder-symbolic").tooltip_text("Where Lobby looks for games").build();
+    header.pack_start(&places_button);
     let free_button = gtk::Button::builder().label("Free games").tooltip_text("Games free to keep right now on Epic, GOG and Steam").build();
     header.pack_start(&free_button);
     let search = gtk::SearchEntry::builder().placeholder_text("Search games").width_chars(28).build();
@@ -285,6 +287,22 @@ fn build(app: &adw::Application) {
     accounts_button.connect_clicked(move |_| u.accounts());
     let u = ui.clone();
     free_button.connect_clicked(move |_| u.free_games());
+    let u = ui.clone();
+    places_button.connect_clicked(move |_| u.places());
+    // A folder dropped on the window: looked in from now on.
+    let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    let u = ui.clone();
+    drop.connect_drop(move |_, value, _, _| {
+        let Ok(files) = value.get::<gdk::FileList>() else { return false };
+        let folders: Vec<std::path::PathBuf> = files.files().iter().filter_map(|f| f.path()).filter(|p| p.is_dir()).collect();
+        if folders.is_empty() {
+            u.toast("Drop a folder to have Lobby look for games in it.");
+            return false;
+        }
+        u.add_places(&folders);
+        true
+    });
+    window.add_controller(drop);
 
     let action = gio::SimpleAction::new("search", None);
     let s = search.clone();
@@ -375,6 +393,13 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
                 u2.ask_install_need("Underground Exterminator", "Java 25", Some("62 MB")).await;
             });
         }
+        if std::env::var_os("LOBBY_SNAPSHOT_PLACES").is_some() {
+            u.places();
+        }
+        let searching = std::env::var_os("LOBBY_SNAPSHOT_DRIVES").is_some();
+        if searching {
+            u.search_drives();
+        }
         if std::env::var_os("LOBBY_SNAPSHOT_FREE").is_some() {
             u.free_games();
         }
@@ -398,7 +423,7 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
             u.choose_cover(id, &details);
         }
         let slow = picker.is_some() || std::env::var_os("LOBBY_SNAPSHOT_FREE").is_some();
-        glib::timeout_future(std::time::Duration::from_secs(if slow { 20 } else { 5 })).await;
+        glib::timeout_future(std::time::Duration::from_secs(if searching { 100 } else if slow { 20 } else { 5 })).await;
         let (w, h) = (u.window.width(), u.window.height());
         let paintable = gtk::WidgetPaintable::new(Some(&u.window));
         let snapshot = gtk::Snapshot::new();
@@ -818,6 +843,247 @@ impl Ui {
                 bar.set_text(Some(&format!("Downloading {p:.0}%")));
             }
         }
+    }
+
+    /// Folders added to look in (they're looked in from the next scan, which starts now).
+    fn add_places(self: &Rc<Self>, folders: &[std::path::PathBuf]) {
+        let mut places = crate::places::Places::load();
+        for f in folders {
+            places.add(f);
+        }
+        match places.save() {
+            Ok(()) => {
+                let names: Vec<String> = folders.iter().map(|f| f.display().to_string()).collect();
+                self.toast(&format!("Lobby looks in {} now.", names.join(", ")));
+                self.rescan();
+            }
+            Err(e) => self.alert("Couldn't save the folder", &e),
+        }
+    }
+
+    /// Where lobby looks: the folders it looks in by itself, the ones added, the games taken
+    /// from the search, and the search of all drives.
+    fn places(self: &Rc<Self>) {
+        let page = adw::PreferencesPage::new();
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::new());
+        view.set_content(Some(&page));
+        let dialog = adw::Dialog::builder().title("Where Lobby looks").content_width(640).content_height(720).child(&view).build();
+        let places = crate::places::Places::load();
+        let home = crate::sources::Home::find();
+
+        let added = adw::PreferencesGroup::builder().title("Folders you added").description("Each folder in them is looked at as a game or a folder of games. You can also drop a folder on Lobby's window.").build();
+        let add = gtk::Button::builder().label("Add a folder…").valign(gtk::Align::Center).build();
+        add.add_css_class("suggested-action");
+        added.set_header_suffix(Some(&add));
+        let remove_row = |group: &adw::PreferencesGroup, path: &std::path::Path, which: fn(&mut crate::places::Places) -> &mut Vec<std::path::PathBuf>| {
+            let row = adw::ActionRow::builder().title(path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())).subtitle(path.display().to_string()).build();
+            let remove = gtk::Button::builder().icon_name("list-remove-symbolic").tooltip_text("Stop looking here").valign(gtk::Align::Center).build();
+            remove.add_css_class("flat");
+            row.add_suffix(&remove);
+            group.add(&row);
+            let (u, path, row, group) = (self.clone(), path.to_path_buf(), row.clone(), group.clone());
+            remove.connect_clicked(move |_| {
+                let mut places = crate::places::Places::load();
+                which(&mut places).retain(|p| p != &path);
+                if places.save().is_ok() {
+                    group.remove(&row);
+                    u.rescan();
+                }
+            });
+        };
+        for f in &places.added {
+            remove_row(&added, f, |p| &mut p.added);
+        }
+        page.add(&added);
+        let (u, d) = (self.clone(), dialog.clone());
+        add.connect_clicked(move |_| {
+            let chooser = gtk::FileDialog::builder().title("A folder to look for games in").build();
+            let (window, u, d) = (u.window.clone(), u.clone(), d.clone());
+            chooser.select_folder(Some(&window), gio::Cancellable::NONE, move |r| {
+                if let Some(path) = r.ok().and_then(|f| f.path()) {
+                    d.close();
+                    u.add_places(&[path]);
+                }
+            });
+        });
+
+        if !places.games.is_empty() {
+            let games = adw::PreferencesGroup::builder().title("Games taken from the search").build();
+            for g in &places.games {
+                remove_row(&games, g, |p| &mut p.games);
+            }
+            page.add(&games);
+        }
+
+        let search = adw::PreferencesGroup::builder()
+            .title("Search all drives")
+            .description("Looks through every drive for games outside these folders (a while on big drives) and shows what it finds, for you to pick.")
+            .build();
+        let start = gtk::Button::builder().label("Search…").valign(gtk::Align::Center).build();
+        search.set_header_suffix(Some(&start));
+        page.add(&search);
+        let (u, d) = (self.clone(), dialog.clone());
+        start.connect_clicked(move |_| {
+            d.close();
+            u.search_drives();
+        });
+
+        let auto = adw::PreferencesGroup::builder().title("Looked in by itself").description("Games folders, Downloads, and folders on each drive named like them (\"Downloads-old\", \"Old Games\"); in those on other drives, only what shows a game engine counts.").build();
+        if let Some(home) = &home {
+            let mine = &places.added;
+            for r in crate::sources::folders::roots(home).into_iter().filter(|r| !mine.iter().any(|m| crate::library::norm(m) == *r)) {
+                auto.add(&adw::ActionRow::builder().title(r.file_name().map_or_else(|| r.display().to_string(), |n| n.to_string_lossy().into_owned())).subtitle(r.display().to_string()).build());
+            }
+        }
+        page.add(&auto);
+        dialog.present(Some(&self.window));
+    }
+
+    /// Copies a game from a Steam library Steam doesn't use into one it does, after asking
+    /// (its size, where to), then offers to restart Steam so it shows there.
+    fn move_into_steam(self: &Rc<Self>, id: &str, folder: std::path::PathBuf, appid: u32) {
+        let Some(game) = self.game(id) else { return };
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let f = folder.clone();
+            let plan = gio::spawn_blocking(move || {
+                let home = crate::sources::Home::find().ok_or("no home folder")?;
+                let size = crate::steam_move::size_text(&f);
+                let target = crate::steam_move::target(&home, 0)?;
+                Ok::<_, String>((size, target))
+            })
+            .await
+            .unwrap_or_else(|_| Err("it stopped with an error".into()));
+            let (size, target) = match plan {
+                Ok(p) => p,
+                Err(e) => return u.alert(&format!("{} can't be moved into Steam", game.name), &e),
+            };
+            let alert = adw::AlertDialog::new(Some(&format!("Move {} into Steam?", game.name)), Some(&format!("Its files ({size}) are copied into Steam's library {}; the old copy stays in {} until you delete it. Steam restarts afterwards to show it.", target.display(), folder.parent().map(|p| p.display().to_string()).unwrap_or_default())));
+            alert.add_responses(&[("cancel", "Cancel"), ("move", "Move into Steam")]);
+            alert.set_response_appearance("move", adw::ResponseAppearance::Suggested);
+            if alert.choose_future(Some(&u.window)).await != "move" {
+                return;
+            }
+            let f = folder.clone();
+            let moved = u.with_progress(&game.id, "Copying…", move |p| crate::sources::Home::find().ok_or("no home folder".to_string()).and_then(|h| crate::steam_move::move_into_steam(&h, &f, appid, p))).await.unwrap_or_else(|| Err("it stopped with an error".into()));
+            match moved {
+                Ok(lib) => {
+                    u.toast(&format!("{} is in Steam's library {} now. Restarting Steam…", game.name, lib.display()));
+                    if let Ok(Err(e)) = gio::spawn_blocking(crate::steam_move::restart_steam).await {
+                        u.alert("Steam didn't restart", &e);
+                    }
+                }
+                Err(e) => u.alert(&format!("{} couldn't be moved into Steam", game.name), &e),
+            }
+            u.rescan();
+        });
+    }
+
+    /// The search of all drives: what it goes through as it goes, then what it found, each
+    /// with a box (ticked); the ticked ones are looked at from then on, the others not
+    /// suggested again. Steam libraries it found are added to lobby's places by themselves.
+    fn search_drives(self: &Rc<Self>) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let status = adw::StatusPage::builder().title("Searching your drives…").description("Looked through 0 folders").build();
+        status.set_child(Some(&adw::Spinner::builder().width_request(32).height_request(32).build()));
+        let stack = gtk::Stack::new();
+        stack.add_named(&status, Some("searching"));
+        let list = adw::PreferencesGroup::new();
+        let page = adw::PreferencesPage::new();
+        page.add(&list);
+        stack.add_named(&page, Some("found"));
+        let header = adw::HeaderBar::new();
+        let stop_button = gtk::Button::builder().label("Stop").build();
+        let add_button = gtk::Button::builder().label("Add the ticked games").visible(false).build();
+        add_button.add_css_class("suggested-action");
+        header.pack_start(&stop_button);
+        header.pack_end(&add_button);
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&header);
+        view.set_content(Some(&stack));
+        let dialog = adw::Dialog::builder().title("Search all drives").content_width(720).content_height(720).child(&view).build();
+        dialog.present(Some(&self.window));
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        stop_button.connect_clicked(move |b| {
+            s.store(true, Ordering::Relaxed);
+            b.set_sensitive(false);
+        });
+        let (sn, st, d) = (seen.clone(), status.clone(), dialog.clone());
+        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            st.set_description(Some(&format!("Looked through {} folders", sn.load(Ordering::Relaxed))));
+            if d.root().is_some() && st.is_mapped() { glib::ControlFlow::Continue } else { glib::ControlFlow::Break }
+        });
+        // Closing the window stops the search.
+        let s = stop.clone();
+        dialog.connect_closed(move |_| s.store(true, Ordering::Relaxed));
+
+        let places = crate::places::Places::load();
+        let mut skip: Vec<std::path::PathBuf> = places.games.iter().chain(&places.dismissed).cloned().collect();
+        let lib = self.lib.borrow();
+        skip.extend(lib.games.iter().flat_map(|g| g.entries.iter().filter_map(|e| e.folder.clone())));
+        drop(lib);
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let found = gio::spawn_blocking(move || {
+                let Some(home) = crate::sources::Home::find() else { return None };
+                let mut skip = skip;
+                skip.extend(crate::sources::folders::roots(&home));
+                let starts = crate::search::starts(&home);
+                Some(crate::log::timed("search of all drives", || crate::search::search(&starts, &skip, &seen, &stop)))
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some(found) = found else { return };
+            stop_button.set_visible(false);
+            // Steam libraries: noted, their games show under Steam.
+            let mut places = crate::places::Places::load();
+            let known_libs = crate::sources::Home::find().map(|h| crate::sources::steam::known_libraries(&h)).unwrap_or_default();
+            let new_libs: Vec<std::path::PathBuf> = found.libraries.into_iter().filter(|l| !known_libs.contains(&std::fs::canonicalize(l).unwrap_or(l.clone())) && !places.libraries.contains(l)).collect();
+            if !new_libs.is_empty() {
+                places.libraries.extend(new_libs.iter().cloned());
+                let _ = places.save();
+            }
+            list.set_title(&format!("Found {} games outside the folders Lobby looks in", found.games.len()));
+            if !new_libs.is_empty() {
+                list.set_description(Some(&format!("Also {} Steam {} Steam doesn't use ({}): {} games show under Steam, where they can be moved into Steam.", new_libs.len(), if new_libs.len() == 1 { "library" } else { "libraries" }, new_libs.iter().map(|l| l.display().to_string()).collect::<Vec<_>>().join(", "), if new_libs.len() == 1 { "its" } else { "their" })));
+            }
+            let mut checks = Vec::new();
+            for f in &found.games {
+                let name = f.folder.file_name().map_or_else(|| f.folder.display().to_string(), |n| n.to_string_lossy().into_owned());
+                let row = adw::ActionRow::builder().title(&name).subtitle(format!("{} · {}", f.why, f.folder.display())).build();
+                let check = gtk::CheckButton::builder().active(true).valign(gtk::Align::Center).build();
+                row.add_prefix(&check);
+                row.set_activatable_widget(Some(&check));
+                list.add(&row);
+                checks.push((f.folder.clone(), check));
+            }
+            add_button.set_visible(!checks.is_empty());
+            stack.set_visible_child_name("found");
+            let (u2, d) = (u.clone(), dialog.clone());
+            add_button.connect_clicked(move |_| {
+                let u = &u2;
+                let mut places = crate::places::Places::load();
+                for (folder, check) in &checks {
+                    if check.is_active() { places.games.push(folder.clone()) } else { places.dismissed.push(folder.clone()) }
+                }
+                match places.save() {
+                    Ok(()) => {
+                        d.close();
+                        u.toast("Added: Lobby looks at them now.");
+                        u.rescan();
+                    }
+                    Err(e) => u.alert("Couldn't save them", &e),
+                }
+            });
+            if !new_libs.is_empty() {
+                u.rescan();
+            }
+        });
     }
 
     /// What's free to keep now and next, each with whether the account has it and a way to
@@ -1350,6 +1616,22 @@ impl Ui {
         play.set_sensitive(download || !matches!(plan, Plan::Cannot(_)));
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).margin_top(12).build();
         buttons.append(&play);
+        // In a Steam library Steam doesn't use, and not installed in Steam's own.
+        let stray = game.entries.iter().find(|e| e.source == Source::SteamElsewhere).filter(|_| !game.sources().contains(&Source::Steam)).and_then(|e| Some((e.folder.clone()?, e.keys.iter().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None })?)));
+        if let Some((folder, appid)) = stray.clone() {
+            play.set_visible(false);
+            let b = gtk::Button::builder().label("Move into Steam").tooltip_text("Copy it into one of Steam's libraries, where Steam starts it").build();
+            b.add_css_class("pill");
+            b.add_css_class("suggested-action");
+            buttons.prepend(&b);
+            let (u, d, id) = (self.clone(), dialog_slot.clone(), game.id.clone());
+            b.connect_clicked(move |_| {
+                if let Some(d) = d.borrow().as_ref() {
+                    d.close();
+                }
+                u.move_into_steam(&id, folder.clone(), appid);
+            });
+        }
         let update = game.update().map(|_| {
             let b = gtk::Button::builder().label("Update").tooltip_text("Download the store's newer version").build();
             b.add_css_class("pill");
@@ -1755,6 +2037,7 @@ fn origin(g: &Game) -> String {
     let s = g.sources();
     let label = |src: Source| match src {
         Source::Steam => "Steam",
+        Source::SteamElsewhere => "Steam (not added)",
         Source::Epic => "Epic",
         Source::Gog => "GOG",
         Source::Amazon => "Amazon",

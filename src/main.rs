@@ -8,8 +8,11 @@ mod install;
 mod launch;
 mod library;
 mod log;
+mod places;
 mod run;
 mod sources;
+mod steam_move;
+mod search;
 mod store;
 mod uninstall;
 mod stores;
@@ -34,6 +37,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby free --notify     a notification for new ones, whose Claim button opens the checkout
        lobby free --daily=on|off  the daily look for new ones (on: a systemd user timer)
        lobby claim             the window, at the checkout for the free games not claimed
+       lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
 
 fn main() -> ExitCode {
@@ -54,6 +58,7 @@ fn main() -> ExitCode {
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
+        (Some("search"), []) => search_drives(),
         (Some("free"), []) if args.iter().any(|a| a == "--notify") => free_notify(),
         (Some("free"), []) if args.iter().any(|a| a == "--daily=off") => free::set_daily(false),
         (Some("free"), []) if args.iter().any(|a| a == "--daily=on") => free::set_daily(true),
@@ -325,6 +330,26 @@ fn free_games() -> Result<(), String> {
     for g in &games {
         let state = if g.from.is_some() { "" } else if free::owned(g, &epic) { "  (in your library)" } else { "  (not claimed)" };
         println!("{}: {}, {}{state}", g.store, g.title, free::when(g));
+    }
+    Ok(())
+}
+
+/// Prints what the search of all drives finds (nothing is added: the window's search adds).
+fn search_drives() -> Result<(), String> {
+    let home = sources::Home::find().ok_or("no home folder")?;
+    let lib = Library::load().unwrap_or_default();
+    let places = places::Places::load();
+    let mut skip: Vec<std::path::PathBuf> = places.games.iter().chain(&places.dismissed).cloned().collect();
+    skip.extend(lib.games.iter().flat_map(|g| g.entries.iter().filter_map(|e| e.folder.clone())));
+    skip.extend(sources::folders::roots(&home));
+    let seen = std::sync::atomic::AtomicUsize::new(0);
+    let found = log::timed("search of all drives", || search::search(&search::starts(&home), &skip, &seen, &std::sync::atomic::AtomicBool::new(false)));
+    println!("Looked through {} folders.", seen.into_inner());
+    for f in &found.games {
+        println!("  {} ({})", f.folder.display(), f.why);
+    }
+    for l in &found.libraries {
+        println!("  Steam library: {}", l.display());
     }
     Ok(())
 }

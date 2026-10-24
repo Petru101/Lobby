@@ -11,8 +11,33 @@ use gamefix::{disc, scan};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A drive's folders named like downloads or games, whatever they're called ("Downloads-old",
+/// "Old Games"), besides its Games folder.
+fn drive_folders(drive: &Path) -> Vec<PathBuf> {
+    fs::read_dir(drive)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|top| top.file_type().is_ok_and(|t| t.is_dir()) && crate::places::games_or_downloads(&top.file_name().to_string_lossy()) && !top.file_name().eq_ignore_ascii_case("games"))
+        .map(|top| top.path())
+        .collect()
+}
+
+/// The roots lobby is strict about: a drive's downloads-like folders (an old Downloads is a
+/// dumping ground of tools, add-ons and documents), where only what shows a game engine, GOG's
+/// record or Steam's library counts (`look`'s `strict`). Not ~/Downloads, Games folders, the
+/// games folder or folders the user added.
+pub fn strict_roots(home: &Home) -> Vec<PathBuf> {
+    [PathBuf::from("/run/media").join(&home.user), PathBuf::from("/media").join(&home.user), PathBuf::from("/mnt")]
+        .iter()
+        .flat_map(|media| fs::read_dir(media).into_iter().flatten().flatten().flat_map(|d| drive_folders(&d.path())))
+        .map(|r| library::norm(&r))
+        .collect()
+}
+
 pub fn roots(home: &Home) -> Vec<PathBuf> {
-    let mut roots = vec![home.join("Games")];
+    // The home folder's first: a folder reached two ways is known by its first path.
+    let mut roots = vec![home.join("Games"), home.join("Downloads")];
     if let Ok(folder) = fs::read_to_string(home.join(".config/gamefix/games-folder")) {
         roots.push(PathBuf::from(folder.trim()));
     }
@@ -25,17 +50,32 @@ pub fn roots(home: &Home) -> Vec<PathBuf> {
             for name in ["Games", "games"] {
                 roots.push(drive.join(name));
             }
+            roots.extend(drive_folders(&drive));
         }
     }
-    roots.push(home.join("Downloads"));
+    roots.extend(crate::places::Places::load().added);
+    // One folder reached two ways counts once: ~/Downloads here is the Storage drive's
+    // Downloads mounted again, a bind mount, the same folder under another path.
     let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen: Vec<(u64, u64)> = Vec::new();
     for r in roots {
         let r = library::norm(&r);
-        if r.is_dir() && !out.contains(&r) {
+        let Ok(meta) = fs::metadata(&r) else { continue };
+        let id = (std::os::unix::fs::MetadataExt::dev(&meta), std::os::unix::fs::MetadataExt::ino(&meta));
+        if meta.is_dir() && !out.contains(&r) && !seen.contains(&id) {
             out.push(r);
+            seen.push(id);
         }
     }
     out
+}
+
+/// Whether Steam's library (steam_api.dll, libsteam_api.so) is in the folder of the game's
+/// program.
+fn steam_api_near(game: &scan::Game) -> bool {
+    let program = game.main.or(game.windows).map(|i| game.full(&game.files[i]));
+    let dir = program.as_deref().and_then(Path::parent).unwrap_or(&game.root).to_path_buf();
+    ["steam_api.dll", "steam_api64.dll", "libsteam_api.so"].iter().any(|f| dir.join(f).is_file())
 }
 
 /// Folders in a games folder that aren't games.
@@ -53,9 +93,11 @@ enum Found {
 
 /// Each folder in the roots, as games, downloads not installed yet, and prefixes. Folders a
 /// launcher already names as a game's are left to that launcher.
-pub fn scan(roots: &[PathBuf], known: &[Entry]) -> (Vec<Entry>, Vec<PathBuf>) {
+pub fn scan(roots: &[PathBuf], strict: &[PathBuf], games: &[PathBuf], known: &[Entry]) -> (Vec<Entry>, Vec<PathBuf>) {
     let known: Vec<PathBuf> = known.iter().filter_map(|e| e.folder.as_deref()).map(library::norm).collect();
-    let mut candidates = Vec::new();
+    // Game folders taken from the search of all drives: looked at as they are.
+    let mut candidates: Vec<PathBuf> = games.iter().filter(|g| g.is_dir()).cloned().collect();
+    let strict_dirs: Vec<PathBuf> = roots.iter().filter(|r| strict.contains(&library::norm(r))).cloned().collect();
     for root in roots {
         for entry in fs::read_dir(root).into_iter().flatten().flatten() {
             let path = entry.path();
@@ -80,7 +122,7 @@ pub fn scan(roots: &[PathBuf], known: &[Entry]) -> (Vec<Entry>, Vec<PathBuf>) {
     let looked: Vec<(String, Looked)> = std::thread::scope(|s| {
         let handles: Vec<_> = chunks
             .iter()
-            .map(|chunk| s.spawn(|| chunk.iter().map(|(dir, (mtime, inside))| (dir.display().to_string(), Looked::from(look(dir, &known, 0), *mtime, inside.clone()))).collect::<Vec<_>>()))
+            .map(|chunk| s.spawn(|| chunk.iter().map(|(dir, (mtime, inside))| (dir.display().to_string(), Looked::from(look(dir, &known, 0, strict_dirs.iter().any(|r| dir.parent() == Some(r.as_path()))), *mtime, inside.clone()))).collect::<Vec<_>>()))
             .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
     });
@@ -139,7 +181,7 @@ impl Looked {
 }
 
 /// Bumped when the cache's format changes.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 /// When the running lobby was built: a rebuild (lobby's look or gamefix's scan may pick
 /// differently now) starts the cache over.
@@ -180,10 +222,10 @@ impl Cache {
     }
 }
 
-fn look(dir: &Path, known: &[PathBuf], depth: usize) -> Vec<Found> {
+fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found> {
     // A loose download: an archive, an installer, a disc image.
     if depth == 0 && dir.is_file() {
-        return vec![super::downloads::look(dir).map_or(Found::Nothing, Found::Game)];
+        return vec![super::downloads::look(dir, strict).map_or(Found::Nothing, Found::Game)];
     }
     let norm = library::norm(dir);
     if known.contains(&norm) {
@@ -211,13 +253,13 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize) -> Vec<Found> {
     // down) is a folder of games: only its other folders are looked at.
     let subs = subdirs(dir);
     if known.iter().any(|k| k.starts_with(&norm) && k != &norm) {
-        return if depth < 2 { subs.iter().flat_map(|d| look(d, known, depth + 1)).collect() } else { vec![] };
+        return if depth < 2 { subs.iter().flat_map(|d| look(d, known, depth + 1, strict)).collect() } else { vec![] };
     }
     // A folder of games has no program of its own at the top, and its folders are games of
     // their own. Not Unreal's layout (Engine beside the game's folder).
     let unreal = subs.iter().any(|d| d.file_name().is_some_and(|n| n == "Engine"));
     if depth == 0 && !unreal && !has_program_at_top(dir) {
-        let inner: Vec<Found> = subs.iter().flat_map(|d| look(d, known, 1)).collect();
+        let inner: Vec<Found> = subs.iter().flat_map(|d| look(d, known, 1, strict)).collect();
         let games = inner.iter().filter(|f| !matches!(f, Found::Nothing)).count();
         if games >= 2 {
             return inner;
@@ -226,6 +268,11 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize) -> Vec<Found> {
     let Some(game) = scan::scan(dir) else { return vec![Found::Nothing] };
     // GOG's own idea of what starts the game, over a guess.
     let gog = gamefix::gog::read(&game.root).map(|info| info.program);
+    // In a dumping ground, only what shows it's a game: an engine gamefix knows, GOG's record,
+    // or Steam's library beside its program.
+    if strict && game.engine.is_none() && gog.is_none() && !steam_api_near(&game) {
+        return vec![Found::Nothing];
+    }
     let program = gog.or_else(|| game.main.or(game.windows).or(game.portable).map(|i| game.full(&game.files[i])));
     let download = [game.cd_installer, game.linux_installer, game.packed, game.disc, game.archive].into_iter().flatten().next();
     let mut e = Entry::new(Source::Folder, title(&game.root, &game.name, program.as_deref()));

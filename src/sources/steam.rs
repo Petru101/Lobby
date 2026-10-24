@@ -45,25 +45,47 @@ fn tool(appid: u32, name: &str, dir: &Path) -> bool {
     appid == 228980 || dir.join("toolmanifest.vdf").is_file() || ["Proton", "Steam Linux Runtime", "Steamworks"].iter().any(|t| name.starts_with(t))
 }
 
+/// A library's installed apps: id, name, folder (Steam's own tools left out).
+fn library_apps(lib: &Path) -> Vec<(u32, String, PathBuf)> {
+    let apps = lib.join("steamapps");
+    let mut out = Vec::new();
+    for file in fs::read_dir(&apps).into_iter().flatten().flatten() {
+        let fname = file.file_name().to_string_lossy().into_owned();
+        let Some(appid) = fname.strip_prefix("appmanifest_").and_then(|s| s.strip_suffix(".acf")).and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let Ok(doc) = vdf::parse(&fs::read_to_string(file.path()).unwrap_or_default()) else { continue };
+        let get = |k: &str| match vdf::get(&doc, &["AppState", k]) {
+            Some(vdf::Node::Str(s)) => Some(vdf::unescape(s)),
+            _ => None,
+        };
+        let (Some(name), Some(installdir)) = (get("name"), get("installdir")) else { continue };
+        let folder = apps.join("common").join(&installdir);
+        if !tool(appid, &name, &folder) {
+            out.push((appid, name, folder));
+        }
+    }
+    out
+}
+
+/// The libraries Steam lists (its own folder among them), their real paths.
+pub fn known_libraries(home: &Home) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for root in roots(home) {
+        for lib in libraries(&root) {
+            let lib = fs::canonicalize(&lib).unwrap_or(lib);
+            if !out.contains(&lib) {
+                out.push(lib);
+            }
+        }
+    }
+    out
+}
+
 pub fn apps(home: &Home) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for root in roots(home) {
         for lib in libraries(&root) {
-            let apps = lib.join("steamapps");
-            for file in fs::read_dir(&apps).into_iter().flatten().flatten() {
-                let fname = file.file_name().to_string_lossy().into_owned();
-                let Some(appid) = fname.strip_prefix("appmanifest_").and_then(|s| s.strip_suffix(".acf")).and_then(|s| s.parse::<u32>().ok()) else { continue };
+            for (appid, name, folder) in library_apps(&lib) {
                 if entries.iter().any(|e| e.keys.contains(&Key::SteamApp(appid))) {
-                    continue;
-                }
-                let Ok(doc) = vdf::parse(&fs::read_to_string(file.path()).unwrap_or_default()) else { continue };
-                let get = |k: &str| match vdf::get(&doc, &["AppState", k]) {
-                    Some(vdf::Node::Str(s)) => Some(vdf::unescape(s)),
-                    _ => None,
-                };
-                let (Some(name), Some(installdir)) = (get("name"), get("installdir")) else { continue };
-                let folder = apps.join("common").join(&installdir);
-                if tool(appid, &name, &folder) {
                     continue;
                 }
                 let mut e = Entry::new(Source::Steam, name);
@@ -72,6 +94,52 @@ pub fn apps(home: &Home) -> Vec<Entry> {
                 e.cover = Some(library_art(&root, appid));
                 entries.push(e);
             }
+        }
+    }
+    entries
+}
+
+/// Steam libraries Steam doesn't list: an old Windows install's, a copied or plugged-in
+/// drive's. Looked for where they usually are on each drive (SteamLibrary, Steam, Program
+/// Files' Steam, one folder down), and where the search of all drives found them.
+pub fn stray_libraries(home: &Home) -> Vec<PathBuf> {
+    let known = known_libraries(home);
+    let mut spots: Vec<PathBuf> = Vec::new();
+    for media in [PathBuf::from("/run/media").join(&home.user), PathBuf::from("/media").join(&home.user), PathBuf::from("/mnt")] {
+        for drive in fs::read_dir(&media).into_iter().flatten().flatten().map(|d| d.path()) {
+            let mut tops = vec![drive.clone()];
+            tops.extend(fs::read_dir(&drive).into_iter().flatten().flatten().filter(|d| d.file_type().is_ok_and(|t| t.is_dir())).map(|d| d.path()));
+            for top in tops {
+                for name in ["SteamLibrary", "Steam", "steam", "Program Files (x86)/Steam", "Program Files/Steam"] {
+                    spots.push(top.join(name));
+                }
+            }
+        }
+    }
+    spots.extend(crate::places::Places::load().libraries);
+    let mut out: Vec<PathBuf> = Vec::new();
+    for lib in spots.into_iter().filter(|l| l.join("steamapps").is_dir()) {
+        let real = fs::canonicalize(&lib).unwrap_or(lib.clone());
+        if !known.contains(&real) && !out.iter().any(|o| fs::canonicalize(o).ok().as_ref() == Some(&real)) {
+            out.push(lib);
+        }
+    }
+    out
+}
+
+/// The games in Steam libraries Steam doesn't list: playable once moved into Steam's own.
+pub fn stray_apps(home: &Home) -> Vec<Entry> {
+    let mut entries = Vec::new();
+    for lib in stray_libraries(home) {
+        for (appid, name, folder) in library_apps(&lib) {
+            if !folder.is_dir() {
+                continue;
+            }
+            let mut e = Entry::new(Source::SteamElsewhere, name);
+            e.folder = Some(folder);
+            e.keys.push(Key::SteamApp(appid));
+            e.cover = roots(home).first().map(|r| library_art(r, appid));
+            entries.push(e);
         }
     }
     entries

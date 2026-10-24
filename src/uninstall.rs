@@ -6,7 +6,7 @@
 //! Games other launchers installed are theirs to uninstall; folders lobby only found aren't
 //! deleted (they may be anything).
 
-use crate::library::{Game, Key, Kind};
+use crate::library::{Game, Key, Kind, Source};
 use crate::stores::saves::{self, Direction};
 use crate::stores::Store;
 use std::fs;
@@ -17,6 +17,8 @@ pub enum How {
     Store(Store, String),
     /// Steam's game: Steam's own uninstall.
     Steam(u32),
+    /// A copy in a Steam library Steam doesn't use: its folder and its app manifest.
+    SteamCopy(PathBuf, u32),
     /// A folder lobby unpacked a download into, or gamefix installed a game into.
     Folder(PathBuf),
     /// Not lobby's to uninstall: why.
@@ -27,9 +29,12 @@ pub fn how(game: &Game) -> How {
     if let Some((store, id)) = crate::stores::installed_in(game) {
         return How::Store(store, id);
     }
-    let keys = || game.entries.iter().flat_map(|e| e.keys.iter());
-    if let Some(id) = keys().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None }) {
+    let steam_id = |source: Source| game.entries.iter().filter(|e| e.source == source).flat_map(|e| e.keys.iter()).find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
+    if let Some(id) = steam_id(Source::Steam) {
         return How::Steam(id);
+    }
+    if let (Some(id), Some(folder)) = (steam_id(Source::SteamElsewhere), game.entries.iter().find(|e| e.source == Source::SteamElsewhere).and_then(|e| e.folder.clone())) {
+        return How::SteamCopy(folder, id);
     }
     // The folder lobby unpacked into or gamefix installed into: the game's folder or one up to
     // three above it (an archive's top folder holding the game's own: MoleTest/Mole Test/).
@@ -121,7 +126,7 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
     let prefix = crate::log::timed("uninstall: its prefix", || prefix(game));
     let folder = match &how {
         How::Store(store, id) => store.installed().into_iter().find(|g| &g.id == id).map(|g| g.folder),
-        How::Folder(f) => Some(f.clone()),
+        How::Folder(f) | How::SteamCopy(f, _) => Some(f.clone()),
         How::Steam(id) => {
             crate::launch::start(&["steam".into(), format!("steam://uninstall/{id}")], None, &crate::store::log_file(&game.id))?;
             return Ok(vec!["Steam asks you to confirm, then uninstalls it.".into()]);
@@ -173,6 +178,13 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
         How::Folder(f) => {
             crate::log::timed("uninstall: deleting the folder", || fs::remove_dir_all(f)).map_err(|e| format!("Couldn't delete {}: {e}", f.display()))?;
             done.push(format!("✓ Deleted {}.", f.display()));
+        }
+        How::SteamCopy(f, id) => {
+            crate::log::timed("uninstall: deleting the folder", || fs::remove_dir_all(f)).map_err(|e| format!("Couldn't delete {}: {e}", f.display()))?;
+            if let Some(steamapps) = f.parent().and_then(Path::parent) {
+                let _ = fs::remove_file(steamapps.join(format!("appmanifest_{id}.acf")));
+            }
+            done.push(format!("✓ Deleted {} and its record in that Steam library.", f.display()));
         }
         _ => {}
     }

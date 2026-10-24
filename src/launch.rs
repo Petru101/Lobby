@@ -33,8 +33,14 @@ pub fn plan(game: &Game) -> Plan {
         return Plan::Cannot(format!("You own it on {store}; it isn't installed. Install downloads it into your games folder and sets it up."));
     }
     let keys = || game.entries.iter().flat_map(|e| e.keys.iter());
-    if let Some(id) = keys().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None }) {
+    // Steam's own install (a copy in a library Steam doesn't list isn't one Steam can start).
+    let steam_app = game.entries.iter().filter(|e| e.source != Source::SteamElsewhere).flat_map(|e| e.keys.iter()).find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
+    if let Some(id) = steam_app {
         return run("Steam", vec!["steam".into(), format!("steam://rungameid/{id}")], None);
+    }
+    if let Some(e) = game.entries.iter().find(|e| e.source == Source::SteamElsewhere) {
+        let at = e.folder.as_deref().map(|f| f.display().to_string()).unwrap_or_default();
+        return Plan::Cannot(format!("It's in a Steam library Steam doesn't use ({at}). \"Move into Steam\" on its page copies it into one of Steam's libraries; Steam starts it from there."));
     }
     if let Some(p) = store_plan(game) {
         return p;
