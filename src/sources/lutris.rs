@@ -46,15 +46,30 @@ fn game_block(yml: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The store a Lutris service is, as `Key::Store` names it.
+fn store_of(service: &str) -> Option<&'static str> {
+    match service {
+        "gog" => Some("gog"),
+        "egs" => Some("epic"),
+        "amazon" => Some("amazon"),
+        _ => None,
+    }
+}
+
 pub fn games(home: &Home) -> Vec<Entry> {
     let mut entries = Vec::new();
     for dir in home.app_dirs("net.lutris.Lutris", "data/lutris", ".local/share/lutris") {
         let Ok(db) = rusqlite::Connection::open_with_flags(dir.join("pga.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { continue };
-        let Ok(mut q) = db.prepare("SELECT id, name, directory, configpath, slug FROM games WHERE installed = 1") else { continue };
-        let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?)));
-        for (id, name, directory, configpath, slug) in rows.into_iter().flatten().flatten() {
+        let Ok(mut q) = db.prepare("SELECT id, name, directory, configpath, slug, service, service_id FROM games WHERE installed = 1") else { continue };
+        let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?)));
+        for (id, name, directory, configpath, slug, service, service_id) in rows.into_iter().flatten().flatten() {
             let mut e = Entry::new(Source::Lutris, name);
             e.keys.push(Key::Lutris(id));
+            // Installed from a store through Lutris (its GOG or Epic integration): the store's
+            // id ties it to the game the account owns there.
+            if let (Some(store), Some(sid)) = (service.as_deref().and_then(store_of), service_id.filter(|s| !s.is_empty())) {
+                e.keys.push(Key::Store(store.into(), sid));
+            }
             e.cover = slug.and_then(|slug| ["coverart", "banners"].iter().map(|d| dir.join(d).join(format!("{slug}.jpg"))).find(|p| p.is_file())).map(|p| p.display().to_string());
             let directory = directory.filter(|d| !d.is_empty()).map(PathBuf::from);
             let config = configpath.and_then(|c| fs::read_to_string(dir.join("games").join(format!("{c}.yml"))).ok()).unwrap_or_default();
