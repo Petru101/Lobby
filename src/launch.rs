@@ -13,6 +13,9 @@ pub enum Plan {
     Run { how: String, command: Vec<String>, cwd: Option<PathBuf> },
     /// No launcher knows it: gamefix sets it up first.
     SetUp(PathBuf),
+    /// A Blizzard game: started through lobby's Battle.net (installed the first time), with
+    /// what Battle.net's --exec calls it.
+    BattleNet { folder: PathBuf, launch: String },
     Cannot(String),
 }
 
@@ -44,6 +47,12 @@ pub fn plan(game: &Game) -> Plan {
     }
     if let Some(p) = store_plan(game) {
         return p;
+    }
+    // Blizzard's games only start through Battle.net (a launcher that has its own Battle.net
+    // for it starts it there).
+    let own_battlenet = keys().any(|k| matches!(k, Key::Heroic(..) | Key::Lutris(_) | Key::Faugus(_) | Key::SteamShortcut(_)));
+    if let Some((folder, product)) = crate::battlenet::game_folder(game).filter(|_| !own_battlenet) {
+        return Plan::BattleNet { folder, launch: product.launch };
     }
     if let Some(p) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(desktop_plan) {
         return p;
@@ -99,6 +108,8 @@ impl Plan {
         match self {
             Plan::Run { how, .. } => format!("Starts with {how}."),
             Plan::SetUp(_) => "No launcher knows it: the first time you play, gamefix sets it up (an app-menu entry with any fixes it needs).".into(),
+            Plan::BattleNet { .. } if !crate::battlenet::installed() => "A Blizzard game: it starts through Blizzard's Battle.net app, which signs you in. The first time you play, Lobby installs Battle.net for it.".into(),
+            Plan::BattleNet { .. } => "Starts with Battle.net, which signs you in.".into(),
             Plan::Cannot(why) => why.clone(),
         }
     }

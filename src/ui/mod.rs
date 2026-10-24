@@ -3,6 +3,7 @@
 
 mod covers;
 
+use crate::battlenet;
 use crate::launch::{self, Plan};
 use crate::library::{Entry, Game, Key, Kind, Source};
 use crate::store::{self, Library};
@@ -1538,6 +1539,47 @@ impl Ui {
                 Err(e) => self.alert(&format!("{} didn't start", game.name), &e),
             },
             Plan::Cannot(why) => self.alert(&format!("{} can't be started", game.name), &why),
+            Plan::BattleNet { folder, launch } => {
+                let u = self.clone();
+                glib::spawn_future_local(async move {
+                    if !battlenet::installed() {
+                        let alert = adw::AlertDialog::new(
+                            Some(&format!("{} needs Battle.net", game.name)),
+                            Some("Blizzard's games only start through Blizzard's Battle.net app, which signs you in. Lobby can install it (5 MB, then it downloads the rest) into a Wine setup of its own. Its installer opens: follow it, then sign in to your Blizzard account in Battle.net."),
+                        );
+                        alert.add_responses(&[("cancel", "Not now"), ("install", "Install Battle.net")]);
+                        alert.set_response_appearance("install", adw::ResponseAppearance::Suggested);
+                        alert.set_default_response(Some("install"));
+                        if alert.choose_future(Some(&u.window)).await != "install" {
+                            return;
+                        }
+                        u.toast("Installing Battle.net: follow its installer…");
+                        if let Err(e) = gio::spawn_blocking(battlenet::install).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                            u.alert("Battle.net couldn't be installed", &e);
+                            return;
+                        }
+                        // Battle.net opens once installed; it's restarted with the game added.
+                        let alert = adw::AlertDialog::new(Some("Sign in to Battle.net"), Some(&format!("Battle.net is installed. Sign in to your Blizzard account in its window; then Lobby restarts it with {} added and starts the game.", game.name)));
+                        alert.add_responses(&[("cancel", "Later"), ("play", &format!("Play {}", game.name))]);
+                        alert.set_response_appearance("play", adw::ResponseAppearance::Suggested);
+                        alert.set_default_response(Some("play"));
+                        if alert.choose_future(Some(&u.window)).await != "play" {
+                            return;
+                        }
+                    }
+                    if !battlenet::knows(&folder) {
+                        u.toast(&format!("Adding {} to Battle.net…", game.name));
+                    }
+                    let log = store::log_file(&game.id);
+                    match gio::spawn_blocking(move || battlenet::start(&folder, &launch, &log)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                        Ok(()) => {
+                            u.toast(&format!("Starting {} with Battle.net…", game.name));
+                            u.played(&game.id, None);
+                        }
+                        Err(e) => u.alert(&format!("{} didn't start", game.name), &e),
+                    }
+                });
+            }
             Plan::SetUp(folder) => {
                 let u = self.clone();
                 glib::spawn_future_local(async move {

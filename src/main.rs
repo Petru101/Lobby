@@ -2,6 +2,7 @@
 //! put it there, and a way to start each one.
 
 mod artwork;
+mod battlenet;
 mod drives;
 mod free;
 mod install;
@@ -123,6 +124,19 @@ fn play(query: &str) -> Result<(), String> {
     let (how, command, cwd) = match launch::plan(&game) {
         launch::Plan::Run { how, command, cwd } => (how, command, cwd),
         launch::Plan::Cannot(why) => return Err(format!("{}: {why}", game.name)),
+        launch::Plan::BattleNet { folder, launch } => {
+            if !battlenet::installed() {
+                println!("{} starts through Blizzard's Battle.net app. Installing it (its installer opens: follow it, then sign in to Battle.net)…", game.name);
+                battlenet::install()?;
+            }
+            let log = store::log_file(&game.id);
+            battlenet::start(&folder, &launch, &log)?;
+            println!("Starting {} with Battle.net. Its output goes to {}", game.name, log.display());
+            if let Some(g) = lib.get_mut(&game.id) {
+                g.played = Some(store::now());
+            }
+            return lib.save();
+        }
         launch::Plan::SetUp(folder) => {
             println!("No launcher knows {}, so gamefix sets it up first (once):", game.name);
             let (lines, entry) = launch::set_up(&folder, None)?;
@@ -196,6 +210,14 @@ fn how(query: &str) -> Result<(), String> {
             }
         }
         launch::Plan::SetUp(folder) => println!("{}: no launcher knows it; gamefix sets up {} first (an app-menu entry), then that starts it.", game.name, folder.display()),
+        launch::Plan::BattleNet { folder, launch } => {
+            if !battlenet::installed() {
+                println!("{}: a Blizzard game; Battle.net isn't installed yet: lobby installs it into {} first.", game.name, battlenet::prefix().display());
+            } else if !battlenet::knows(&folder) {
+                println!("{}: Battle.net doesn't know it's in {} yet: lobby adds it (closing Battle.net first if it's open).", game.name, folder.display());
+            }
+            println!("{} starts with Battle.net:\n  {}", game.name, battlenet::command(&launch).join(" "));
+        }
         launch::Plan::Cannot(why) => println!("{}: {why}", game.name),
     }
     for warning in drives::warnings(game, &drives::mounts()) {
