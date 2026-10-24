@@ -13,7 +13,21 @@ const ARCHIVES: &[&str] = &["zip", "rar", "7z", "gz", "tgz", "xz", "bz2", "iso"]
 /// Whether lobby looks at the file at all.
 pub fn wanted(path: &Path) -> bool {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    ext == "exe" || ARCHIVES.contains(&ext.as_str())
+    ext == "exe" || ext == "jar" || ARCHIVES.contains(&ext.as_str())
+}
+
+/// Files in a .jar that make it a Minecraft mod or a server plugin, not a game.
+const JAR_MODS: &[&str] = &["fabric.mod.json", "quilt.mod.json", "meta-inf/mods.toml", "meta-inf/neoforge.mods.toml", "mcmod.info", "plugin.yml", "bungee.yml", "paper-plugin.yml"];
+
+/// Whether a .jar is a game: it runs by itself (its manifest names a Main-Class) and isn't a
+/// mod or a plugin.
+fn runnable_jar(file: &Path) -> bool {
+    let Some(names) = contents(file) else { return false };
+    if names.iter().any(|n| JAR_MODS.contains(&n.to_lowercase().replace('\\', "/").as_str())) {
+        return false;
+    }
+    let manifest = Command::new("timeout").args(["60", "7z", "e", "-so", "-pX"]).arg(file).arg("META-INF/MANIFEST.MF").stdin(Stdio::null()).stderr(Stdio::null()).output();
+    manifest.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.starts_with("Main-Class:")))
 }
 
 /// Words in a download's name that make it something for a game, not one.
@@ -138,6 +152,14 @@ pub fn look(file: &Path) -> Option<Entry> {
     let mut e = Entry::new(Source::Folder, name);
     e.program = Some(file.to_path_buf());
     e.keys.push(Key::Download(file.to_path_buf()));
+    if ext == "jar" {
+        // A Java game in one file (an installer's .jar too, by its name).
+        if !runnable_jar(file) {
+            return None;
+        }
+        e.kind = if plain.contains("install") || plain.contains("setup") { Kind::Download } else { Kind::Game };
+        return Some(e);
+    }
     if ext == "exe" {
         // An installer, or a game in one program that runs as it is.
         let installer = match gamefix::binary::identify(file)? {
