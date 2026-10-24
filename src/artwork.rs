@@ -290,9 +290,14 @@ pub fn fill(home: &Home, games: &mut [Game]) {
     let mut results: Vec<(usize, Found)> = Vec::new();
     for &i in &wanted {
         let names = names(&games[i]);
-        let own = names.iter().flat_map(|n| owned.iter().map(move |o| (score(n, &o.title), o))).filter(|(s, _)| *s >= 2).max_by_key(|(s, _)| *s);
-        if let Some((s, o)) = own {
-            results.push((i, Found { name: (s >= 2).then(|| o.title.replace(['™', '®'], "")), cover: Some(o.art.clone()), from: "a game you own".into(), when: now }));
+        let own = names.iter().enumerate().flat_map(|(at, n)| owned.iter().map(move |o| (score(n, &o.title), at, o))).filter(|(s, ..)| *s >= 2).max_by_key(|(s, at, _)| (*s, std::cmp::Reverse(*at)));
+        if let Some((_, at, o)) = own {
+            // Named after the owned game only when its own name matched, or that name is only
+            // a folder's: NeoEE (a shortcut's name) is in a folder named "Empire Earth", but it
+            // isn't GOG's Empire Earth Gold Edition.
+            let folder_named = games[i].entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Artwork));
+            let name = (at == 0 || folder_named).then(|| o.title.replace(['™', '®'], ""));
+            results.push((i, Found { name, cover: Some(o.art.clone()), from: "a game you own".into(), when: now }));
             continue;
         }
         lookups.push((i, names[0].clone()));
