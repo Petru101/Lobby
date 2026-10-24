@@ -189,21 +189,129 @@ fn plain_time(t: &str) -> Option<u64> {
     u64::try_from(days * 86_400 + h.first()? * 3600 + h.get(1).copied().unwrap_or(0) * 60 + h.get(2).copied().unwrap_or(0)).ok()
 }
 
+fn announced_file() -> PathBuf {
+    stores::cache_dir().join("free-announced.json")
+}
+
+fn announced_key(g: &FreeGame) -> String {
+    format!("{}:{}:{}", g.store, g.title, g.until.unwrap_or(0))
+}
+
+/// Whether a free-now game the account doesn't have hasn't been announced yet (nothing marked).
+pub fn any_not_announced(games: &[FreeGame], epic: &crate::stores::epic::OwnedItems) -> bool {
+    let seen: Vec<String> = fs::read_to_string(announced_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    games.iter().any(|g| g.from.is_none() && !owned(g, epic) && !seen.contains(&announced_key(g)))
+}
+
+/// The daily look for new free games: a systemd user timer running `lobby free --notify` at
+/// 17:30 (Epic's weekly games change on Thursdays at 15:00 UTC) and 15 minutes after logging
+/// in, catching up on a day missed. Written (again when lobby's path changed) and enabled
+/// unless turned off (~/.config/lobby/free-daily says "off").
+const UNIT: &str = "lobby-free-games";
+
+fn units_dir() -> PathBuf {
+    stores::config_home().join("systemd/user")
+}
+
+fn daily_off() -> bool {
+    fs::read_to_string(stores::config_home().join("lobby/free-daily")).is_ok_and(|t| t.trim() == "off")
+}
+
+fn systemctl(args: &[&str]) -> Result<(), String> {
+    let out = std::process::Command::new("systemctl").arg("--user").args(args).stdin(std::process::Stdio::null()).output().map_err(|e| format!("systemctl: {e}"))?;
+    if out.status.success() { Ok(()) } else { Err(format!("systemctl --user {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim())) }
+}
+
+pub fn keep_daily_check() -> Result<(), String> {
+    if daily_off() {
+        return Ok(());
+    }
+    let lobby = std::env::current_exe().map_err(|e| e.to_string())?;
+    let service = format!("[Unit]\nDescription=Lobby: look for games free to keep\n\n[Service]\nExecStart={} free --notify\n", lobby.display());
+    let timer = "[Unit]\nDescription=Lobby: look for games free to keep, daily\n\n[Timer]\nOnCalendar=*-*-* 17:30\nOnStartupSec=15min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n";
+    let dir = units_dir();
+    let (s, t) = (dir.join(format!("{UNIT}.service")), dir.join(format!("{UNIT}.timer")));
+    if fs::read_to_string(&s).ok().as_deref() == Some(service.as_str()) && fs::read_to_string(&t).ok().as_deref() == Some(timer) {
+        return Ok(());
+    }
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(&s, &service).map_err(|e| e.to_string())?;
+    fs::write(&t, timer).map_err(|e| e.to_string())?;
+    systemctl(&["daemon-reload"])?;
+    systemctl(&["enable", "--now", &format!("{UNIT}.timer")])
+}
+
+/// Turns the daily look on or off.
+pub fn set_daily(on: bool) -> Result<(), String> {
+    let setting = stores::config_home().join("lobby/free-daily");
+    fs::create_dir_all(setting.parent().unwrap()).map_err(|e| e.to_string())?;
+    fs::write(&setting, if on { "on\n" } else { "off\n" }).map_err(|e| e.to_string())?;
+    if on {
+        return keep_daily_check();
+    }
+    let _ = systemctl(&["disable", "--now", &format!("{UNIT}.timer")]);
+    for ext in ["service", "timer"] {
+        let _ = fs::remove_file(units_dir().join(format!("{UNIT}.{ext}")));
+    }
+    systemctl(&["daemon-reload"])
+}
+
+pub fn daily_on() -> bool {
+    !daily_off()
+}
+
 /// The free-now games not owned that weren't announced before (remembered in
 /// ~/.cache/lobby/free-announced.json), for a notification.
 pub fn not_announced(games: &[FreeGame], epic: &crate::stores::epic::OwnedItems) -> Vec<FreeGame> {
-    let file = stores::cache_dir().join("free-announced.json");
+    let file = announced_file();
     let mut seen: Vec<String> = fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    let key = |g: &FreeGame| format!("{}:{}:{}", g.store, g.title, g.until.unwrap_or(0));
+    let key = announced_key;
     let new: Vec<FreeGame> = games.iter().filter(|g| g.from.is_none() && !owned(g, epic) && !seen.contains(&key(g))).cloned().collect();
     seen.extend(new.iter().map(key));
     let _ = fs::write(&file, serde_json::to_string(&seen).unwrap());
     new
 }
 
-/// The checkout page for Epic's offer.
-pub fn epic_checkout(namespace: &str, offer: &str) -> String {
-    format!("https://www.epicgames.com/store/purchase?highlightColor=0078f2&offers=1-{namespace}-{offer}&orderId&purchaseToken&showNavigation=true")
+/// Epic's checkout for several offers at once: one order for all of them.
+pub fn epic_checkout(offers: &[(String, String)]) -> String {
+    let offers: String = offers.iter().map(|(namespace, offer)| format!("&offers=1-{namespace}-{offer}")).collect();
+    format!("https://www.epicgames.com/store/purchase?highlightColor=0078f2{offers}&orderId&purchaseToken&showNavigation=true")
+}
+
+/// JavaScript run in a signed-in page of Epic's store (it passes Cloudflare; lobby's own
+/// requests don't): the store's search (the persisted searchStoreQuery epicgames-freegames-node
+/// uses) for the game's name, each result's offer and current price, as JSON.
+pub fn epic_search_js(title: &str) -> String {
+    let vars = serde_json::json!({
+        "allowCountries": country(), "category": "games/edition/base|bundles/games|editors|software/edition/base",
+        "count": 10, "country": country(), "keywords": title, "locale": "en-US",
+        "sortBy": "relevancy", "sortDir": "DESC", "start": 0, "withPrice": true,
+    });
+    let ext = serde_json::json!({"persistedQuery": {"version": 1, "sha256Hash": "7d58e12d9dd8cb14c84a3ff18d360bf9f0caa96bf218f2c5fda68ba88d68a437"}});
+    format!(
+        "const r = await fetch('/graphql?operationName=searchStoreQuery&variables=' + encodeURIComponent({}) + '&extensions=' + encodeURIComponent({}), {{credentials: 'include'}});
+         const j = await r.json();
+         const els = (((j.data || {{}}).Catalog || {{}}).searchStore || {{}}).elements || [];
+         return JSON.stringify(els.map(e => ({{title: e.title, namespace: e.namespace, id: e.id, price: e.price ? e.price.totalPrice.discountPrice : null}})));",
+        serde_json::to_string(&vars.to_string()).unwrap(),
+        serde_json::to_string(&ext.to_string()).unwrap()
+    )
+}
+
+/// Whether a checkout page's text (lowercased) is Epic's thanks for a placed order.
+pub fn order_done(text: &str) -> bool {
+    ["thanks for your order", "thank you for your order", "thanks for buying", "thank you for buying", "order complete", "your order is complete"].iter().any(|t| text.contains(t))
+}
+
+/// The free offer for the game among the search's results (same name, price 0).
+pub fn free_offer(title: &str, results: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(results).ok()?;
+    let free = v.as_array()?.iter().filter(|e| e.get("price").and_then(|p| p.as_u64()) == Some(0));
+    let offer = |e: &serde_json::Value| Some((e.get("namespace")?.as_str()?.to_string(), e.get("id")?.as_str()?.to_string()));
+    let name = |e: &serde_json::Value| e.get("title").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+    // The same name first ("Terraspace", not "Terraspace Soundtrack"), else one with a subtitle.
+    let free: Vec<&serde_json::Value> = free.collect();
+    free.iter().find(|e| crate::library::plain(&name(e)) == crate::library::plain(title)).or_else(|| free.iter().find(|e| same_title(&name(e), title))).and_then(|e| offer(e))
 }
 
 /// "free for 5 more days", "free until tomorrow", "free from Thursday" ...
@@ -261,6 +369,14 @@ mod tests {
         assert!(!owned(&games[0], &items(&["x"], &["ns9"])));
         assert!(same_title("Home - A Unique Horror Adventure", "Home"));
         assert!(!same_title("Homeworld", "Home"));
+    }
+
+    #[test]
+    fn offers() {
+        let results = r#"[{"title":"Terraspace Soundtrack","namespace":"a","id":"1","price":0},{"title":"Terraspace","namespace":"n","id":"o","price":0},{"title":"Terraspace","namespace":"n","id":"p","price":599}]"#;
+        assert_eq!(free_offer("Terraspace", results), Some(("n".into(), "o".into())));
+        assert_eq!(free_offer("Other", results), None);
+        assert_eq!(epic_checkout(&[("n".into(), "o".into()), ("m".into(), "q".into())]), "https://www.epicgames.com/store/purchase?highlightColor=0078f2&offers=1-n-o&offers=1-m-q&orderId&purchaseToken&showNavigation=true");
     }
 
     #[test]

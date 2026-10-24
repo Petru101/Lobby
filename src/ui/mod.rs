@@ -11,13 +11,23 @@ use webkit6::prelude::*;
 use gtk::{gdk, gio, glib};
 use crate::stores::Store;
 use std::cell::{Cell, RefCell};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 const APP_ID: &str = "io.github.Petru101.Lobby";
 
-pub fn run() -> glib::ExitCode {
+thread_local! {
+    /// The window's state, for app actions (claim-free) that arrive from another `lobby`.
+    static UI: RefCell<Option<Rc<Ui>>> = const { RefCell::new(None) };
+    /// claim-free arrived before the window was built: it claims once it is.
+    static CLAIM_PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The window; with `claim`, straight at the checkout for the free games not claimed yet (the
+/// notification's Claim button). Lobby already open gets the request.
+pub fn run(claim: bool) -> glib::ExitCode {
     // A checking run (LOBBY_SNAPSHOT) is a copy of its own: otherwise it would hand over to the
     // user's open Lobby and quit.
     let flags = if std::env::var_os("LOBBY_SNAPSHOT").is_some() { gio::ApplicationFlags::NON_UNIQUE } else { gio::ApplicationFlags::empty() };
@@ -32,6 +42,16 @@ pub fn run() -> glib::ExitCode {
         Some(window) => window.present(),
         None => build(app),
     });
+    let action = gio::SimpleAction::new("claim-free", None);
+    action.connect_activate(|_, _| match UI.with(|u| u.borrow().clone()) {
+        Some(ui) => ui.claim_unclaimed(),
+        None => CLAIM_PENDING.with(|p| p.set(true)),
+    });
+    app.add_action(&action);
+    if claim {
+        let _ = app.register(gio::Cancellable::NONE);
+        app.activate_action("claim-free", None);
+    }
     app.set_accels_for_action("win.search", &["<Control>f"]);
     app.set_accels_for_action("win.rescan", &["<Control>r", "F5"]);
     app.set_accels_for_action("window.close", &["<Control>w", "<Control>q"]);
@@ -286,6 +306,18 @@ fn build(app: &adw::Application) {
     ui.rescan();
     window.present();
     snapshot_for_checking(&ui);
+    UI.with(|u| *u.borrow_mut() = Some(ui.clone()));
+    if CLAIM_PENDING.with(|p| p.replace(false)) {
+        ui.claim_unclaimed();
+    }
+    if std::env::var_os("LOBBY_SNAPSHOT").is_none() {
+        // The daily look for new free games, unless it was turned off.
+        glib::spawn_future_local(async {
+            if let Ok(Err(e)) = gio::spawn_blocking(crate::free::keep_daily_check).await {
+                crate::log::line(&format!("daily check: {e}"));
+            }
+        });
+    }
 }
 
 /// For checking how the window looks without a screenshot of the desktop: with
@@ -344,9 +376,9 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         let claiming = std::env::var("LOBBY_SNAPSHOT_CLAIM").ok();
         if let Some(title) = &claiming {
             let t = title.clone();
-            let games = gio::spawn_blocking(move || crate::free::list().unwrap_or_default().into_iter().filter(|g| g.title == t).collect::<Vec<_>>()).await.unwrap_or_default();
+            let games = gio::spawn_blocking(move || crate::free::list().unwrap_or_default().into_iter().filter(|g| t.split(',').any(|w| w == g.title)).collect::<Vec<_>>()).await.unwrap_or_default();
             if let Some(web) = u.claim(games) {
-                glib::timeout_future(std::time::Duration::from_secs(25)).await;
+                glib::timeout_future(std::time::Duration::from_secs(35)).await;
                 let page = file.with_extension("page.png");
                 web.snapshot(webkit6::SnapshotRegion::Visible, webkit6::SnapshotOptions::NONE, gio::Cancellable::NONE, move |r| {
                     eprintln!("page snapshot: {:?}", r.map(|t| t.save_to_png(&page)));
@@ -766,8 +798,22 @@ impl Ui {
         status.set_child(Some(&adw::Spinner::builder().width_request(32).height_request(32).build()));
         let stack = gtk::Stack::new();
         stack.add_named(&status, Some("looking"));
-        let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
+        let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
+        let daily = adw::SwitchRow::builder().title("Look for new ones every day").subtitle("A notification when something new is free, even with Lobby closed; its Claim button opens the checkout.").active(crate::free::daily_on()).build();
+        let settings = adw::PreferencesGroup::new();
+        settings.add(&daily);
+        page.append(&settings);
         page.append(&flow);
+        let u = self.clone();
+        daily.connect_active_notify(move |row| {
+            let on = row.is_active();
+            let u = u.clone();
+            glib::spawn_future_local(async move {
+                if let Ok(Err(e)) = gio::spawn_blocking(move || crate::free::set_daily(on)).await {
+                    u.alert("Couldn't change the daily look", &e);
+                }
+            });
+        });
         stack.add_named(&gtk::ScrolledWindow::builder().child(&page).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build(), Some("list"));
         let header = adw::HeaderBar::new();
         let claim_all = gtk::Button::builder().label("Claim all").visible(false).build();
@@ -813,8 +859,29 @@ impl Ui {
         });
     }
 
+    /// Claims every free-now Epic game the account doesn't have (the notification's Claim);
+    /// with none, the free games are shown.
+    fn claim_unclaimed(self: &Rc<Self>) {
+        self.window.present();
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let games = gio::spawn_blocking(|| {
+                let epic = crate::stores::epic::owned_items();
+                crate::free::list().unwrap_or_default().into_iter().filter(|g| g.from.is_none() && g.store == crate::stores::Store::Epic.name() && !crate::free::owned(g, &epic)).collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            if games.is_empty() || crate::stores::Store::Epic.account().is_none() {
+                u.free_games();
+            } else {
+                u.claim(games);
+            }
+        });
+    }
+
     /// How many games are free to keep now that the account doesn't have (on the header's
-    /// button), and a desktop notification for new ones.
+    /// button), and a desktop notification for new ones (`lobby free --notify`, whose Claim
+    /// button opens the checkout).
     fn check_free(self: &Rc<Self>) {
         let u = self.clone();
         glib::spawn_future_local(async move {
@@ -824,7 +891,7 @@ impl Ui {
                 crate::free::list().map(|games| {
                     let epic = crate::stores::epic::owned_items();
                     let count = games.iter().filter(|g| g.from.is_none() && !crate::free::owned(g, &epic)).count();
-                    (count, if checking { Vec::new() } else { crate::free::not_announced(&games, &epic) })
+                    (count, !checking && crate::free::any_not_announced(&games, &epic))
                 })
             })
             .await
@@ -832,9 +899,10 @@ impl Ui {
                 return;
             };
             u.free_button.set_label(&if count > 0 { format!("Free games ({count})") } else { "Free games".to_string() });
-            if !new.is_empty() {
-                let names: Vec<String> = new.iter().map(|g| format!("{} ({}, {})", g.title, g.store, crate::free::when(g))).collect();
-                let _ = std::process::Command::new("notify-send").args(["-a", "Lobby", "Free to keep", &names.join("\n")]).stdin(std::process::Stdio::null()).spawn();
+            if new && !checking {
+                if let Ok(lobby) = std::env::current_exe() {
+                    let _ = std::process::Command::new(lobby).args(["free", "--notify"]).stdin(std::process::Stdio::null()).process_group(0).spawn();
+                }
             }
         });
     }
@@ -899,19 +967,18 @@ impl Ui {
         gtk::FlowBoxChild::builder().child(&body).tooltip_text(&g.title).build()
     }
 
-    /// Claims Epic's free games one after the other in lobby's window, signed in to Epic's site
-    /// with lobby's Epic sign-in: each opens at its checkout (or store page), the user places
-    /// the order (and answers Epic's captcha when it asks), then goes on with Next. Lobby never
-    /// presses anything on Epic's pages. Afterwards the owned list is fetched again.
+    /// Claims Epic's free games in lobby's window, signed in to Epic's site with lobby's Epic
+    /// sign-in. Games known only by name (GamerPower's) are looked up in the store's search
+    /// from inside the signed-in page; then one checkout holds every game, the user places the
+    /// order (and answers Epic's captcha when it asks), and the window sees Epic's thanks and
+    /// closes. Lobby never presses anything on Epic's pages. Games whose offer wasn't found
+    /// open at their store page afterwards, one by one. Closing fetches the owned list again
+    /// and says what was added.
     fn claim(self: &Rc<Self>, games: Vec<crate::free::FreeGame>) -> Option<webkit6::WebView> {
         use crate::free::Claim;
         if games.is_empty() {
             return None;
         }
-        let target = |g: &crate::free::FreeGame| match &g.claim {
-            Claim::EpicCheckout { namespace, offer } => crate::free::epic_checkout(namespace, offer),
-            Claim::EpicPage(url) | Claim::Browser(url) => url.clone(),
-        };
         let session = webkit6::NetworkSession::new_ephemeral();
         let web = webkit6::WebView::builder().network_session(&session).vexpand(true).hexpand(true).build();
         web.connect_create(|web, action| {
@@ -921,62 +988,69 @@ impl Ui {
             None
         });
         let header = adw::HeaderBar::new();
-        let next = gtk::Button::builder().label(if games.len() > 1 { "Next game" } else { "Done" }).build();
+        let status = gtk::Label::builder().label("Signing in to Epic…").build();
+        status.add_css_class("dim-label");
+        header.pack_start(&status);
+        let next = gtk::Button::builder().label("Next game").visible(false).build();
         next.add_css_class("suggested-action");
         header.pack_end(&next);
-        let note = gtk::Label::builder().label("Place the order yourself; Lobby only opens the page.").build();
-        note.add_css_class("dim-label");
-        header.pack_start(&note);
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header);
         view.set_content(Some(&web));
-        let name = |games: &[crate::free::FreeGame], i: usize| format!("Claim {} ({} of {})", games[i].title, i + 1, games.len());
-        let dialog = adw::Dialog::builder().title(name(&games, 0)).content_width(1000).content_height(820).child(&view).build();
+        let title = if games.len() == 1 { format!("Claim {}", games[0].title) } else { format!("Claim {} free games", games.len()) };
+        let dialog = adw::Dialog::builder().title(title).content_width(1000).content_height(820).child(&view).build();
         dialog.present(Some(&self.window));
 
-        // The first page through Epic's sign-in; the window stays signed in for the rest. Epic's
-        // sign-in only goes on to Epic's own pages: another (GamerPower's link, which forwards
-        // to Epic's store) is opened once the store's home page has loaded signed in.
-        let first = target(&games[0]);
-        let epic_page = |u: &str| u.starts_with("https://www.epicgames.com/") || u.starts_with("https://store.epicgames.com/");
-        let after_sign_in = Rc::new(RefCell::new((!epic_page(&first)).then(|| first.clone())));
-        let then = if epic_page(&first) { first } else { "https://store.epicgames.com/".to_string() };
-        let pending = after_sign_in.clone();
-        web.connect_load_changed(move |web, event| {
-            if event == webkit6::LoadEvent::Finished && web.uri().is_some_and(|u| u.starts_with("https://store.epicgames.com/")) {
-                if let Some(url) = pending.borrow_mut().take() {
-                    web.load_uri(&url);
-                }
-            }
-        });
+        // Signed in at the store's home page, where the search can run.
         let w = web.clone();
         let u = self.clone();
         glib::spawn_future_local(async move {
-            match gio::spawn_blocking(move || crate::stores::epic::web_sign_in(&then)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+            match gio::spawn_blocking(|| crate::stores::epic::web_sign_in("https://store.epicgames.com/en-US/")).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
                 Ok(url) => w.load_uri(&url),
                 Err(e) => u.alert("Couldn't sign in to Epic's store", &e),
             }
         });
-        let at = Rc::new(Cell::new(0usize));
-        let (d, u) = (dialog.clone(), self.clone());
-        let claimed_games = games.clone();
-        next.connect_clicked(move |b| {
-            let i = at.get() + 1;
-            if i >= games.len() {
-                d.close();
+        let started = Rc::new(Cell::new(false));
+        let pages: Rc<RefCell<Vec<String>>> = Rc::default();
+        let claimed = games.clone();
+        let (st, s, d, p, nx) = (started.clone(), status.clone(), dialog.clone(), pages.clone(), next.clone());
+        web.connect_load_changed(move |web, event| {
+            if event != webkit6::LoadEvent::Finished || st.get() || !web.uri().is_some_and(|u| u.starts_with("https://store.epicgames.com/")) {
                 return;
             }
-            at.set(i);
-            d.set_title(&name(&games, i));
-            if i + 1 == games.len() {
-                b.set_label("Done");
-            }
-            web.load_uri(&target(&games[i]));
+            st.set(true);
+            let (web, s, d, p, nx, games) = (web.clone(), s.clone(), d.clone(), p.clone(), nx.clone(), games.clone());
+            glib::spawn_future_local(async move {
+                let mut offers = Vec::new();
+                for g in &games {
+                    match &g.claim {
+                        Claim::EpicCheckout { namespace, offer } => offers.push((namespace.clone(), offer.clone())),
+                        Claim::EpicPage(url) | Claim::Browser(url) => {
+                            s.set_label(&format!("Finding {}…", g.title));
+                            let found = search_store(&web, &crate::free::epic_search_js(&g.title)).await.and_then(|r| crate::free::free_offer(&g.title, &r));
+                            crate::log::line(&format!("claim: {}'s offer {}", g.title, if found.is_some() { "found" } else { "not found: its page instead" }));
+                            match found {
+                                Some(o) => offers.push(o),
+                                None => p.borrow_mut().push(url.clone()),
+                            }
+                        }
+                    }
+                }
+                if offers.is_empty() {
+                    open_next_page(&web, &p, &s, &nx, &d);
+                    return;
+                }
+                s.set_label(&format!("Place the order to add {} to your library", if offers.len() == 1 { "the game".to_string() } else { format!("all {} games", offers.len()) }));
+                web.load_uri(&crate::free::epic_checkout(&offers));
+                watch_for_thanks(&web, &p, &s, &nx, &d);
+            });
         });
-        // Closed (Done or the window's close): the owned list is fetched again, so what was
-        // claimed shows as owned, and the user is told which games are theirs now.
+        let (w, s, d, p) = (web.clone(), status.clone(), dialog.clone(), pages.clone());
+        next.connect_clicked(move |b| open_next_page(&w, &p, &s, b, &d));
+
+        let u = self.clone();
         dialog.connect_closed(move |_| {
-            let (u, games) = (u.clone(), claimed_games.clone());
+            let (u, games) = (u.clone(), claimed.clone());
             u.toast("Checking your Epic library…");
             glib::spawn_future_local(async move {
                 let owned = gio::spawn_blocking(|| crate::stores::Store::Epic.refresh_owned().map(|_| crate::stores::epic::owned_items())).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
@@ -996,9 +1070,10 @@ impl Ui {
                     Err(e) => u.toast(&format!("Couldn't check your Epic library: {e}")),
                 }
                 u.rescan();
+                u.check_free();
             });
         });
-        Some(view.content().and_downcast::<webkit6::WebView>()?)
+        Some(web)
     }
 
     /// The stores lobby can sign in to, signed in or not.
@@ -1443,6 +1518,66 @@ fn candidate_card(c: &crate::artwork::Candidate) -> gtk::FlowBoxChild {
     body.append(&title);
     body.append(&from);
     gtk::FlowBoxChild::builder().child(&body).tooltip_text(format!("{} ({})", c.title, c.from)).build()
+}
+
+/// Runs the store search's JavaScript in the (signed-in) page and returns what it returned.
+async fn search_store(web: &webkit6::WebView, js: &str) -> Option<String> {
+    let answer: Rc<RefCell<Option<Option<String>>>> = Rc::default();
+    let a = answer.clone();
+    web.call_async_javascript_function(js, None, None, None, gio::Cancellable::NONE, move |r| {
+        *a.borrow_mut() = Some(r.ok().map(|v| v.to_str().to_string()));
+    });
+    // Up to 20 s.
+    for _ in 0..200 {
+        if let Some(got) = answer.borrow_mut().take() {
+            return got;
+        }
+        glib::timeout_future(std::time::Duration::from_millis(100)).await;
+    }
+    None
+}
+
+/// Opens the next store page lobby couldn't put in the checkout (the user presses Get and
+/// places the order there); with none left, the window closes.
+fn open_next_page(web: &webkit6::WebView, pages: &Rc<RefCell<Vec<String>>>, status: &gtk::Label, next: &gtk::Button, dialog: &adw::Dialog) {
+    let page = {
+        let mut p = pages.borrow_mut();
+        (!p.is_empty()).then(|| p.remove(0))
+    };
+    match page {
+        Some(url) => {
+            status.set_label("Lobby couldn't put this one in the checkout: press Get on its page");
+            next.set_label(if pages.borrow().is_empty() { "Done" } else { "Next game" });
+            next.set_visible(true);
+            web.load_uri(&url);
+        }
+        None => {
+            dialog.close();
+        }
+    }
+}
+
+/// Watches the checkout for Epic's thanks once the order is placed (reading the page's text,
+/// pressing nothing), then goes on to any store pages left, or closes the window.
+fn watch_for_thanks(web: &webkit6::WebView, pages: &Rc<RefCell<Vec<String>>>, status: &gtk::Label, next: &gtk::Button, dialog: &adw::Dialog) {
+    let (web, pages, status, next, dialog) = (web.clone(), pages.clone(), status.clone(), next.clone(), dialog.clone());
+    glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
+        if dialog.root().is_none() {
+            return glib::ControlFlow::Break;
+        }
+        let on_checkout = web.uri().is_some_and(|u| u.contains("/purchase"));
+        let done = status.label() == "Done";
+        let (pages, status, next, dialog, w) = (pages.clone(), status.clone(), next.clone(), dialog.clone(), web.clone());
+        web.evaluate_javascript("document.body ? document.body.innerText : ''", None, None, gio::Cancellable::NONE, move |r| {
+            let text = r.map(|v| v.to_str().to_lowercase()).unwrap_or_default();
+            if on_checkout && crate::free::order_done(&text) && status.label() != "Done" {
+                crate::log::line("claim: Epic thanked for the order");
+                status.set_label("Done");
+                glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || open_next_page(&w, &pages, &status, &next, &dialog));
+            }
+        });
+        if done { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+    });
 }
 
 /// "today", "yesterday", "3 days ago", or the date.

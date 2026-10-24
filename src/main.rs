@@ -31,6 +31,9 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby saves <game> [down|up|keep-cloud|keep-local]  sync a store game's cloud saves now
        lobby uninstall <game> [--keep-prefix]  delete a game lobby installed (and its Wine prefix)
        lobby free              games free to keep now and next (claim them from the window)
+       lobby free --notify     a notification for new ones, whose Claim button opens the checkout
+       lobby free --daily=on|off  the daily look for new ones (on: a systemd user timer)
+       lobby claim             the window, at the checkout for the free games not claimed
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
 
 fn main() -> ExitCode {
@@ -38,7 +41,7 @@ fn main() -> ExitCode {
     let json = args.iter().any(|a| a == "--json");
     let rest: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with("--")).map(String::as_str).collect();
     if args.is_empty() {
-        return match ui::run() {
+        return match ui::run(false) {
             c if c == gtk::glib::ExitCode::SUCCESS => ExitCode::SUCCESS,
             _ => ExitCode::FAILURE,
         };
@@ -51,7 +54,16 @@ fn main() -> ExitCode {
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
+        (Some("free"), []) if args.iter().any(|a| a == "--notify") => free_notify(),
+        (Some("free"), []) if args.iter().any(|a| a == "--daily=off") => free::set_daily(false),
+        (Some("free"), []) if args.iter().any(|a| a == "--daily=on") => free::set_daily(true),
         (Some("free"), []) => free_games(),
+        (Some("claim"), []) => {
+            return match ui::run(true) {
+                c if c == gtk::glib::ExitCode::SUCCESS => ExitCode::SUCCESS,
+                _ => ExitCode::FAILURE,
+            }
+        }
         (Some("uninstall"), words) if !words.is_empty() => uninstall_game(&words.join(" "), args.iter().any(|a| a == "--keep-prefix")),
         (Some("saves"), [game, way @ ..]) if way.len() <= 1 => sync_saves(game, way.first().copied().unwrap_or("down")),
         // The question `lobby run` asks when saves changed both here and in the cloud (to see it).
@@ -275,6 +287,26 @@ fn uninstall_game(query: &str, keep_prefix: bool) -> Result<(), String> {
         println!("  {l}");
     }
     scan().map(|_| ())
+}
+
+/// A notification for free games not announced before; its Claim button opens lobby at the
+/// checkout (`lobby claim`). Waits for the notification to be answered or closed.
+fn free_notify() -> Result<(), String> {
+    let games = free::list()?;
+    let epic = stores::epic::owned_items();
+    let new = free::not_announced(&games, &epic);
+    if new.is_empty() {
+        return Ok(());
+    }
+    let body: Vec<String> = new.iter().map(|g| format!("{} ({}, {})", g.title, g.store, free::when(g))).collect();
+    let epic_ones = new.iter().any(|g| g.store == stores::Store::Epic.name());
+    let action = if epic_ones { "claim=Claim" } else { "claim=Show" };
+    let out = std::process::Command::new("notify-send").args(["-a", "Lobby", "-i", "applications-games", "-A", action, "-w", "Free to keep", &body.join("\n")]).stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
+    if String::from_utf8_lossy(&out.stdout).trim() == "claim" {
+        let lobby = std::env::current_exe().map_err(|e| e.to_string())?;
+        std::os::unix::process::CommandExt::process_group(&mut std::process::Command::new(lobby), 0).arg("claim").stdin(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn free_games() -> Result<(), String> {
