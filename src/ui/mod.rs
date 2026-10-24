@@ -368,6 +368,13 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if let Some((id, details)) = std::env::var("LOBBY_SNAPSHOT_UNINSTALL").ok().and_then(|id| Some((id.clone(), u.details(&id)?))) {
             u.ask_uninstall(&id, &details);
         }
+        // LOBBY_SNAPSHOT_NEED=1: the question before installing what a game needs.
+        if std::env::var_os("LOBBY_SNAPSHOT_NEED").is_some() {
+            let u2 = u.clone();
+            glib::spawn_future_local(async move {
+                u2.ask_install_need("Underground Exterminator", "Java 25", Some("62 MB")).await;
+            });
+        }
         if std::env::var_os("LOBBY_SNAPSHOT_FREE").is_some() {
             u.free_games();
         }
@@ -1243,9 +1250,28 @@ impl Ui {
             },
             Plan::Cannot(why) => self.alert(&format!("{} can't be started", game.name), &why),
             Plan::SetUp(folder) => {
-                self.toast(&format!("Setting up {} with gamefix (only the first time)…", game.name));
                 let u = self.clone();
                 glib::spawn_future_local(async move {
+                    // Java or a runner from Flathub first, when the game needs one: asked.
+                    let f = folder.clone();
+                    let need = gio::spawn_blocking(move || launch::setup_need(&f).map(|n| {
+                        let described = n.describe();
+                        (n, described)
+                    }))
+                    .await
+                    .ok()
+                    .flatten();
+                    if let Some((need, (what, size))) = need {
+                        if !u.ask_install_need(&game.name, &what, size.as_deref()).await {
+                            return;
+                        }
+                        u.toast(&format!("Installing {what}…"));
+                        if let Err(e) = gio::spawn_blocking(move || need.install()).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                            u.alert(&format!("{what} couldn't be installed"), &e);
+                            return;
+                        }
+                    }
+                    u.toast(&format!("Setting up {} with gamefix (only the first time)…", game.name));
                     let result = gio::spawn_blocking(move || launch::set_up(&folder, None)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
                     match result {
                         Ok((lines, Some(entry))) => {
@@ -1268,6 +1294,16 @@ impl Ui {
                 });
             }
         }
+    }
+
+    /// Asks before installing what a game needs to run (Java, a runner from Flathub).
+    async fn ask_install_need(self: &Rc<Self>, game: &str, what: &str, size: Option<&str>) -> bool {
+        let size = size.map(|s| format!(" ({s} to download)")).unwrap_or_default();
+        let alert = adw::AlertDialog::new(Some(&format!("{game} needs {what}")), Some(&format!("It isn't installed. Lobby can install {what}{size} for you only: no password needed, and other games can use it too.")));
+        alert.add_responses(&[("cancel", "Not now"), ("install", &format!("Install {what}"))]);
+        alert.set_response_appearance("install", adw::ResponseAppearance::Suggested);
+        alert.set_default_response(Some("install"));
+        alert.choose_future(Some(&self.window)).await == "install"
     }
 
     /// A game's page: its cover, Play, where it was found and how it starts.

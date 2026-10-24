@@ -301,6 +301,41 @@ pub fn start(command: &[String], cwd: Option<&Path>, log: &Path) -> Result<(), S
     cmd.spawn().map(|_| ()).map_err(|e| format!("{program}: {e}"))
 }
 
+/// Something gamefix needs installed before it can set a game up.
+pub enum Need {
+    /// A Java runtime of this version: gamefix downloads Eclipse Temurin's.
+    Java(u32),
+    /// A program from Flathub that runs the game (a .love file's LÖVE ...).
+    Flatpak { name: &'static str, app: &'static str },
+}
+
+impl Need {
+    /// For the question: what it is, and how big a download (when known).
+    pub fn describe(&self) -> (String, Option<String>) {
+        match self {
+            Need::Java(major) => (format!("Java {major}"), gamefix::java::latest(*major).ok().map(|r| r.size_text())),
+            Need::Flatpak { name, app } => (name.to_string(), gamefix::setup::flathub_size(app)),
+        }
+    }
+
+    pub fn install(&self) -> Result<(), String> {
+        match self {
+            Need::Java(major) => gamefix::java::install(*major).map(|_| ()),
+            Need::Flatpak { app, .. } => gamefix::setup::install_flatpak(app),
+        }
+    }
+}
+
+/// What gamefix needs installed first to set the game in the folder up, if anything.
+pub fn setup_need(folder: &Path) -> Option<Need> {
+    let game = gamefix::scan::scan(folder)?;
+    let report = gamefix::check::check(&game, &gamefix::system::System::load());
+    if let Some(major) = gamefix::setup::missing_java(&game, &report) {
+        return Some(Need::Java(major));
+    }
+    gamefix::setup::missing_runner(&game, &report).map(|r| Need::Flatpak { name: r.name, app: r.app })
+}
+
 /// gamefix's setup for a game no launcher knows: an app-menu entry with its fixes, named
 /// `name` when lobby knows the game's real name (a store's, else gamefix names it from its
 /// files: "MinutesTillDawn"). Returns what it did and the entry made, which starts it from
