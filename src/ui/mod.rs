@@ -1022,15 +1022,22 @@ impl Ui {
             let (web, s, d, p, nx, games) = (web.clone(), s.clone(), d.clone(), p.clone(), nx.clone(), games.clone());
             glib::spawn_future_local(async move {
                 let mut offers = Vec::new();
+                let mut in_checkout = Vec::new();
                 for g in &games {
                     match &g.claim {
-                        Claim::EpicCheckout { namespace, offer } => offers.push((namespace.clone(), offer.clone())),
+                        Claim::EpicCheckout { namespace, offer } => {
+                            offers.push((namespace.clone(), offer.clone()));
+                            in_checkout.push(g.clone());
+                        }
                         Claim::EpicPage(url) | Claim::Browser(url) => {
                             s.set_label(&format!("Finding {}…", g.title));
                             let found = search_store(&web, &crate::free::epic_search_js(&g.title)).await.and_then(|r| crate::free::free_offer(&g.title, &r));
                             crate::log::line(&format!("claim: {}'s offer {}", g.title, if found.is_some() { "found" } else { "not found: its page instead" }));
                             match found {
-                                Some(o) => offers.push(o),
+                                Some(o) => {
+                                    offers.push(o);
+                                    in_checkout.push(g.clone());
+                                }
                                 None => p.borrow_mut().push(url.clone()),
                             }
                         }
@@ -1042,7 +1049,7 @@ impl Ui {
                 }
                 s.set_label(&format!("Place the order to add {} to your library", if offers.len() == 1 { "the game".to_string() } else { format!("all {} games", offers.len()) }));
                 web.load_uri(&crate::free::epic_checkout(&offers));
-                watch_for_thanks(&web, &p, &s, &nx, &d);
+                watch_for_thanks(&web, &p, &s, &nx, &d, in_checkout);
             });
         });
         let (w, s, d, p) = (web.clone(), status.clone(), dialog.clone(), pages.clone());
@@ -1557,26 +1564,56 @@ fn open_next_page(web: &webkit6::WebView, pages: &Rc<RefCell<Vec<String>>>, stat
     }
 }
 
-/// Watches the checkout for Epic's thanks once the order is placed (reading the page's text,
-/// pressing nothing), then goes on to any store pages left, or closes the window.
-fn watch_for_thanks(web: &webkit6::WebView, pages: &Rc<RefCell<Vec<String>>>, status: &gtk::Label, next: &gtk::Button, dialog: &adw::Dialog) {
+/// Watches the checkout (reading the page, pressing nothing): once Epic's order button
+/// ("Add to library", "Place order") has been there and is gone, the order was most likely
+/// placed (Epic's checkout then goes blank: it's made for Epic's launcher, which closes it),
+/// so the Epic library is checked; with every game in it, the window says so and goes on to
+/// any store pages left, or closes. A captcha over the button doesn't fool it: the library
+/// decides.
+fn watch_for_thanks(web: &webkit6::WebView, pages: &Rc<RefCell<Vec<String>>>, status: &gtk::Label, next: &gtk::Button, dialog: &adw::Dialog, games: Vec<crate::free::FreeGame>) {
+    // 0: no order button seen yet, 1: seen, 2: checking the library, 3: done.
+    let state = Rc::new(Cell::new(0u8));
     let (web, pages, status, next, dialog) = (web.clone(), pages.clone(), status.clone(), next.clone(), dialog.clone());
+    let asking = status.label().to_string();
     glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
-        if dialog.root().is_none() {
+        if dialog.root().is_none() || state.get() == 3 {
             return glib::ControlFlow::Break;
         }
-        let on_checkout = web.uri().is_some_and(|u| u.contains("/purchase"));
-        let done = status.label() == "Done";
-        let (pages, status, next, dialog, w) = (pages.clone(), status.clone(), next.clone(), dialog.clone(), web.clone());
+        if state.get() == 2 {
+            return glib::ControlFlow::Continue;
+        }
+        let (state, pages, status, next, dialog, w, games, asking) = (state.clone(), pages.clone(), status.clone(), next.clone(), dialog.clone(), web.clone(), games.clone(), asking.clone());
         web.evaluate_javascript("document.body ? document.body.innerText : ''", None, None, gio::Cancellable::NONE, move |r| {
             let text = r.map(|v| v.to_str().to_lowercase()).unwrap_or_default();
-            if on_checkout && crate::free::order_done(&text) && status.label() != "Done" {
-                crate::log::line("claim: Epic thanked for the order");
-                status.set_label("Done");
-                glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || open_next_page(&w, &pages, &status, &next, &dialog));
+            let button = crate::free::order_button(&text);
+            match state.get() {
+                0 if button => {
+                    crate::log::line("claim: the checkout's order button is up");
+                    state.set(1);
+                }
+                1 if !button || crate::free::order_done(&text) => {
+                    crate::log::line("claim: the order button went: checking the Epic library");
+                    state.set(2);
+                    status.set_label("Checking your Epic library…");
+                    glib::spawn_future_local(async move {
+                        let owned = gio::spawn_blocking(|| crate::stores::Store::Epic.refresh_owned().map(|_| crate::stores::epic::owned_items())).await;
+                        let all = matches!(&owned, Ok(Ok(items)) if games.iter().all(|g| crate::free::owned(g, items)));
+                        if all {
+                            crate::log::line("claim: every game is in the library");
+                            state.set(3);
+                            status.set_label(&format!("Added to your Epic library: {}", games.iter().map(|g| g.title.as_str()).collect::<Vec<_>>().join(", ")));
+                            glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || open_next_page(&w, &pages, &status, &next, &dialog));
+                        } else {
+                            crate::log::line("claim: not in the library yet: watching on");
+                            state.set(1);
+                            status.set_label(&asking);
+                        }
+                    });
+                }
+                _ => {}
             }
         });
-        if done { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        glib::ControlFlow::Continue
     });
 }
 

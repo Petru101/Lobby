@@ -298,6 +298,11 @@ pub fn epic_search_js(title: &str) -> String {
     )
 }
 
+/// Whether a checkout page's text (lowercased) shows Epic's order button.
+pub fn order_button(text: &str) -> bool {
+    ["add to library", "place order"].iter().any(|t| text.contains(t))
+}
+
 /// Whether a checkout page's text (lowercased) is Epic's thanks for a placed order.
 pub fn order_done(text: &str) -> bool {
     ["thanks for your order", "thank you for your order", "thanks for buying", "thank you for buying", "order complete", "your order is complete"].iter().any(|t| text.contains(t))
