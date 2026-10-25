@@ -231,6 +231,11 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
     if known.contains(&norm) {
         return vec![];
     }
+    // Unreal Engine itself (Epic's launcher puts it in "Epic Games" beside its games): tens of
+    // thousands of source files, and no game.
+    if unreal_engine(dir) {
+        return vec![Found::Nothing];
+    }
     if let Some(pfx) = library::prefix_in(dir) {
         // A prefix whose installer made no shortcuts: the program it put in Program Files.
         let fallback = if disc::shortcuts(&pfx).is_empty() {
@@ -311,6 +316,15 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
     vec![Found::Game(e)]
 }
 
+/// An install of Unreal Engine (the launcher's, or built from source), not a game made with it:
+/// packaged games ship neither the engine's source nor its editor.
+fn unreal_engine(dir: &Path) -> bool {
+    let engine = dir.join("Engine");
+    engine.join("Build/InstalledBuild.txt").is_file()
+        || engine.join("Source").is_dir()
+        || ["UnrealEditor.exe", "UE4Editor.exe", "UnrealEditor"].iter().any(|e| engine.join("Binaries/Win64").join(e).is_file() || engine.join("Binaries/Linux").join(e).is_file())
+}
+
 /// A Windows installer at the top of the folder (Inno Setup, NSIS ... or named setup/install).
 fn top_installer(dir: &Path) -> Option<PathBuf> {
     let mut exes: Vec<PathBuf> = fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"))).collect();
@@ -376,4 +390,20 @@ fn has_program_at_top(dir: &Path) -> bool {
             && (["exe", "sh", "x86_64", "x86", "love", "jar", "swf", "appimage", "bat"].contains(&ext.as_str())
                 || (ext.is_empty() && gamefix::binary::identify(&p).is_some_and(|b| matches!(b, Binary::Elf(_)))))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreal_engine_isnt_a_game() {
+        let dir = std::env::temp_dir().join(format!("lobby-ue-{}", std::process::id()));
+        fs::create_dir_all(dir.join("UE_5.8/Engine/Build")).unwrap();
+        fs::write(dir.join("UE_5.8/Engine/Build/InstalledBuild.txt"), "").unwrap();
+        fs::create_dir_all(dir.join("Earth Rush/Engine/Binaries/ThirdParty")).unwrap();
+        assert!(unreal_engine(&dir.join("UE_5.8")));
+        assert!(!unreal_engine(&dir.join("Earth Rush")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -851,6 +851,8 @@ impl Ui {
         });
         let result = gio::spawn_blocking(move || task(&|p| *progress.lock().unwrap() = p)).await.ok();
         self.installing.borrow_mut().retain(|(i, ..)| i != id);
+        // Its card without the bar now, not after the next scan (which can take minutes).
+        self.fill();
         result
     }
 
