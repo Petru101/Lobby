@@ -732,6 +732,68 @@ impl Ui {
     /// installed or with an Install button. Looked up when the page opens (GOG asks the store);
     /// hidden when there's none.
     /// Also says, in `info`, whether lobby syncs the game's cloud saves.
+    /// The game's saves found in a Windows user folder on the drives, and bringing them over.
+    fn fill_windows_saves(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup) {
+        use crate::windows_saves::{size_text, Saves};
+        let (u, group, g) = (self.clone(), group.clone(), game.clone());
+        glib::spawn_future_local(async move {
+            let id = g.id.clone();
+            let saves = gio::spawn_blocking(move || crate::windows_saves::find(&g)).await.unwrap_or(Saves::None);
+            let what = |f: &crate::windows_saves::Found| {
+                let user = std::env::var("USER").unwrap_or_default();
+                let place = f.windows.display().to_string();
+                let place = ["/run/media/", "/media/"].iter().find_map(|m| place.strip_prefix(&format!("{m}{user}/"))).map_or(place.clone(), String::from);
+                let changed = f.newest.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| format!(", last changed {}", when(d.as_secs()))).unwrap_or_default();
+                format!("{} file{} ({}) in {place}{changed}.", f.files, if f.files == 1 { "" } else { "s" }, size_text(f.bytes))
+            };
+            let row = adw::ActionRow::builder().title("Found in a Windows user folder").use_markup(false).build();
+            row.add_css_class("property");
+            match saves {
+                Saves::None => return,
+                Saves::Cloud(cloud, f) => row.set_subtitle(&format!("{} {cloud} keeps them, so they come back by themselves.", what(&f))),
+                Saves::NoPrefix(f) => row.set_subtitle(&format!("{} Play it once first (that makes its Windows setup); then Lobby can bring them over.", what(&f))),
+                Saves::Found { found, .. } if found.copies.is_empty() => row.set_subtitle(&format!("{} They're all here already.", what(&found))),
+                Saves::Found { found, .. } => {
+                    let newer = found.copies.iter().filter(|c| c.replaces).count();
+                    let missing = found.copies.len() - newer;
+                    let mut parts = Vec::new();
+                    if missing > 0 {
+                        parts.push(format!("{missing} aren't here yet"));
+                    }
+                    if newer > 0 {
+                        parts.push(format!("{newer} are newer than the copies here (those are kept)"));
+                    }
+                    row.set_subtitle(&format!("{} {}.", what(&found), capitalize(&parts.join("; "))));
+                    let button = gtk::Button::builder().label("Bring over").valign(gtk::Align::Center).tooltip_text("Copy them into this game's Windows setup").build();
+                    button.add_css_class("suggested-action");
+                    let (u, row2) = (u.clone(), row.clone());
+                    let found = std::sync::Arc::new(found);
+                    button.connect_clicked(move |b| {
+                        let found = found.clone();
+                        b.set_sensitive(false);
+                        let (u, row, b, id) = (u.clone(), row2.clone(), b.clone(), id.clone());
+                        glib::spawn_future_local(async move {
+                            match gio::spawn_blocking(move || crate::windows_saves::bring_over(&id, &found)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                                Ok((copied, replaced)) => {
+                                    row.remove(&b);
+                                    let kept = if replaced > 0 { format!(", {replaced} replacing older ones (kept in Lobby's save-backups folder)") } else { String::new() };
+                                    row.set_subtitle(&format!("Brought over {copied} file{}{kept}.", if copied == 1 { "" } else { "s" }));
+                                }
+                                Err(e) => {
+                                    b.set_sensitive(true);
+                                    u.alert("The saves couldn't all be brought over", &e);
+                                }
+                            }
+                        });
+                    });
+                    row.add_suffix(&button);
+                }
+            }
+            group.add(&row);
+            group.set_visible(true);
+        });
+    }
+
     fn fill_dlc(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup, info: &adw::PreferencesGroup, dialog: &adw::Dialog) {
         let Some((store, sid)) = crate::stores::installed_in(game) else {
             group.set_visible(false);
@@ -1738,6 +1800,11 @@ impl Ui {
         content.append(&info);
         let dlc = adw::PreferencesGroup::builder().title("DLC").build();
         content.append(&dlc);
+        let saves = adw::PreferencesGroup::builder().title("Saves from Windows").visible(false).build();
+        content.append(&saves);
+        if game.kind == Kind::Game && !game.gone {
+            self.fill_windows_saves(&game, &saves);
+        }
         if game.kind == Kind::Game {
             content.append(&self.uninstall_group(&game, &dialog_slot));
         }
@@ -2001,6 +2068,11 @@ fn watch_for_thanks(web: &webkit6::WebView, pages: &Rc<RefCell<Vec<String>>>, st
 }
 
 /// "today", "yesterday", "3 days ago", or the date.
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
 fn when(t: u64) -> String {
     let days = store::now().saturating_sub(t) / 86_400;
     match days {

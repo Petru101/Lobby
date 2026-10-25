@@ -16,6 +16,7 @@ mod steam_move;
 mod search;
 mod store;
 mod uninstall;
+mod windows_saves;
 mod stores;
 mod ui;
 
@@ -38,6 +39,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby free --notify     a notification for new ones, whose Claim button opens the checkout
        lobby free --daily=on|off  the daily look for new ones (on: a systemd user timer)
        lobby claim             the window, at the checkout for the free games not claimed
+       lobby windows-saves [<game>] [--copy]  saves found in Windows user folders on the drives;
+                               --copy brings a game's into its Wine prefix
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
 
@@ -60,6 +63,7 @@ fn main() -> ExitCode {
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("search"), []) => search_drives(),
+        (Some("windows-saves"), words) => windows_saves(&words.join(" "), args.iter().any(|a| a == "--copy")),
         (Some("free"), []) if args.iter().any(|a| a == "--notify") => free_notify(),
         (Some("free"), []) if args.iter().any(|a| a == "--daily=off") => free::set_daily(false),
         (Some("free"), []) if args.iter().any(|a| a == "--daily=on") => free::set_daily(true),
@@ -91,6 +95,34 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Saves found in Windows user folders: every game's (no game named), or one game's, brought
+/// into its prefix with --copy.
+fn windows_saves(query: &str, copy: bool) -> Result<(), String> {
+    use windows_saves::{size_text, Saves};
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let games: Vec<&Game> = if query.is_empty() { lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone).collect() } else { vec![lib.find(query)?] };
+    if query.is_empty() {
+        println!("Windows user folders: {}", windows_saves::user_folders().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "));
+    }
+    for game in games {
+        let line = |f: &windows_saves::Found| format!("{} file{}, {} in {}; {} to bring over", f.files, if f.files == 1 { "" } else { "s" }, size_text(f.bytes), f.windows.display(), f.copies.len());
+        match windows_saves::find(game) {
+            Saves::None if query.is_empty() => {}
+            Saves::None => println!("{}: no saves of it found in a Windows user folder.", game.name),
+            Saves::Cloud(cloud, f) => println!("{}: {}; {cloud} keeps them, so they come back by themselves.", game.name, line(&f)),
+            Saves::NoPrefix(f) => println!("{}: {}; its Wine prefix doesn't exist yet (play it once first).", game.name, line(&f)),
+            Saves::Found { found, prefix } => {
+                println!("{}: {} ({})", game.name, line(&found), prefix.display());
+                if copy && !query.is_empty() {
+                    let (copied, replaced) = windows_saves::bring_over(&game.id, &found)?;
+                    println!("  copied {copied}, {replaced} of them replacing older ones (kept in {})", store::dir().join("save-backups").join(&game.id).display());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
