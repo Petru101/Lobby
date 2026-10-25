@@ -43,11 +43,37 @@ pub fn how(game: &Game) -> How {
     if let Some(folder) = places.flat_map(|f| f.ancestors().take(4).map(Path::to_path_buf).collect::<Vec<_>>()).find(|f| made(f)) {
         return How::Folder(folder);
     }
+    // gamefix ran its installer: the note is in the game's Wine prefix, the game itself maybe
+    // on another drive the installer was pointed at.
+    if let Some(p) = game.entries.iter().filter_map(|e| e.prefix.clone()).chain(prefix(game)).find(|p| p.join("gamefix-install.txt").is_file()) {
+        return How::Folder(p);
+    }
     let launcher = game.entries.iter().find(|e| matches!(e.source, crate::library::Source::Heroic | crate::library::Source::Lutris | crate::library::Source::Faugus)).map(|e| e.source.label());
     How::Not(match launcher {
         Some(l) => format!("{l} installed it: uninstall it there."),
         None => "Lobby found it on your drive but didn't install it, so it doesn't delete it: delete its folder yourself if you're sure.".into(),
     })
+}
+
+/// For a gamefix install (its note in `folder`) whose program is outside it, on another
+/// drive: the game's own folder there, the one holding the installer's uninstaller (Inno
+/// Setup's unins000.exe, NSIS's uninstall.exe), else Err(the program).
+fn installed_elsewhere(folder: &Path) -> Option<Result<PathBuf, PathBuf>> {
+    let note = fs::read_to_string(folder.join("gamefix-install.txt")).ok()?;
+    let program = PathBuf::from(note.lines().find_map(|l| l.strip_prefix("program\t"))?);
+    if !program.is_absolute() || program.starts_with(folder) {
+        return None;
+    }
+    let uninstaller = |dir: &Path| {
+        fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            n.ends_with(".exe") && (n.starts_with("unins") || n.starts_with("uninstall"))
+        })
+    };
+    let dev = |p: &Path| fs::metadata(p).map(|m| std::os::unix::fs::MetadataExt::dev(&m)).ok();
+    // Up from the program, never to a drive's top (a folder whose parent is another device).
+    let found = program.ancestors().skip(1).take(6).take_while(|d| d.parent().is_some_and(|up| dev(up) == dev(d))).find(|d| uninstaller(d));
+    Some(found.map(Path::to_path_buf).ok_or(program))
 }
 
 /// The Wine prefix the game runs in (from how lobby starts it), when lobby knows one.
@@ -80,6 +106,23 @@ fn deletable_prefix(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn games_installed_on_another_drive() {
+        let dir = std::env::temp_dir().join(format!("lobby-elsewhere-{}", std::process::id()));
+        let (prefix, game) = (dir.join("Games/Borderlands 4"), dir.join("Storage/Games/Borderlands 4"));
+        fs::create_dir_all(prefix.join("drive_c")).unwrap();
+        fs::create_dir_all(game.join("OakGame/Binaries/Win64")).unwrap();
+        let program = game.join("OakGame/Binaries/Win64/Borderlands4.exe");
+        fs::write(&program, "").unwrap();
+        fs::write(prefix.join("gamefix-install.txt"), format!("source\t/d/setup.exe\nprogram\t{}\nname\tBorderlands 4\n", program.display())).unwrap();
+        assert_eq!(installed_elsewhere(&prefix), Some(Err(program.clone())));
+        fs::write(game.join("unins000.exe"), "").unwrap();
+        assert_eq!(installed_elsewhere(&prefix), Some(Ok(game.clone())));
+        fs::write(prefix.join("gamefix-install.txt"), "source\t/d/setup.exe\nprogram\tdrive_c/Games/X/x.exe\n").unwrap();
+        assert_eq!(installed_elsewhere(&prefix), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn prefixes_to_delete() {
@@ -176,6 +219,15 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
             done.push(format!("✓ Removed its files ({}).", folder.as_ref().map_or_else(String::new, |f| f.display().to_string())));
         }
         How::Folder(f) => {
+            // A game gamefix's installer run put on another drive: its own folder there.
+            match installed_elsewhere(f) {
+                Some(Ok(dir)) => {
+                    crate::log::timed("uninstall: deleting the game's folder", || fs::remove_dir_all(&dir)).map_err(|e| format!("Couldn't delete {}: {e}", dir.display()))?;
+                    done.push(format!("✓ Deleted {}.", dir.display()));
+                }
+                Some(Err(program)) => done.push(format!("Kept the game's files on the drive it was installed to: no uninstaller beside {} tells where its folder starts. Delete that folder yourself.", program.display())),
+                None => {}
+            }
             crate::log::timed("uninstall: deleting the folder", || fs::remove_dir_all(f)).map_err(|e| format!("Couldn't delete {}: {e}", f.display()))?;
             done.push(format!("✓ Deleted {}.", f.display()));
         }
@@ -188,7 +240,8 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
         }
         _ => {}
     }
-    if let Some(p) = delete_prefix {
+    // Gone with the folder already when the folder was the prefix (gamefix's installs).
+    if let Some(p) = delete_prefix.filter(|p| p.exists()) {
         crate::log::timed("uninstall: deleting the prefix", || fs::remove_dir_all(&p)).map_err(|e| format!("Couldn't delete its Wine prefix {}: {e}", p.display()))?;
         done.push(format!("✓ Deleted its Wine prefix {} (its settings and saves on this computer).", p.display()));
     } else if let (false, Some(p)) = (with_prefix, &prefix) {
