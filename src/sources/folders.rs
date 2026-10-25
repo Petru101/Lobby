@@ -299,9 +299,29 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
             e.kind = Kind::Download;
             e.program = Some(game.full(&game.files[i]));
         }
-        (None, None) => return vec![Found::Nothing],
+        (None, None) => match top_installer(dir) {
+            // A game waiting in its installer (a repack's setup.exe beside its .bin files).
+            Some(setup) => {
+                e.kind = Kind::Download;
+                e.program = Some(setup);
+            }
+            None => return vec![Found::Nothing],
+        },
     }
     vec![Found::Game(e)]
+}
+
+/// A Windows installer at the top of the folder (Inno Setup, NSIS ... or named setup/install).
+fn top_installer(dir: &Path) -> Option<PathBuf> {
+    let mut exes: Vec<PathBuf> = fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"))).collect();
+    exes.sort();
+    exes.into_iter().find(|p| {
+        let name = p.file_stem().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        match gamefix::binary::identify(p) {
+            Some(gamefix::binary::Binary::Pe(pe)) => pe.installer.is_some() || name.contains("setup") || name.contains("install"),
+            _ => false,
+        }
+    })
 }
 
 /// Folders between a game's folder and its program that say nothing about the game.
