@@ -96,7 +96,9 @@ pub fn plan(game: &Game) -> Plan {
         return umu_plan(&program, e.prefix.as_ref().unwrap(), &args, "umu-run, in the Wine prefix it was installed into");
     }
     // A folder, or a game in one program (a loose .exe in Downloads).
-    if let Some(folder) = game.entries.iter().find(|e| e.source == Source::Folder).and_then(|e| e.folder.clone().or_else(|| e.program.clone())) {
+    // The installed one when the game's download was found too.
+    let folders = || game.entries.iter().filter(|e| e.source == Source::Folder);
+    if let Some(folder) = folders().find(|e| e.kind != Kind::Download).or_else(|| folders().next()).and_then(|e| e.folder.clone().or_else(|| e.program.clone())) {
         return Plan::SetUp(folder);
     }
     Plan::Cannot("Nothing that knows how to start it was found (no launcher lists it, and its files aren't in a game folder).".into())
@@ -411,9 +413,14 @@ mod tests {
         e.folder = Some("/g/LAPIDARY".into());
         assert_eq!(plan(&game(vec![e.clone()])), Plan::SetUp("/g/LAPIDARY".into()));
         e.kind = Kind::Download;
-        let mut g = game(vec![e]);
+        let mut g = game(vec![e.clone()]);
         g.kind = Kind::Download;
         assert!(matches!(plan(&g), Plan::Cannot(_)));
+        // Installed, with its download found too: the installed folder is set up.
+        let mut installed = Entry::new(Source::Folder, "G");
+        installed.folder = Some("/games/G".into());
+        e.folder = Some("/downloads/G".into());
+        assert_eq!(plan(&game(vec![e, installed])), Plan::SetUp("/games/G".into()));
     }
 
     #[test]

@@ -308,6 +308,10 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
             // A game waiting in its installer (a repack's setup.exe beside its .bin files).
             Some(setup) => {
                 e.kind = Kind::Download;
+                // What gamefix's install note names as its source, and a name without the
+                // packer's tag ("Mycopunk [FitGirl Repack]").
+                e.keys.push(crate::library::Key::Download(setup.clone()));
+                e.name = without_tags(&e.name);
                 e.program = Some(setup);
             }
             None => return vec![Found::Nothing],
@@ -323,6 +327,22 @@ fn unreal_engine(dir: &Path) -> bool {
     engine.join("Build/InstalledBuild.txt").is_file()
         || engine.join("Source").is_dir()
         || ["UnrealEditor.exe", "UE4Editor.exe", "UnrealEditor"].iter().any(|e| engine.join("Binaries/Win64").join(e).is_file() || engine.join("Binaries/Linux").join(e).is_file())
+}
+
+/// A name without bracketed tags: "Mycopunk [FitGirl Repack]", "Game (DODI Repack)".
+fn without_tags(name: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for c in name.chars() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if out.is_empty() { name.to_string() } else { out }
 }
 
 /// A Windows installer at the top of the folder (Inno Setup, NSIS ... or named setup/install).
@@ -404,6 +424,9 @@ mod tests {
         fs::create_dir_all(dir.join("Earth Rush/Engine/Binaries/ThirdParty")).unwrap();
         assert!(unreal_engine(&dir.join("UE_5.8")));
         assert!(!unreal_engine(&dir.join("Earth Rush")));
+        assert_eq!(without_tags("Mycopunk [FitGirl Repack]"), "Mycopunk");
+        assert_eq!(without_tags("Some Game (DODI Repack) v1.2"), "Some Game v1.2");
+        assert_eq!(without_tags("[tags only]"), "[tags only]");
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,5 +1,6 @@
 //! gamefix's records (`~/.local/share/gamefix/games/<name>.log`): games it installed, and the
-//! Steam shortcuts and app-menu entries it made, which tie its fixes to those entries.
+//! Steam shortcuts and app-menu entries it made, which tie its fixes to those entries. A game
+//! installed from a download carries the download's path, so the two are one game.
 
 use super::Home;
 use crate::library::{Entry, Key, Source};
@@ -20,6 +21,12 @@ pub fn records(home: &Home) -> Vec<Entry> {
             let f: Vec<&str> = line.split('\t').collect();
             match f.as_slice() {
                 ["installed-game", prefix, program, name, ..] => {
+                    // The installer or disc it was installed from (gamefix's note in the
+                    // prefix): the download it belongs to.
+                    let note = fs::read_to_string(PathBuf::from(prefix).join("gamefix-install.txt")).unwrap_or_default();
+                    if let Some(source) = note.lines().find_map(|l| l.strip_prefix("source\t")) {
+                        e.keys.push(Key::Download(PathBuf::from(source)));
+                    }
                     e.prefix = Some(PathBuf::from(prefix));
                     e.program = Some(PathBuf::from(program));
                     e.name = name.to_string();

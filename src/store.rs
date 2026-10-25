@@ -65,6 +65,10 @@ impl Library {
             games.push(game);
         }
         for mut o in old.into_iter().flatten() {
+            // Now part of another game (a download, once what it installed is found).
+            if games.iter().any(|g| same(&o, g)) {
+                continue;
+            }
             o.gone = true;
             games.push(o);
         }

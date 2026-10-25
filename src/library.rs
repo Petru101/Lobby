@@ -292,6 +292,12 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
         entries[g].keys.push(key);
     }
     for e in &mut entries {
+        // A download's path the same way whoever names it (gamefix writes /var/home).
+        for k in &mut e.keys {
+            if let Key::Download(p) = k {
+                *p = norm(p);
+            }
+        }
         e.folder = e.folder.as_deref().map(norm);
         e.program = e.program.as_deref().map(norm);
         e.prefix = e.prefix.as_deref().map(norm);
