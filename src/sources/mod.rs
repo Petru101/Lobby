@@ -62,7 +62,7 @@ pub fn scan(home: &Home) -> Found {
     let roots = folders::roots(home);
     let games = crate::places::Places::load().games;
     let strict = folders::strict_roots(home);
-    let (found, folder_prefixes) = crate::log::timed("scan: folders", || folders::scan(&roots, &strict, &games, &entries));
+    let (found, folder_prefixes, collections) = crate::log::timed("scan: folders", || folders::scan(&roots, &strict, &games, &entries));
     entries.extend(found);
     // Names and covers for what came from itch.io.
     let itch = crate::log::timed("scan: itch.io", || itch::entries(home, &entries));
@@ -77,6 +77,7 @@ pub fn scan(home: &Home) -> Found {
     entries.extend(crate::log::timed("scan: Wine prefixes", || prefixes::scan(pfxs)));
 
     let mut wide = roots.clone();
+    wide.extend(collections);
     wide.push(home.home.clone());
     for d in ["Downloads", "Desktop", "Documents", "Games"] {
         wide.push(home.join(d));

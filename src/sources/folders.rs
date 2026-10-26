@@ -93,16 +93,27 @@ enum Found {
 
 /// Each folder in the roots, as games, downloads not installed yet, and prefixes. Folders a
 /// launcher already names as a game's are left to that launcher.
-pub fn scan(roots: &[PathBuf], strict: &[PathBuf], games: &[PathBuf], known: &[Entry]) -> (Vec<Entry>, Vec<PathBuf>) {
+/// Returns the entries found, the Wine prefixes come across, and the folders that collect
+/// downloads or games (too wide to be any one game's folder when merging).
+pub fn scan(roots: &[PathBuf], strict: &[PathBuf], games: &[PathBuf], known: &[Entry]) -> (Vec<Entry>, Vec<PathBuf>, Vec<PathBuf>) {
     let known: Vec<PathBuf> = known.iter().filter_map(|e| e.folder.as_deref()).map(library::norm).collect();
     // Game folders taken from the search of all drives: looked at as they are.
     let mut candidates: Vec<PathBuf> = games.iter().filter(|g| g.is_dir()).cloned().collect();
     let strict_dirs: Vec<PathBuf> = roots.iter().filter(|r| strict.contains(&library::norm(r))).cloned().collect();
-    for root in roots {
-        for entry in fs::read_dir(root).into_iter().flatten().flatten() {
+    // A root's folders and loose downloads, and those of folders in it that collect downloads
+    // or games (Downloads/Downloaded Games), two deep.
+    let mut dirs: Vec<(PathBuf, usize)> = roots.iter().map(|r| (r.clone(), 0)).collect();
+    let mut collections = Vec::new();
+    while let Some((root, depth)) = dirs.pop() {
+        if depth > 0 {
+            collections.push(library::norm(&root));
+        }
+        for entry in fs::read_dir(&root).into_iter().flatten().flatten() {
             let path = entry.path();
             let dir = entry.file_type().is_ok_and(|t| t.is_dir());
-            if (dir && !skipped(&entry.file_name().to_string_lossy()) && !roots.contains(&library::norm(&path))) || (!dir && super::downloads::wanted(&path)) {
+            if dir && depth < 2 && collection(&path) && !roots.contains(&library::norm(&path)) {
+                dirs.push((path, depth + 1));
+            } else if (dir && !skipped(&entry.file_name().to_string_lossy()) && !roots.contains(&library::norm(&path))) || (!dir && super::downloads::wanted(&path)) {
                 candidates.push(path);
             }
         }
@@ -122,7 +133,7 @@ pub fn scan(roots: &[PathBuf], strict: &[PathBuf], games: &[PathBuf], known: &[E
     let looked: Vec<(String, Looked)> = std::thread::scope(|s| {
         let handles: Vec<_> = chunks
             .iter()
-            .map(|chunk| s.spawn(|| chunk.iter().map(|(dir, (mtime, inside))| (dir.display().to_string(), Looked::from(look(dir, &known, 0, strict_dirs.iter().any(|r| dir.parent() == Some(r.as_path()))), *mtime, inside.clone()))).collect::<Vec<_>>()))
+            .map(|chunk| s.spawn(|| chunk.iter().map(|(dir, (mtime, inside))| (dir.display().to_string(), Looked::from(look(dir, &known, 0, strict_dirs.iter().any(|r| dir.parent().is_some_and(|up| up.starts_with(r)))), *mtime, inside.clone()))).collect::<Vec<_>>()))
             .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
     });
@@ -142,7 +153,7 @@ pub fn scan(roots: &[PathBuf], strict: &[PathBuf], games: &[PathBuf], known: &[E
     let wanted: Vec<String> = fresh.iter().chain(&stale).map(|(d, _)| d.display().to_string()).collect();
     cache.folders.retain(|k, _| wanted.contains(k));
     cache.save();
-    (entries, prefixes)
+    (entries, prefixes, collections)
 }
 
 /// What looking at one folder in a root found, kept between scans in
@@ -332,6 +343,13 @@ fn unreal_engine(dir: &Path) -> bool {
         || ["UnrealEditor.exe", "UE4Editor.exe", "UnrealEditor"].iter().any(|e| engine.join("Binaries/Win64").join(e).is_file() || engine.join("Binaries/Linux").join(e).is_file())
 }
 
+/// A folder collecting downloads or games rather than being one: named so ("Downloaded Games",
+/// "Old Games") and holding two or more downloads (archives, installers, programs) at its top.
+fn collection(dir: &Path) -> bool {
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    crate::places::games_or_downloads(&name) && fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && super::downloads::wanted(&e.path())).take(2).count() >= 2
+}
+
 /// A name without bracketed tags: "Mycopunk [FitGirl Repack]", "Game (DODI Repack)".
 fn without_tags(name: &str) -> String {
     let mut out = String::new();
@@ -428,6 +446,13 @@ mod tests {
         assert!(unreal_engine(&dir.join("UE_5.8")));
         assert!(!unreal_engine(&dir.join("Earth Rush")));
         assert_eq!(without_tags("Mycopunk [FitGirl Repack]"), "Mycopunk");
+        let coll = dir.join("Downloaded Games");
+        fs::create_dir_all(&coll).unwrap();
+        for f in ["a.zip", "b.rar"] {
+            fs::write(coll.join(f), "").unwrap();
+        }
+        assert!(collection(&coll));
+        assert!(!collection(&dir.join("UE_5.8")));
         assert_eq!(without_tags("Some Game (DODI Repack) v1.2"), "Some Game v1.2");
         assert_eq!(without_tags("[tags only]"), "[tags only]");
         fs::remove_dir_all(&dir).unwrap();
