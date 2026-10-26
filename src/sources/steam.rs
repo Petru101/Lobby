@@ -170,6 +170,31 @@ fn text(node: &steam::Node) -> Option<String> {
     }
 }
 
+/// A non-Steam game's shortcut as Steam starts it: its program, the folder it starts in, its
+/// launch options.
+pub struct Shortcut {
+    pub exe: String,
+    pub start_dir: Option<PathBuf>,
+    pub options: String,
+}
+
+pub fn shortcut(appid: u32) -> Option<Shortcut> {
+    let home = Home::find()?;
+    roots(&home).into_iter().flat_map(|root| fs::read_dir(root.join("userdata")).into_iter().flatten().flatten().collect::<Vec<_>>()).find_map(|user| {
+        let doc = steam::parse(&fs::read(user.path().join("config/shortcuts.vdf")).ok()?).ok()?;
+        let (_, steam::Node::Map(list)) = doc.iter().find(|(k, _)| k.eq_ignore_ascii_case(b"shortcuts"))? else { return None };
+        list.iter().find_map(|(_, item)| {
+            let steam::Node::Map(fields) = item else { return None };
+            let field = |name: &str| fields.iter().find(|(k, _)| k.eq_ignore_ascii_case(name.as_bytes())).map(|(_, v)| v);
+            matches!(field("appid"), Some(steam::Node::Int(id)) if *id == appid).then(|| Shortcut {
+                exe: field("Exe").and_then(text).unwrap_or_default(),
+                start_dir: field("StartDir").and_then(text).map(PathBuf::from),
+                options: field("LaunchOptions").and_then(text).unwrap_or_default(),
+            })
+        })
+    })
+}
+
 pub fn shortcuts(home: &Home) -> Vec<Entry> {
     let mut entries = Vec::new();
     for root in roots(home) {

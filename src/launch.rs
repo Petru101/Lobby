@@ -61,7 +61,13 @@ pub fn plan(game: &Game) -> Plan {
     if let Some((runner, app)) = keys().find_map(|k| if let Key::Heroic(r, a) = k { Some((r, a)) } else { None }) {
         return run("Heroic", vec!["xdg-open".into(), format!("heroic://launch?appName={app}&runner={runner}")], None);
     }
+    // Lutris's, Faugus's and Steam's shortcuts' games are started by Lobby itself, as they set
+    // them up (so they can be protected, and those launchers can go); the launcher only when
+    // its settings can't be read.
     if let Some(id) = keys().find_map(|k| if let Key::Lutris(id) = k { Some(*id) } else { None }) {
+        if let Some(p) = lutris_plan(id) {
+            return p;
+        }
         return run("Lutris", vec!["lutris".into(), format!("lutris:rungameid/{id}")], None);
     }
     // Unreal's launcher (Starship Troopers') only checks for Microsoft's VC++ runtime, which a
@@ -75,6 +81,9 @@ pub fn plan(game: &Game) -> Plan {
         return p;
     }
     if let Some(id) = keys().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }) {
+        if let Some(p) = faugus_plan(&id) {
+            return p;
+        }
         let native = program_on_path("faugus-launcher");
         let command = match native {
             Some(p) => vec![p.display().to_string(), "--game".into(), id],
@@ -83,6 +92,9 @@ pub fn plan(game: &Game) -> Plan {
         return run("Faugus", command, None);
     }
     if let Some(id) = keys().find_map(|k| if let Key::SteamShortcut(id) = k { Some(*id) } else { None }) {
+        if let Some(p) = shortcut_plan(id) {
+            return p;
+        }
         // Steam's run id for a non-Steam game: the shortcut's id in the top half.
         let run_id = ((id as u64) << 32) | 0x0200_0000;
         return run("Steam (non-Steam game)", vec!["steam".into(), format!("steam://rungameid/{run_id}")], None);
@@ -118,13 +130,27 @@ impl Plan {
     }
 }
 
+/// Why a command can't be protected: it hands the game to something else (another launcher,
+/// a container), which starts it outside whatever Lobby wraps it in.
+pub fn hands_over(command: &[String]) -> Option<String> {
+    let name = |w: &String| Path::new(w).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if let Some(c) = command.iter().map(name).find(|n| ["distrobox", "distrobox-enter", "toolbox", "podman", "docker"].contains(&n.as_str())) {
+        let which = command.iter().skip_while(|w| name(w) != c).nth(2).filter(|_| c.starts_with("distrobox") || c == "toolbox").map(|b| format!(" {b}")).unwrap_or_default();
+        return Some(format!("It runs in a container ({c}{which}), which Lobby can't put in a sandbox: a container of your own shares your home with it."));
+    }
+    if command.iter().any(|w| ["steam://", "heroic://", "lutris:", "itch://"].iter().any(|s| w.starts_with(s))) || command.first().map(name).is_some_and(|n| ["steam", "xdg-open", "gtk-launch", "kioclient", "kioclient5", "kde-open", "lutris", "heroic"].contains(&n.as_str())) {
+        return Some("It hands the game to another program, which starts it outside Lobby's protection.".into());
+    }
+    None
+}
+
 fn run(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
     Plan::Run { how: how.into(), command, cwd, protect: false }
 }
 
 /// The game's own command, which Lobby can protect (Flatpak's runners have Flatpak's sandbox).
 fn own(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
-    let protect = command.first().is_some_and(|w| w != "flatpak");
+    let protect = !command.is_empty() && hands_over(&command).is_none();
     Plan::Run { how: how.into(), command, cwd, protect }
 }
 
@@ -132,16 +158,16 @@ fn own(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
 /// when the command is the game's own.
 pub fn final_command(game: &Game, command: Vec<String>, protect: bool) -> Result<Vec<String>, String> {
     let command = with_options(command, game.launch_options.as_deref())?;
-    Ok(if protect && command.first().is_some_and(|w| w != "flatpak") { crate::sandbox::wrap(game, command) } else { command })
+    Ok(if protect { crate::sandbox::wrap(game, command) } else { command })
 }
 
 /// Why Lobby can't protect the game the way it starts, if it can't.
 pub fn protection_unsupported(plan: &Plan) -> Option<String> {
     match plan {
-        Plan::Run { protect: true, .. } | Plan::SetUp(_) => None,
-        Plan::Run { how, command, .. } if command.first().is_some_and(|w| w == "flatpak") && !how.contains("Faugus") => Some("It runs in a Flatpak app, inside Flatpak's own sandbox.".into()),
-        Plan::Run { how, .. } => Some(format!("It starts with {how}, which Lobby can't protect.")),
-        Plan::BattleNet { .. } => Some("Battle.net starts it, so Lobby can't protect it.".into()),
+        Plan::Run { protect: true, .. } | Plan::SetUp(_) | Plan::BattleNet { .. } => None,
+        Plan::Run { command, .. } if command.first().is_some_and(|w| w == "steam") => Some("Steam starts it: Steam's games need the Steam client, which runs them itself, so Lobby can't protect them.".into()),
+        Plan::Run { command, .. } if hands_over(command).is_some() => hands_over(command),
+        Plan::Run { how, .. } => Some(format!("It starts with {how}, whose settings Lobby couldn't read, so Lobby can't protect it.")),
         Plan::Cannot(why) => Some(why.clone()),
     }
 }
@@ -157,6 +183,14 @@ pub fn program_on_path(name: &str) -> Option<PathBuf> {
 
 /// umu-run with the prefix the game is in and Steam's default Proton (else umu's GE-Proton).
 fn umu_plan(program: &Path, prefix: &Path, args: &str, how: &str) -> Plan {
+    let args: Vec<String> = args.split_whitespace().map(String::from).collect();
+    own(how, umu_command(program, prefix, &[], &args, None), program.parent().map(Path::to_path_buf))
+}
+
+/// `env WINEPREFIX=.. PROTONPATH=.. GAMEID=.. <env> umu-run <program> <args>`: the Proton that
+/// made the prefix, else `proton` (the one a launcher picked), else Steam's default, else
+/// GE-Proton. UMU_ID among the variables (Steam shortcuts' protonfixes) is umu's GAMEID.
+fn umu_command(program: &Path, prefix: &Path, env: &[(String, String)], args: &[String], proton: Option<PathBuf>) -> Vec<String> {
     // A Proton-style prefix (`<folder>/pfx` holding drive_c) is given to umu as its folder.
     let wineprefix = match prefix.file_name() {
         Some(n) if n == "pfx" && !prefix.is_symlink() && fs::symlink_metadata(prefix).is_ok_and(|m| m.is_dir()) => prefix.parent().unwrap_or(prefix),
@@ -166,18 +200,146 @@ fn umu_plan(program: &Path, prefix: &Path, args: &str, how: &str) -> Plan {
     // the launcher that set it up.
     let steam = gamefix::steam::Steam::find();
     let proton = proton_of(prefix)
+        .or(proton.filter(|p| p.join("proton").is_file()))
         .or_else(|| steam.as_ref().and_then(|s| s.tool_dir(&s.proton()?)))
         .map_or("GE-Proton".to_string(), |d| d.display().to_string());
-    let command = vec![
-        "env".into(),
-        format!("WINEPREFIX={}", wineprefix.display()),
-        format!("PROTONPATH={proton}"),
-        "GAMEID=umu-0".into(),
-        "umu-run".into(),
-        program.display().to_string(),
-    ];
-    let command = command.into_iter().chain(args.split_whitespace().map(String::from)).collect();
-    own(how, command, program.parent().map(Path::to_path_buf))
+    let gameid = env.iter().find(|(k, _)| k == "UMU_ID" || k == "GAMEID").map_or("umu-0".to_string(), |(_, v)| v.clone());
+    let mut command = vec!["env".into(), format!("WINEPREFIX={}", wineprefix.display()), format!("PROTONPATH={proton}"), format!("GAMEID={gameid}")];
+    command.extend(env.iter().filter(|(k, _)| !matches!(k.as_str(), "WINEPREFIX" | "PROTONPATH" | "GAMEID" | "STEAM_COMPAT_DATA_PATH")).map(|(k, v)| format!("{k}={v}")));
+    command.extend(["umu-run".to_string(), program.display().to_string()]);
+    command.extend(args.iter().cloned());
+    command
+}
+
+/// A Lutris game as Lutris starts it: a Windows game with umu-run in its prefix (or Lutris's
+/// own wine build when it picked one that isn't a Proton and no Proton made the prefix), a
+/// Linux one as it is; Lutris's variables and arguments added. Other runners (DOSBox,
+/// ScummVM ...) stay Lutris's.
+fn lutris_plan(id: i64) -> Option<Plan> {
+    let l = crate::sources::lutris::launch(id)?;
+    let program = l.program.clone().filter(|p| p.is_file())?;
+    let args = shell_words(&l.args);
+    let how = "Lobby, as Lutris set it up";
+    match l.runner.as_str() {
+        "wine" => {
+            // No prefix named: the one the program is in.
+            let prefix = l.prefix.clone().or_else(|| program.ancestors().find(|a| a.join("drive_c").is_dir()).map(Path::to_path_buf))?;
+            let plain_wine = l.wine.as_ref().filter(|w| w.join("bin/wine").is_file() && !w.join("proton").is_file() && proton_of(&prefix).is_none());
+            let command = match plain_wine {
+                Some(wine) => [vec!["env".to_string(), format!("WINEPREFIX={}", prefix.display())], l.env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![wine.join("bin/wine").display().to_string(), program.display().to_string()], args].concat(),
+                None => umu_command(&program, &prefix, &l.env, &args, l.wine.clone()),
+            };
+            Some(own(how, command, l.cwd))
+        }
+        "linux" => Some(own(how, [vec!["env".to_string()], l.env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![program.display().to_string()], args].concat(), l.cwd)),
+        _ => None,
+    }
+}
+
+/// A Faugus game as Faugus starts it: umu-run in its prefix, its launch arguments' variables
+/// before, its game arguments after, its protonfix as umu's GAMEID, MangoHud when ticked.
+fn faugus_plan(id: &str) -> Option<Plan> {
+    let f = crate::sources::faugus::launch(id)?;
+    let mut env: Vec<(String, String)> = shell_words(&f.before).iter().filter_map(|w| w.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect();
+    if let Some(fix) = f.protonfix {
+        env.push(("GAMEID".into(), fix));
+    }
+    if f.mangohud {
+        env.push(("MANGOHUD".into(), "1".into()));
+    }
+    let command = umu_command(&f.program, &f.prefix, &env, &shell_words(&f.after), None);
+    Some(own("Lobby, as Faugus set it up", command, f.program.parent().map(Path::to_path_buf)))
+}
+
+/// A non-Steam game's Steam shortcut, started as Steam would: a Windows program with umu-run in
+/// the prefix Steam gave it (STEAM_COMPAT_DATA_PATH in its options, else compatdata/<id>) and
+/// the Proton forced for it, a Linux one (or a runner like flatpak) as it is; its launch
+/// options' variables and arguments added.
+fn shortcut_plan(id: u32) -> Option<Plan> {
+    let s = crate::sources::steam::shortcut(id)?;
+    let exe = PathBuf::from(&s.exe);
+    if !exe.is_absolute() || exe.file_name().is_some_and(|n| n == "lutris") {
+        return None;
+    }
+    let (env, args) = steam_options(&s.options);
+    let how = "Lobby, as its Steam shortcut sets it up";
+    if windows_program(&exe) {
+        let steam = gamefix::steam::Steam::find()?;
+        let prefix = env.iter().find(|(k, _)| k == "STEAM_COMPAT_DATA_PATH").map(|(_, v)| PathBuf::from(v)).unwrap_or_else(|| steam.prefix(exe.parent().unwrap_or(&exe), id));
+        let prefix = if prefix.join("pfx").is_dir() { prefix.join("pfx") } else { prefix };
+        let forced = gamefix::steam::compat_tool(&steam.config(), id).ok().flatten().and_then(|t| steam.tool_dir(&t));
+        return Some(own(how, umu_command(&exe, &prefix, &env, &args, forced), s.start_dir));
+    }
+    let command = [vec!["env".to_string()], env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![exe.display().to_string()], args].concat();
+    Some(own(how, command, s.start_dir))
+}
+
+/// Steam-style launch options: variables before %command% and words after it (no %command%:
+/// all words go after the program). Programs before %command% (gamemoderun ...) are left out.
+fn steam_options(text: &str) -> (Vec<(String, String)>, Vec<String>) {
+    let words = shell_words(text);
+    match words.iter().position(|w| w == "%command%") {
+        Some(i) => (words[..i].iter().filter_map(|w| w.split_once('=').filter(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).map(|(k, v)| (k.to_string(), v.to_string()))).collect(), words[i + 1..].to_vec()),
+        None => (Vec::new(), words),
+    }
+}
+
+/// Words as a shell splits them: 'single' and "double" quotes, backslashes, and $VAR or
+/// ${VAR} (outside single quotes) from lobby's own environment.
+pub fn shell_words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let (mut cur, mut started) = (String::new(), false);
+    let mut chars = text.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') => quote = None,
+            (Some('\''), c) => cur.push(c),
+            (Some('"'), '"') => quote = None,
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (_, '\\') => {
+                cur.extend(chars.next());
+                started = true;
+            }
+            (_, '$') if chars.peek().is_some_and(|n| n.is_ascii_alphabetic() || *n == '_' || *n == '{') => {
+                let braced = chars.peek() == Some(&'{');
+                if braced {
+                    chars.next();
+                }
+                let mut name = String::new();
+                while let Some(&n) = chars.peek() {
+                    if n.is_ascii_alphanumeric() || n == '_' {
+                        name.push(n);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if braced && chars.peek() == Some(&'}') {
+                    chars.next();
+                }
+                cur.push_str(&std::env::var(&name).unwrap_or_default());
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            (_, c) => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
 }
 
 /// The Proton a prefix was made or last upgraded with: Proton's `config_info` (beside drive_c,
@@ -257,7 +419,10 @@ fn desktop_plan(e: &Entry) -> Option<Plan> {
     if is_gamefix_entry(e) {
         return Some(own("its gamefix app-menu entry", exec, path));
     }
-    Some(run("its app-menu entry", exec, path))
+    if hands_over(&exec).is_some() {
+        return Some(run("its app-menu entry", exec, path));
+    }
+    Some(own("its app-menu entry", exec, path))
 }
 
 /// A .desktop file's command (field codes dropped) and working folder.
@@ -533,6 +698,20 @@ mod tests {
         assert_eq!(with_options(cmd(&["steam", "steam://rungameid/49520"]), Some("-novid")).unwrap(), cmd(&["steam", "-applaunch", "49520", "-novid"]));
         assert!(with_options(cmd(&["lutris", "lutris:rungameid/2"]), Some("-x")).is_err());
         assert_eq!(with_options(cmd(&["/usr/bin/lobby", "run", "g"]), Some("-x")).unwrap(), cmd(&["/usr/bin/lobby", "run", "g"]));
+    }
+
+    #[test]
+    fn steam_style_options() {
+        let (env, args) = steam_options("GLIBC_TUNABLES='glibc.rtld.execstack=2' LD_PRELOAD=\"$LOBBY_TEST_UNSET:/g/a.so\" %command% -w");
+        assert_eq!(env, [("GLIBC_TUNABLES".to_string(), "glibc.rtld.execstack=2".to_string()), ("LD_PRELOAD".into(), ":/g/a.so".into())]);
+        assert_eq!(args, ["-w"]);
+        let (env, args) = steam_options("STEAM_COMPAT_DATA_PATH='/g/Harry Potter' %command%");
+        assert_eq!(env[0].1, "/g/Harry Potter");
+        assert!(args.is_empty());
+        assert_eq!(steam_options("run --filesystem=/g io.x -exit /g/A.EXE").1.len(), 5);
+        assert_eq!(shell_words(r#"a\ b "c d" 'e $f'"#), ["a b", "c d", "e $f"]);
+        assert!(hands_over(&["distrobox".into(), "enter".into(), "box".into(), "--".into(), "/g/play.sh".into()]).unwrap().contains("distrobox box"));
+        assert!(hands_over(&["/g/ToiletSim.x86_64".into()]).is_none());
     }
 
     #[test]

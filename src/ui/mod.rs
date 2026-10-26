@@ -1648,7 +1648,8 @@ impl Ui {
                         u.toast(&format!("Adding {} to Battle.net…", game.name));
                     }
                     let log = store::log_file(&game.id);
-                    match gio::spawn_blocking(move || battlenet::start(&folder, &launch, &log)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                    let g = u.game(&game.id).unwrap_or(game.clone());
+                    match gio::spawn_blocking(move || battlenet::start(&g, &folder, &launch, &log)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
                         Ok(()) => {
                             u.toast(&format!("Starting {} with Battle.net…", game.name));
                             u.played(&game.id, None);

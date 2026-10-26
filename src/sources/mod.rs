@@ -2,12 +2,12 @@
 //! Wine prefixes. Each source reads what's there and never changes anything.
 
 mod downloads;
-mod faugus;
+pub mod faugus;
 pub mod folders;
 mod gamefix;
 mod heroic;
 mod itch;
-mod lutris;
+pub mod lutris;
 mod menu;
 mod prefixes;
 pub mod steam;

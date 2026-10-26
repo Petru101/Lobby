@@ -135,16 +135,80 @@ fn installed_lobby() -> String {
 /// sandbox of its own). Only when that changes (gamefix rebuilds the menu each time). Whether
 /// it did.
 pub fn sync_shortcut(game: &Game) -> Result<bool, String> {
-    let Some(record) = crate::uninstall::gamefix_record(game) else { return Ok(false) };
+    let mut changed = false;
+    for file in game.entries.iter().filter(|e| e.source == Source::AppMenu && !e.made_by_gamefix()).flat_map(|e| e.keys.iter()).filter_map(|k| if let Key::Desktop(p) = k { Some(p) } else { None }) {
+        changed |= sync_entry(game, file)?;
+    }
+    let Some(record) = crate::uninstall::gamefix_record(game) else { return Ok(changed) };
     let text = fs::read_to_string(&record).unwrap_or_default();
     let current: Option<Vec<String>> = text.lines().find_map(|l| l.strip_prefix("wrapper\t")).map(|w| w.split('\t').map(String::from).collect());
     let entry = text.lines().filter_map(|l| l.strip_prefix("created\t")).filter(|p| p.ends_with(".desktop")).find_map(|p| crate::launch::desktop_exec(&fs::read_to_string(p).ok()?));
-    let Some((words, _)) = entry else { return Ok(false) };
-    let wanted = (level(game) != Level::Off && words.first().is_some_and(|w| w != "flatpak")).then(|| vec![installed_lobby(), "sandbox".into(), game.id.clone(), "--".into()]);
+    let Some((words, _)) = entry else { return Ok(changed) };
+    let wanted = (level(game) != Level::Off && crate::launch::hands_over(&words).is_none()).then(|| wrapper(game));
     if current == wanted {
-        return Ok(false);
+        return Ok(changed);
     }
     gamefix::setup::set_wrapper(&record, wanted.as_deref()).map(|()| true)
+}
+
+fn wrapper(game: &Game) -> Vec<String> {
+    vec![installed_lobby(), "sandbox".into(), game.id.clone(), "--".into()]
+}
+
+/// The key that keeps an entry's own command while Lobby's wrapper is in front of it.
+const ORIGINAL: &str = "X-Lobby-Original-Exec";
+
+/// Another program's (or your own) app-menu entry or desktop shortcut for the game: its Exec
+/// gets the wrapper in front, the command it had kept beside it (`ORIGINAL`), put back for
+/// Off. Only files in the home you can write (a system entry stays as it is: Play is still
+/// protected); not an entry that hands the game to another launcher or a container.
+fn sync_entry(game: &Game, file: &Path) -> Result<bool, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let Ok(text) = fs::read_to_string(file) else { return Ok(false) };
+    if !(file.starts_with(&home) || real(file).starts_with(real(&home))) || fs::metadata(file).is_ok_and(|m| m.permissions().readonly()) {
+        return Ok(false);
+    }
+    let rewritten = entry_text(&text, (level(game) != Level::Off).then(|| wrapper(game)).as_deref());
+    if rewritten == text {
+        return Ok(false);
+    }
+    fs::write(file, rewritten).map_err(|e| format!("{}: {e}", file.display()))?;
+    let _ = Command::new("kbuildsycoca6").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    Ok(true)
+}
+
+/// An entry's text with `wrapper` in front of its own command (None: its own command back).
+/// Only the main [Desktop Entry] group; an entry handing the game elsewhere is left alone.
+fn entry_text(text: &str, wrapper: Option<&[String]>) -> String {
+    let mut main = false;
+    let original = text.lines().skip_while(|l| l.trim() != "[Desktop Entry]").skip(1).take_while(|l| !l.starts_with('[')).find_map(|l| l.strip_prefix(&format!("{ORIGINAL}="))).map(String::from);
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with('[') {
+            main = line.trim() == "[Desktop Entry]";
+        }
+        if main && line.starts_with(&format!("{ORIGINAL}=")) {
+            continue;
+        }
+        match line.strip_prefix("Exec=").filter(|_| main) {
+            Some(exec) => {
+                let own = original.clone().unwrap_or_else(|| exec.to_string());
+                let words = crate::launch::exec_words(&own);
+                match wrapper.filter(|_| crate::launch::hands_over(&words).is_none()) {
+                    Some(w) => {
+                        let quoted: Vec<String> = w.iter().map(|word| gamefix::setup::exec_arg(word)).collect();
+                        out.push_str(&format!("Exec={} {own}\n{ORIGINAL}={own}\n", quoted.join(" ")));
+                    }
+                    None => out.push_str(&format!("Exec={own}\n")),
+                }
+            }
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// Every game's shortcut as its protection says (after a scan: games set up since, ids).
@@ -187,8 +251,16 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
         }
         return Ok(Sandboxed { command: c, proxy: None });
     }
-    let bwrap = crate::launch::program_on_path("bwrap").ok_or("Protecting the game needs bubblewrap (bwrap), which isn't installed.")?;
     let home = real(&PathBuf::from(std::env::var_os("HOME").ok_or("HOME isn't set")?));
+    if Path::new(program).file_name().is_some_and(|n| n == "flatpak") && args.first().is_some_and(|a| a == "run") {
+        let mut c = Command::new(program);
+        c.arg("run").args(flatpak_options(game, env, words, cwd, &home)).args(args[1..].iter().filter(|a| !grants_home(a))).envs(env.iter().cloned());
+        if let Some(dir) = cwd {
+            c.current_dir(dir);
+        }
+        return Ok(Sandboxed { command: c, proxy: None });
+    }
+    let bwrap = crate::launch::program_on_path("bwrap").ok_or("Protecting the game needs bubblewrap (bwrap), which isn't installed.")?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|r| r.is_dir());
     let proxy = runtime.as_deref().and_then(start_proxy);
     let private = (level == Level::Isolated).then(|| private_home(&game.id)).transpose()?;
@@ -207,11 +279,50 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
         private,
     };
     let mut c = Command::new(bwrap);
-    c.args(args_for(&spec)).arg("--").arg(program).args(args).envs(env.iter().cloned());
+    c.args(args_for(&spec)).args(wineserver_args()).arg("--").arg(program).args(args).envs(env.iter().cloned());
     if let Some(dir) = cwd {
         c.current_dir(dir);
     }
     Ok(Sandboxed { command: c, proxy })
+}
+
+/// A game a Flatpak app runs (Ruffle, DOSBox ...): Flatpak's sandbox, told to give it the game's
+/// folder and nothing else of the home or the drives (such apps often ask for the whole
+/// home), and no network when the game has no internet. Both levels alike: the app keeps its
+/// own data folder (~/.var/app/<app>), where saves go.
+fn flatpak_options(game: &Game, env: &[(String, String)], words: &[String], cwd: Option<&Path>, home: &Path) -> Vec<String> {
+    let mut o: Vec<String> = ["--nofilesystem=host", "--nofilesystem=home"].map(String::from).to_vec();
+    let folders = game_folders(game, env, words, cwd, home);
+    for f in &folders {
+        o.push(format!("--filesystem={}", f.display()));
+    }
+    for r in named_paths(env, words).into_iter().filter(|r| hidden_area(r, home) && !folders.iter().any(|f| r.starts_with(f))) {
+        o.push(format!("--filesystem={}:ro", r.display()));
+    }
+    if !internet(game) {
+        o.push("--unshare=network".into());
+    }
+    o
+}
+
+/// A `flatpak run` option giving the app the home or the whole computer back.
+fn grants_home(word: &str) -> bool {
+    word.strip_prefix("--filesystem=").is_some_and(|f| matches!(f.split(':').next().unwrap_or_default(), "home" | "host" | "~" | "/"))
+}
+
+/// Wine's server folder (/tmp/.wine-<uid>) shared with the sandbox: games in one prefix (a
+/// launcher's shared one) must find one wineserver, or each starts its own on the same prefix.
+fn wineserver_args() -> Vec<String> {
+    let Ok(uid) = fs::metadata("/proc/self").map(|m| std::os::unix::fs::MetadataExt::uid(&m)) else { return Vec::new() };
+    let dir = PathBuf::from(format!("/tmp/.wine-{uid}"));
+    if !dir.is_dir() && fs::create_dir(&dir).is_ok() {
+        let _ = fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    }
+    if dir.is_dir() {
+        vec!["--bind".into(), dir.display().to_string(), dir.display().to_string()]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Everything about the computer the sandbox's arguments depend on, gathered first so that
@@ -619,6 +730,20 @@ mod tests {
         let home = a.windows(3).position(|w| w[2] == "/home/p" && w[0] == "--bind").unwrap();
         let prefix = a.windows(3).position(|w| w[1] == "/home/p/.local/share/gamefix/prefixes/g").unwrap();
         assert!(home < prefix);
+    }
+
+    #[test]
+    fn entries_get_and_lose_the_wrapper() {
+        let text = "[Desktop Entry]\nName=Toilet Sim\nExec=/g/Toilet Sim.x86_64\nPath=/g\n[Desktop Action x]\nExec=other\n";
+        let w = ["/home/p/.local/bin/lobby".to_string(), "sandbox".into(), "toilet-sim".into(), "--".into()];
+        let wrapped = entry_text(text, Some(&w));
+        assert!(wrapped.contains("Exec=/home/p/.local/bin/lobby sandbox toilet-sim -- /g/Toilet Sim.x86_64\nX-Lobby-Original-Exec=/g/Toilet Sim.x86_64\n"));
+        assert!(wrapped.contains("[Desktop Action x]\nExec=other\n"));
+        // Again: no second wrapper; and off: the entry as it was.
+        assert_eq!(entry_text(&wrapped, Some(&w)), wrapped);
+        assert_eq!(entry_text(&wrapped, None), text);
+        let distrobox = "[Desktop Entry]\nExec=distrobox enter box -- /g/play.sh\n";
+        assert_eq!(entry_text(distrobox, Some(&w)), distrobox);
     }
 
     #[test]

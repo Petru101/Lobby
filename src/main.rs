@@ -29,7 +29,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby scan [--json]     look for games again and list them
        lobby list [--json]     list the games found before (scans the first time)
        lobby play <game>       start a game, by its id or name
-       lobby how <game>        say how lobby would start it, without starting it
+       lobby how <game> [--json]  say how lobby would start it, without starting it (--json:
+                               the exact command and folder)
        lobby install <game>    install a download, or a game you own on Epic or GOG
        lobby accounts          the stores lobby is signed in to (sign in from the window)
        lobby update [<game>]   which of lobby's store installs have updates; update one
@@ -63,6 +64,7 @@ fn main() -> ExitCode {
         (Some("scan"), []) => scan().map(|lib| show(&lib, json)),
         (Some("list"), []) => Library::load().map_or_else(scan, Ok).map(|lib| show(&lib, json)),
         (Some("play"), words) if !words.is_empty() => play(&words.join(" ")),
+        (Some("how"), words) if !words.is_empty() && json => how_json(&words.join(" ")),
         (Some("how"), words) if !words.is_empty() => how(&words.join(" ")),
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
@@ -256,7 +258,12 @@ fn play(query: &str) -> Result<(), String> {
                 battlenet::install()?;
             }
             let log = store::log_file(&game.id);
-            battlenet::start(&folder, &launch, &log)?;
+            if let Some(g) = lib.get_mut(&game.id) {
+                if sandbox::settle(g) {
+                    lib.save()?;
+                }
+            }
+            battlenet::start(lib.find(&game.id)?, &folder, &launch, &log)?;
             println!("Starting {} with Battle.net. Its output goes to {}", game.name, log.display());
             if let Some(g) = lib.get_mut(&game.id) {
                 g.played = Some(store::now());
@@ -337,6 +344,20 @@ fn install(query: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The exact command Play runs (launch options and sandbox included) and its folder, as JSON.
+fn how_json(query: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?;
+    let (command, cwd) = match launch::plan(game) {
+        launch::Plan::Run { command, cwd, protect, .. } => (launch::final_command(game, command, protect)?, cwd),
+        launch::Plan::BattleNet { launch, .. } => (sandbox::wrap(game, battlenet::command(&launch)), None),
+        launch::Plan::SetUp(folder) => return Err(format!("{}: gamefix sets {} up first.", game.name, folder.display())),
+        launch::Plan::Cannot(why) => return Err(why),
+    };
+    println!("{}", serde_json::json!({ "command": command, "cwd": cwd }));
+    Ok(())
+}
+
 fn how(query: &str) -> Result<(), String> {
     let lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?;
@@ -358,7 +379,7 @@ fn how(query: &str) -> Result<(), String> {
             } else if !battlenet::knows(&folder) {
                 println!("{}: Battle.net doesn't know it's in {} yet: lobby adds it (closing Battle.net first if it's open).", game.name, folder.display());
             }
-            println!("{} starts with Battle.net:\n  {}", game.name, battlenet::command(&launch).join(" "));
+            println!("{} starts with Battle.net:\n  {}\n  protected: {}", game.name, battlenet::command(&launch).join(" "), sandbox::summary(game));
         }
         launch::Plan::Cannot(why) => println!("{}: {why}", game.name),
     }

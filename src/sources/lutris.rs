@@ -56,6 +56,70 @@ fn store_of(service: &str) -> Option<&'static str> {
     }
 }
 
+/// How Lutris starts a game, read from its database and config so Lobby can start it the same
+/// way itself: the runner ("wine", "linux" ...), program, arguments, prefix, working folder,
+/// environment (system: env:, and the wine runner's DLL overrides as WINEDLLOVERRIDES) and the
+/// wine build it picked (wine: version:), if any.
+#[derive(Debug, Default, PartialEq)]
+pub struct Launch {
+    pub runner: String,
+    pub program: Option<PathBuf>,
+    pub args: String,
+    pub prefix: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
+    pub env: Vec<(String, String)>,
+    pub wine: Option<PathBuf>,
+}
+
+pub fn launch(id: i64) -> Option<Launch> {
+    let home = Home::find()?;
+    home.app_dirs("net.lutris.Lutris", "data/lutris", ".local/share/lutris").into_iter().find_map(|dir| {
+        let db = rusqlite::Connection::open_with_flags(dir.join("pga.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+        let (runner, directory, configpath): (Option<String>, Option<String>, Option<String>) = db.query_row("SELECT runner, directory, configpath FROM games WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).ok()?;
+        let config = fs::read_to_string(dir.join("games").join(format!("{}.yml", configpath?))).ok()?;
+        let mut l = read_launch(&config, directory.filter(|d| !d.is_empty()).map(PathBuf::from));
+        l.runner = runner.unwrap_or_default();
+        // A wine build of Lutris's own (runners/wine/<version>).
+        l.wine = l.wine.take().map(|v| dir.join("runners/wine").join(v)).filter(|d| d.is_dir());
+        Some(l)
+    })
+}
+
+fn read_launch(config: &str, directory: Option<PathBuf>) -> Launch {
+    let doc: serde_yaml::Value = serde_yaml::from_str(config).unwrap_or_default();
+    let text = |v: &serde_yaml::Value| match v {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    };
+    let game = &doc["game"];
+    let path = |k: &str| text(&game[k]).filter(|s| !s.is_empty()).map(PathBuf::from);
+    let prefix = path("prefix");
+    // A relative program is in the prefix (wine) or the game's folder.
+    let program = path("exe").map(|exe| match (prefix.as_ref().or(directory.as_ref()), exe.is_absolute()) {
+        (Some(base), false) => base.join(exe),
+        _ => exe,
+    });
+    let mut env: Vec<(String, String)> = doc["system"]["env"].as_mapping().into_iter().flatten().filter_map(|(k, v)| Some((text(k)?, text(v).unwrap_or_default()))).collect();
+    let overrides: Vec<String> = doc["wine"]["overrides"].as_mapping().into_iter().flatten().filter_map(|(k, v)| Some(format!("{}={}", text(k)?, text(v)?))).collect();
+    if !overrides.is_empty() {
+        match env.iter_mut().find(|(k, _)| k == "WINEDLLOVERRIDES") {
+            Some((_, v)) => *v = format!("{v};{}", overrides.join(";")),
+            None => env.push(("WINEDLLOVERRIDES".into(), overrides.join(";"))),
+        }
+    }
+    Launch {
+        runner: String::new(),
+        cwd: path("working_dir").or_else(|| program.as_ref().and_then(|p| p.parent().map(Path::to_path_buf))),
+        program,
+        args: text(&game["args"]).unwrap_or_default(),
+        prefix,
+        env,
+        wine: text(&doc["wine"]["version"]).map(PathBuf::from),
+    }
+}
+
 pub fn games(home: &Home) -> Vec<Entry> {
     let mut entries = Vec::new();
     for dir in home.app_dirs("net.lutris.Lutris", "data/lutris", ".local/share/lutris") {
@@ -96,6 +160,17 @@ mod tests {
     fn reads_the_game_block() {
         let yml = "game:\n  exe: drive_c/Games/Forager/Forager.exe\n  prefix: /home/u/Games/gog/forager\nscript:\n  game:\n    exe: other.exe\n";
         assert_eq!(game_block(yml), [("exe".into(), "drive_c/Games/Forager/Forager.exe".into()), ("prefix".into(), "/home/u/Games/gog/forager".into())]);
+    }
+
+    #[test]
+    fn how_lutris_starts_it() {
+        let yml = "game:\n  exe: drive_c/GOG Games/EE/Empire Earth.exe\n  args: -windowed\n  prefix: /g/ee\nsystem:\n  env:\n    WINEDLLOVERRIDES: ddraw=n,b\n    LC_ALL: ''\nwine:\n  overrides:\n    dsound: native\n  version: wine-ge-8-26-x86_64\n";
+        let l = read_launch(yml, None);
+        assert_eq!(l.program, Some(PathBuf::from("/g/ee/drive_c/GOG Games/EE/Empire Earth.exe")));
+        assert_eq!(l.cwd, Some(PathBuf::from("/g/ee/drive_c/GOG Games/EE")));
+        assert_eq!(l.args, "-windowed");
+        assert_eq!(l.env, [("WINEDLLOVERRIDES".into(), "ddraw=n,b;dsound=native".into()), ("LC_ALL".into(), String::new())]);
+        assert_eq!(l.wine, Some(PathBuf::from("wine-ge-8-26-x86_64")));
     }
 
     #[test]

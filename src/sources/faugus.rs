@@ -15,6 +15,33 @@ pub fn plain_settings(id: &str) -> bool {
     })
 }
 
+/// How Faugus starts a game: umu-run in its prefix, with its launch arguments (variables, and
+/// maybe a program they go before) in front and its game arguments after.
+pub struct Launch {
+    pub program: PathBuf,
+    pub prefix: PathBuf,
+    pub before: String,
+    pub after: String,
+    pub protonfix: Option<String>,
+    pub mangohud: bool,
+}
+
+pub fn launch(id: &str) -> Option<Launch> {
+    let home = Home::find()?;
+    home.app_dirs("io.github.Faugus.faugus-launcher", "data/faugus-launcher", ".config/faugus-launcher").iter().find_map(|dir| {
+        let list = json(&dir.join("games.json"))?.as_array()?.clone();
+        let g = list.into_iter().find(|g| str_of(g, "gameid") == Some(id))?;
+        Some(Launch {
+            program: PathBuf::from(str_of(&g, "path")?),
+            prefix: PathBuf::from(str_of(&g, "prefix")?),
+            before: str_of(&g, "launch_arguments").unwrap_or_default().to_string(),
+            after: str_of(&g, "game_arguments").unwrap_or_default().to_string(),
+            protonfix: str_of(&g, "protonfix").map(String::from),
+            mangohud: g.get("mangohud").is_some_and(|m| m.as_bool() == Some(true) || m.as_str() == Some("True")),
+        })
+    })
+}
+
 pub fn games(home: &Home) -> Vec<Entry> {
     let mut entries = Vec::new();
     for dir in home.app_dirs("io.github.Faugus.faugus-launcher", "data/faugus-launcher", ".config/faugus-launcher") {

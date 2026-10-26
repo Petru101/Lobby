@@ -221,12 +221,25 @@ fn with_game(db: &[u8], record: &[u8], folder: &Path) -> Result<Vec<u8>, String>
 
 /// Makes sure Battle.net knows the game (closing Battle.net first when it's open, then it's
 /// started again by the game's command), then starts it.
-pub fn start(folder: &Path, launch: &str, log: &Path) -> Result<(), String> {
-    if !knows(folder) {
+/// Starts the game through Battle.net, in the game's sandbox unless its protection is off. A
+/// Battle.net already open the other way (outside the sandbox for a protected game) would take
+/// the request and start the game itself: it's closed first, as when the game is added.
+pub fn start(game: &crate::library::Game, folder: &Path, launch: &str, log: &Path) -> Result<(), String> {
+    let protected = crate::sandbox::level(game) != crate::sandbox::Level::Off;
+    let known = knows(folder);
+    if !known || processes().iter().any(|&pid| sandboxed(pid) != protected) {
         stop();
+    }
+    if !known {
         add(folder)?;
     }
-    crate::launch::start(&command(launch), None, log)
+    crate::launch::start(&crate::sandbox::wrap(game, command(launch)), None, log)
+}
+
+/// Whether a process runs in a sandbox: a PID namespace other than lobby's own.
+fn sandboxed(pid: u32) -> bool {
+    let ns = |p: &str| fs::read_link(format!("/proc/{p}/ns/pid")).ok();
+    ns(&pid.to_string()) != ns("self")
 }
 
 /// A protobuf field: its number, wire type and contents (a varint's bytes as written).
