@@ -69,6 +69,14 @@ fn read(file: &Path) -> Option<Entry> {
     // Its working folder is the game's when the program is in it, or when no program could be
     // found (a runner's command naming a folder that was since deleted).
     e.folder = get("Path").filter(|p| !p.is_empty()).map(PathBuf::from).filter(|p| e.program.as_ref().is_none_or(|prog| prog.starts_with(p)));
+    // gamefix's entry names the game's own folder; its Path is where the program runs, often
+    // deep inside (Binaries/Win64), which made the game's top folder look like a folder of
+    // games and its Engine and _Redist folders games of their own. Not for a game gamefix
+    // installed: there it names the installer's folder (Mycopunk's repack in Downloads).
+    let path = get("Path").map(PathBuf::from);
+    if let Some(root) = get("X-Gamefix-Game").map(PathBuf::from).filter(|r| r.is_absolute() && path.as_ref().is_some_and(|p| p.starts_with(r))) {
+        e.folder = Some(root);
+    }
     // Wine's entries: `env WINEPREFIX="/path" wine C:\\...\\game.exe`, or with the whole
     // `"WINEPREFIX=/a path"` quoted (gamefix's): the command's own words, as the desktop-entry
     // spec splits them.

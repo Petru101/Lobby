@@ -275,12 +275,15 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
         return if depth < 2 { subs.iter().flat_map(|d| look(d, known, depth + 1, strict)).collect() } else { vec![] };
     }
     // A folder of games has no program of its own at the top, and its folders are games of
-    // their own. Not Unreal's layout (Engine beside the game's folder).
+    // their own. Not Unreal's layout (Engine beside the game's folder). One named like a folder
+    // of games or downloads is one even with a single game in it (Downloaded Games/Games held
+    // only Minecraft Dungeons II, and became a game called "Games").
     let unreal = subs.iter().any(|d| d.file_name().is_some_and(|n| n == "Engine"));
-    if depth == 0 && !unreal && !has_program_at_top(dir) {
-        let inner: Vec<Found> = subs.iter().flat_map(|d| look(d, known, 1, strict)).collect();
+    let named = dir.file_name().is_some_and(|n| crate::places::games_or_downloads(&n.to_string_lossy()));
+    if (depth == 0 || named) && depth < 3 && !unreal && !has_program_at_top(dir) {
+        let inner: Vec<Found> = subs.iter().flat_map(|d| look(d, known, depth + 1, strict)).collect();
         let games = inner.iter().filter(|f| !matches!(f, Found::Nothing)).count();
-        if games >= 2 {
+        if games >= 2 || (named && games == 1) {
             return inner;
         }
     }
