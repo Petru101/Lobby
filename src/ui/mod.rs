@@ -138,6 +138,9 @@ impl Filter {
 
     fn wants(self, g: &Game) -> bool {
         let has = |s: &[Source]| g.entries.iter().any(|e| s.contains(&e.source));
+        // A game owned on a store stays under its store, taken over or not (Lutris's GOG
+        // installs showed under both).
+        let store = has(&[Source::Steam, Source::SteamElsewhere, Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]);
         if self == Filter::Downloads {
             return matches!(g.kind, Kind::Download | Kind::WrongSystem);
         }
@@ -149,8 +152,8 @@ impl Filter {
                 Filter::All => true,
                 Filter::Steam => has(&[Source::Steam, Source::SteamElsewhere]),
                 Filter::Stores => has(&[Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]),
-                Filter::Launchers => !has(&[Source::Steam, Source::SteamElsewhere, Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]) && !g.unknown_to_launchers(),
-                Filter::Drives => g.unknown_to_launchers(),
+                Filter::Launchers => !store && !g.unknown_to_launchers(),
+                Filter::Drives => !store && g.unknown_to_launchers(),
                 Filter::Downloads | Filter::Owned => unreachable!(),
             }
     }
@@ -2338,10 +2341,12 @@ fn origin(g: &Game) -> String {
         let store = crate::install::owned_in(g).map_or("A store", |(s, _)| s.name());
         return format!("{store} · not installed");
     }
-    if g.entries.iter().any(|e| e.source == Source::Lobby) {
+    // A store's game is labelled with the store's name, taken over or not.
+    let store = g.entries.iter().any(|e| matches!(e.source, Source::Steam | Source::SteamElsewhere | Source::Epic | Source::Gog | Source::Amazon | Source::Heroic));
+    if g.entries.iter().any(|e| e.source == Source::Lobby) && !store {
         return "Lobby".into();
     }
-    if g.unknown_to_launchers() {
+    if g.unknown_to_launchers() && !store {
         return if g.entries.iter().any(|e| e.source == Source::Itch) { "itch.io · on your drive".into() } else { "On your drive".into() };
     }
     let s = g.sources();
