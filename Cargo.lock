@@ -678,6 +678,7 @@ dependencies = [
 name = "lobby"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "gamefix",
  "gtk4",
  "image",

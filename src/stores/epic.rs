@@ -249,9 +249,81 @@ fn parse_launch(text: &str) -> Result<(Vec<String>, Option<PathBuf>, Vec<(String
     Ok((command, cwd, env))
 }
 
+/// The app names an Epic install's own records give (`.egstore` in its folder, which Epic's
+/// launcher and legendary leave): the .mancpn's AppName, then each manifest's. A manifest names
+/// the build, which is sometimes not the store's app ("FortniteReleaseBuilds" for Fortnite).
+/// None when the folder isn't an Epic install.
+pub fn install_names(folder: &Path) -> Option<Vec<String>> {
+    let store = folder.join(".egstore");
+    let files: Vec<PathBuf> = std::fs::read_dir(&store).ok()?.flatten().map(|e| e.path()).collect();
+    let with = |ext: &'static str| files.iter().filter(move |f| f.extension().is_some_and(|x| x == ext));
+    let mut names: Vec<String> = with("mancpn").map(|f| read_json::<serde_json::Value>(f)).filter_map(|j| j.get("AppName")?.as_str().map(String::from)).collect();
+    names.extend(with("manifest").filter_map(|f| manifest_app_name(f)));
+    names.dedup();
+    Some(names)
+}
+
+/// The app name in an Epic manifest's header: a 41-byte header (magic, header size, sizes,
+/// SHA-1, whether the body is zlib-compressed, version), then the body's meta: size, data
+/// version, feature level, whether it's file data, app id, then the app name (length, text).
+fn manifest_app_name(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 41];
+    f.read_exact(&mut head).ok()?;
+    let u32_at = |b: &[u8], i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    if u32_at(&head, 0) != 0x44BE_C00C {
+        return None;
+    }
+    let skip = (u32_at(&head, 4) as u64).checked_sub(41)?;
+    std::io::copy(&mut (&mut f).take(skip), &mut std::io::sink()).ok()?;
+    let mut body = Vec::new();
+    let reader: Box<dyn Read> = if head[36] & 1 == 1 { Box::new(flate2::read::ZlibDecoder::new(f)) } else { Box::new(f) };
+    reader.take(1024).read_to_end(&mut body).ok()?;
+    let len = i32::from_le_bytes(body.get(14..18)?.try_into().ok()?);
+    let text = body.get(18..18 + usize::try_from(len).ok()?.checked_sub(1)?)?;
+    String::from_utf8(text.to_vec()).ok().filter(|n| !n.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_records() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("lobby-egstore-{}", std::process::id()));
+        let store = dir.join(".egstore");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("A.mancpn"), r#"{"FormatVersion": 0, "AppName": "c2bb"}"#).unwrap();
+        // A compressed manifest: meta (size, data version, feature level, file data, app id),
+        // then the app name with its NUL.
+        let mut body = Vec::new();
+        body.extend(0u32.to_le_bytes());
+        body.push(0);
+        body.extend(18u32.to_le_bytes());
+        body.push(0);
+        body.extend(0u32.to_le_bytes());
+        body.extend(6i32.to_le_bytes());
+        body.extend(b"Build\0");
+        body.extend([7u8; 2000]);
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(&body).unwrap();
+        let packed = z.finish().unwrap();
+        let mut file = Vec::new();
+        file.extend(0x44BE_C00Cu32.to_le_bytes());
+        file.extend(41u32.to_le_bytes());
+        file.extend((body.len() as u32).to_le_bytes());
+        file.extend((packed.len() as u32).to_le_bytes());
+        file.extend([0u8; 20]);
+        file.push(1);
+        file.extend(0u32.to_le_bytes());
+        file.extend(packed);
+        std::fs::write(store.join("B.manifest"), file).unwrap();
+        assert_eq!(install_names(&dir), Some(vec!["c2bb".to_string(), "Build".to_string()]));
+        assert_eq!(install_names(&std::env::temp_dir().join("lobby-no-such-folder")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn owned_list() {

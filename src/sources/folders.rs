@@ -153,7 +153,30 @@ pub fn scan(roots: &[PathBuf], strict: &[PathBuf], games: &[PathBuf], known: &[E
     let wanted: Vec<String> = fresh.iter().chain(&stale).map(|(d, _)| d.display().to_string()).collect();
     cache.folders.retain(|k, _| wanted.contains(k));
     cache.save();
+    for e in &mut entries {
+        epic_install(e);
+    }
     (entries, prefixes, collections)
+}
+
+/// An Epic install found in a folder (its `.egstore`) is the game owned on Epic: tied by the
+/// app name Epic's records give, else, being Epic's for sure, by the owned game's exact name.
+/// Done after the folder cache, since what's owned changes without the folder changing.
+fn epic_install(e: &mut Entry) {
+    let Some(names) = e.folder.as_deref().and_then(crate::stores::epic::install_names) else { return };
+    let owned = crate::stores::owned(crate::stores::Store::Epic);
+    let folder_name = e.folder.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().to_lowercase());
+    let id = names
+        .iter()
+        .find(|n| owned.iter().any(|o| &o.id == *n))
+        .cloned()
+        .or_else(|| owned.iter().find(|o| o.title.eq_ignore_ascii_case(&e.name) || folder_name.as_deref() == Some(&o.title.to_lowercase())).map(|o| o.id.clone()));
+    if let Some(id) = id {
+        let key = library::Key::Store("epic".into(), id);
+        if !e.keys.contains(&key) {
+            e.keys.push(key);
+        }
+    }
 }
 
 /// What looking at one folder in a root found, kept between scans in
