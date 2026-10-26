@@ -141,20 +141,53 @@ pub fn title(file: &Path) -> String {
             stem.truncate(open);
         }
     }
-    let spaced = stem.replace(['_', '-', '.'], " ");
-    let mut words: Vec<&str> = spaced.split_whitespace().collect();
+    // Dotted versions stay whole ("1.0.2"), other dots part words ("Ghost.Defender").
+    let spaced = stem.replace(['_', '-'], " ");
+    let version = |w: &str| {
+        let w = w.trim_start_matches(['v', 'V']);
+        !w.is_empty() && w.contains('.') && w.chars().all(|c| c.is_ascii_digit() || c == '.')
+    };
+    let words: Vec<String> = spaced
+        .split_whitespace()
+        .flat_map(|w| {
+            // "Ghost.Defender.v1.3": the words, then the version as one.
+            let parts: Vec<&str> = w.split('.').filter(|p| !p.is_empty()).collect();
+            let tail = (0..parts.len()).find(|&i| version(&parts[i..].join(".")) || i + 1 == parts.len() && version(parts[i])).unwrap_or(parts.len());
+            let mut out: Vec<String> = parts[..tail].iter().map(|p| p.to_string()).collect();
+            if tail < parts.len() {
+                out.push(parts[tail..].join("."));
+            }
+            out
+        })
+        .collect();
+    let mut words: Vec<&str> = words.iter().map(String::as_str).collect();
     let drop = |w: &str| {
         let l = w.to_lowercase();
         let l = l.trim_matches(|c| c == '(' || c == ')' || c == '[' || c == ']');
         l.is_empty()
-            || l.chars().all(|c| c.is_ascii_digit())
+            || version(l)
+            // A build's number ("20240312", "002"); a short one is a sequel's ("Kingdom
+            // Hearts 4", "Anno 1602").
+            || (l.chars().all(|c| c.is_ascii_digit()) && (l.len() >= 5 || l.starts_with('0')))
             || (l.starts_with('v') && l.len() > 1 && l[1..].chars().all(|c| c.is_ascii_digit()))
             // "beta5", "build002": a stage and its number.
             || ["steamrip", "com", "part"].contains(&l.trim_end_matches(|c: char| c.is_ascii_digit()))
-            || ["win", "win32", "win64", "windows", "windows64", "linux", "x64", "x86", "64bit", "32bit", "64bits", "32bits", "bit", "bits", "build", "release", "final", "prealpha", "alpha", "beta", "setup", "installer", "pc", "ver", "en", "iso", "version", "mac", "osx", "macos", "android"].contains(&l.trim_end_matches(|c: char| c.is_ascii_digit()))
+            || ["win", "win32", "win64", "windows", "windows64", "linux", "x64", "x86", "x86_64", "64bit", "32bit", "64bits", "32bits", "bit", "bits", "build", "release", "final", "prealpha", "alpha", "beta", "setup", "installer", "pc", "ver", "en", "iso", "version", "mac", "osx", "macos", "android"].iter().any(|t| *t == l || *t == l.trim_end_matches(|c: char| c.is_ascii_digit()))
     };
-    while words.len() > 1 && drop(words[words.len() - 1]) {
-        words.pop();
+    let number = |w: &str| w.chars().all(|c| c.is_ascii_digit());
+    // Two numbers or more at the end are a version written without dots ("spelunky_1_1"); one
+    // alone is a sequel's.
+    loop {
+        let n = words.len();
+        if n > 2 && number(words[n - 1]) && number(words[n - 2]) {
+            while words.len() > 1 && number(words[words.len() - 1]) {
+                words.pop();
+            }
+        } else if n > 1 && drop(words[n - 1]) {
+            words.pop();
+        } else {
+            break;
+        }
     }
     let t = words.join(" ");
     if t.is_empty() { stem } else { t }
@@ -222,6 +255,13 @@ mod tests {
     fn titles() {
         assert_eq!(title(Path::new("/d/Ghost_Defender.zip")), "Ghost Defender");
         assert_eq!(title(Path::new("/d/XCOW 64Bits.zip")), "XCOW");
+        assert_eq!(title(Path::new("/d/Kingdom Hearts 4 - Linux.tar.gz")), "Kingdom Hearts 4");
+        assert_eq!(title(Path::new("/d/Anno 1602.zip")), "Anno 1602");
+        assert_eq!(title(Path::new("/d/spelunky_1_1.zip")), "spelunky");
+        assert_eq!(title(Path::new("/d/Zombielicious x64.zip")), "Zombielicious");
+        assert_eq!(title(Path::new("/d/Game_1.0.2.zip")), "Game");
+        assert_eq!(title(Path::new("/d/cool-game-20240312-win64.zip")), "cool game");
+        assert_eq!(title(Path::new("/d/Ghost.Defender.v1.3.zip")), "Ghost Defender");
         assert_eq!(title(Path::new("/d/DataShift(1).zip")), "DataShift");
         assert_eq!(title(Path::new("/d/corrupted-boundary-win64-prealpha.zip")), "corrupted boundary");
         assert_eq!(title(Path::new("/d/Shoot'n'Slaughter 0.0.0.4.rar")), "Shoot'n'Slaughter");

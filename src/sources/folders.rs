@@ -419,13 +419,18 @@ fn reads_like_title(name: &str) -> bool {
     name.contains(' ') || (name.chars().any(|c| c.is_uppercase()) && name.chars().any(|c| c.is_lowercase()) && !name.contains('_'))
 }
 
-/// The game's name: what scan found (a Unity game's product name), else the folder's name, or
-/// the folder inside it holding the program when that one reads like a title and the outer one
-/// doesn't (`gnomeissues/Gnome Issues/...`).
+/// The game's name: what scan found (a Unity game's product name), else the folder's name;
+/// when that doesn't read like a title (`mz-kh4`, `gnomeissues`): the title the game's own
+/// files give, the folder inside it holding the program when that one reads like a title
+/// (`gnomeissues/Gnome Issues/...`), or the program's name (`Kingdom Hearts 4`,
+/// `DoubleDown.exe`).
 fn title(root: &Path, scanned: &str, program: Option<&Path>) -> String {
     let folder = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if scanned != folder || reads_like_title(&folder) {
         return scanned.to_string();
+    }
+    if let Some(own) = program.and_then(Path::parent).and_then(own_title) {
+        return own;
     }
     let inner = program.and_then(|p| p.strip_prefix(root).ok()).and_then(|rel| {
         let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>();
@@ -438,8 +443,42 @@ fn title(root: &Path, scanned: &str, program: Option<&Path>) -> String {
     });
     match inner {
         Some(inner) if reads_like_title(&inner) => inner,
-        _ => scanned.to_string(),
+        _ => program.and_then(program_title).unwrap_or_else(|| scanned.to_string()),
     }
+}
+
+/// The title a game's files give where its program is: NW.js's package.json (window.title,
+/// else productName; RPG Maker MV and MZ export as NW.js and name themselves "rmmz-game"),
+/// else RPG Maker's data/System.json gameTitle.
+fn own_title(dir: &Path) -> Option<String> {
+    let json = |p: PathBuf| fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(t.trim_start_matches('\u{feff}')).ok());
+    let text = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty() && !t.starts_with("rmm")).map(String::from);
+    let package = json(dir.join("package.json"));
+    text(package.as_ref().and_then(|p| p.get("window")?.get("title")))
+        .or_else(|| text(package.as_ref().and_then(|p| p.get("productName"))))
+        .or_else(|| ["data/System.json", "www/data/System.json"].iter().find_map(|f| text(json(dir.join(f)).as_ref().and_then(|s| s.get("gameTitle")))))
+}
+
+/// The program's name as a title, when it reads like one once its platform tags are gone
+/// ("Zombielicious(x64)") and joined words are apart ("DoubleDown"): not an engine's or a
+/// launcher's ("Game", "UDK", "start").
+fn program_title(program: &Path) -> Option<String> {
+    let mut stem = program.file_name()?.to_string_lossy().into_owned();
+    for ext in [".exe", ".x86_64", ".x86", ".sh", ".appimage", ".bin", ".jar", ".love", ".swf"] {
+        if stem.to_lowercase().ends_with(ext) {
+            stem.truncate(stem.len() - ext.len());
+        }
+    }
+    let t = super::downloads::title(Path::new(&stem.replace(['(', ')', '[', ']'], " ")));
+    let words: String = t.chars().fold(String::new(), |mut out, c| {
+        if c.is_uppercase() && out.chars().last().is_some_and(char::is_lowercase) {
+            out.push(' ');
+        }
+        out.push(c);
+        out
+    });
+    let generic = ["game", "launcher", "start", "play", "run", "setup", "app", "main", "udk", "ue4game", "nw", "client"];
+    (words.contains(' ') && !generic.contains(&words.to_lowercase().as_str())).then_some(words)
 }
 
 fn subdirs(dir: &Path) -> Vec<PathBuf> {

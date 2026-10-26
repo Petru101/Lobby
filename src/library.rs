@@ -410,6 +410,12 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
         .map(|mut entries| {
             entries.sort_by_key(|e| e.source);
             let named = entries.iter().find(|e| !e.annotation && e.kind != Kind::Download).or_else(|| entries.iter().find(|e| !e.annotation)).unwrap_or(&entries[0]);
+            // A name taken from a folder or a prefix gives way to the itch.io page's title (the
+            // page is about the download; the installed copy's folder is someone's choice).
+            let named = match entries.iter().find(|e| e.source == Source::Itch) {
+                Some(itch) if matches!(named.source, Source::Folder | Source::Prefix) => itch,
+                _ => named,
+            };
             let name = named.name.clone();
             let kind = if entries.iter().any(|e| e.kind == Kind::StoreApp) {
                 Kind::StoreApp

@@ -286,7 +286,7 @@ fn play(query: &str) -> Result<(), String> {
         }
         launch::Plan::SetUp(folder) => {
             println!("No launcher knows {}, so gamefix sets it up first (once):", game.name);
-            let (lines, entry) = launch::set_up(&folder, None)?;
+            let (lines, entry) = launch::set_up(&folder, Some(&game.name))?;
             for l in &lines {
                 println!("  {l}");
             }

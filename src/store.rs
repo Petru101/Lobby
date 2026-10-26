@@ -51,28 +51,48 @@ impl Library {
     pub fn update(&mut self, found: Vec<Game>) {
         let now = now();
         let mut old: Vec<Option<Game>> = std::mem::take(&mut self.games).into_iter().map(Some).collect();
-        let mut games = Vec::new();
-        for mut game in found {
+        let mut games = found;
+        for game in &mut games {
             for e in &mut game.entries {
                 e.keys.retain(|k| !matches!(k, Key::Name(_)));
             }
-            // The surest match; when two saved games are now one as surely (a game found on a
-            // drive and the same game owned on GOG), the one played, set up or installed keeps
-            // its record.
-            let worth = |o: &Game| (o.played.is_some(), o.launch_options.is_some() || !o.protection.is_default() || o.chosen_cover.is_some(), o.kind == game.kind);
-            let best = old.iter().enumerate().filter_map(|(i, o)| o.as_ref().map(|o| (i, same(o, &game), worth(o)))).filter(|(_, s, _)| *s > 0).max_by_key(|&(i, s, w)| (s, w, std::cmp::Reverse(i))).map(|(i, ..)| i);
-            match best.and_then(|i| old[i].take()) {
-                Some(o) => {
-                    game.id = o.id;
-                    game.added = o.added;
-                    game.played = o.played;
-                    game.chosen_cover = o.chosen_cover;
-                    game.launch_options = o.launch_options;
-                    game.protection = o.protection;
+        }
+        // Every new game against every saved record, the best pairs first: a record of the same
+        // kind (when a game that had its download in it splits from it, the installed part
+        // keeps the record), then the surest match, then, between saved games now one as
+        // surely (a game found on a drive and the same game owned on GOG), the one played or
+        // set up.
+        let worth = |o: &Game| (o.played.is_some(), o.launch_options.is_some() || !o.protection.is_default() || o.chosen_cover.is_some());
+        let mut pairs: Vec<(usize, usize, (bool, u8, (bool, bool)))> = Vec::new();
+        for (n, game) in games.iter().enumerate() {
+            for (i, o) in old.iter().enumerate() {
+                let Some(o) = o else { continue };
+                let s = same(o, game);
+                if s > 0 {
+                    pairs.push((n, i, (o.kind == game.kind, s, worth(o))));
                 }
-                None => game.added = now,
             }
-            games.push(game);
+        }
+        pairs.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+        let mut matched = vec![false; games.len()];
+        for (n, i, _) in pairs {
+            if matched[n] || old[i].is_none() {
+                continue;
+            }
+            let o = old[i].take().unwrap();
+            let game = &mut games[n];
+            matched[n] = true;
+            game.id = o.id;
+            game.added = o.added;
+            game.played = o.played;
+            game.chosen_cover = o.chosen_cover;
+            game.launch_options = o.launch_options;
+            game.protection = o.protection;
+        }
+        for (game, matched) in games.iter_mut().zip(matched) {
+            if !matched {
+                game.added = now;
+            }
         }
         for mut o in old.into_iter().flatten() {
             // Now part of another game (a download, once what it installed is found).
@@ -211,6 +231,27 @@ mod tests {
         assert_eq!((a.id.as_str(), a.played), ("apeirophobia", None));
         assert_eq!((b.id.as_str(), b.played, b.launch_options.as_deref()), ("borderlands-4", Some(9), Some("MANGOHUD=1 %command%")));
         assert!(lib.games.iter().all(|g| g.entries.iter().all(|e| e.keys.iter().all(|k| !matches!(k, Key::Name(_))))));
+    }
+
+    #[test]
+    fn a_split_games_installed_part_keeps_its_record() {
+        // Creeper World 3's download had been taken for Creeper World 4's (a "3" dropped as a
+        // version); now named right, it splits off.
+        let mut merged = game("Creeper World 4", Key::Download("/d/cw3.rar".into()));
+        merged.id = "creeper-world-4".into();
+        merged.played = Some(5);
+        merged.entries[0].kind = Kind::Download;
+        let mut installed = Entry::new(Source::Folder, "Creeper World 4");
+        installed.program = Some("/g/CW4.exe".into());
+        merged.entries.push(installed.clone());
+        let mut lib = Library { games: vec![merged], ..Default::default() };
+        let mut download = game("Creeper World 3", Key::Download("/d/cw3.rar".into()));
+        download.kind = Kind::Download;
+        let mut cw4 = game("Creeper World 4", Key::SteamApp(1));
+        cw4.entries = vec![installed];
+        lib.update(vec![download, cw4]);
+        let cw4 = lib.games.iter().find(|g| g.name == "Creeper World 4").unwrap();
+        assert_eq!((cw4.id.as_str(), cw4.played), ("creeper-world-4", Some(5)));
     }
 
     #[test]

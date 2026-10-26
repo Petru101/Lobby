@@ -2028,7 +2028,8 @@ impl Ui {
                         }
                     }
                     u.toast(&format!("Setting up {} with gamefix (only the first time)…", game.name));
-                    let result = gio::spawn_blocking(move || launch::set_up(&folder, None)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+                    let name = game.name.clone();
+                    let result = gio::spawn_blocking(move || launch::set_up(&folder, Some(&name))).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
                     match result {
                         Ok((lines, Some(entry))) => {
                             let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::final_command(&game, command, true).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))));
