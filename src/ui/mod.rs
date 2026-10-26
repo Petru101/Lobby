@@ -320,6 +320,11 @@ struct Ui {
     recent_shown: RefCell<Vec<String>>,
     measuring: Cell<bool>,
     show: Cell<Show>,
+    /// The games running now (`running::find`, every 2 s), and the widgets that say so: each
+    /// card's badge and Play button, a page's Play button.
+    running: RefCell<std::collections::HashSet<String>>,
+    run_widgets: RefCell<Vec<(String, Option<gtk::Widget>, glib::WeakRef<gtk::Button>, bool)>>,
+    looking_for_running: Cell<bool>,
     scanning: Cell<bool>,
     /// A rescan was asked for during a scan (after an uninstall, say): another runs after it,
     /// since that scan may have read the disk before the change.
@@ -427,7 +432,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -532,6 +537,15 @@ fn build(app: &adw::Application) {
     }
     let u = ui.clone();
     rescan_button.connect_clicked(move |_| u.rescan());
+    // Which games are running, while the window is open (reading /proc: a few ms).
+    let u = Rc::downgrade(&ui);
+    glib::timeout_add_seconds_local(2, move || {
+        let Some(u) = u.upgrade() else { return glib::ControlFlow::Break };
+        if u.window.is_visible() {
+            u.look_for_running();
+        }
+        glib::ControlFlow::Continue
+    });
     let u = ui.clone();
     accounts_button.connect_clicked(move |_| u.accounts());
     let u = ui.clone();
@@ -788,6 +802,7 @@ impl Ui {
         self.recent.remove_all();
         self.bars.borrow_mut().clear();
         self.values.borrow_mut().clear();
+        self.run_widgets.borrow_mut().clear();
         let lib = self.lib.borrow();
         self.facts.replace(Facts::of(&lib.games));
         for g in lib.games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem | Kind::Owned)) {
@@ -796,9 +811,92 @@ impl Ui {
         drop(lib);
         self.fill_recent();
         self.refilter();
+        // The new cards say at once whether their game is running.
+        self.running.borrow_mut().clear();
+        self.look_for_running();
         if self.sort.get() == Sort::Size {
             self.measure();
         }
+    }
+
+    fn look_for_running(self: &Rc<Self>) {
+        if self.looking_for_running.replace(true) {
+            return;
+        }
+        let games = self.lib.borrow().games.clone();
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let found: std::collections::HashSet<String> = gio::spawn_blocking(move || crate::running::find(&games).into_keys().collect()).await.unwrap_or_default();
+            u.looking_for_running.set(false);
+            if *u.running.borrow() != found {
+                u.running.replace(found);
+                u.show_running();
+            }
+        });
+    }
+
+    fn is_running(&self, id: &str) -> bool {
+        self.running.borrow().contains(id)
+    }
+
+    /// Badges and buttons as the games are now: Stop in place of Play while one runs.
+    fn show_running(&self) {
+        self.run_widgets.borrow_mut().retain(|(_, _, b, _)| b.upgrade().is_some());
+        for (id, badge, button, page) in self.run_widgets.borrow().iter() {
+            let on = self.is_running(id);
+            if let Some(b) = badge {
+                b.set_visible(on);
+            }
+            let Some(button) = button.upgrade() else { continue };
+            match (page, on) {
+                (true, true) => button.set_label("Stop"),
+                (true, false) => button.set_label("Play"),
+                (false, true) => button.set_icon_name("media-playback-stop-symbolic"),
+                (false, false) => button.set_icon_name("media-playback-start-symbolic"),
+            }
+            // The page's Stop is red; a card's is dark, to show on any cover.
+            let stop = if *page { "destructive-action" } else { "stop-button" };
+            if on {
+                button.add_css_class(stop);
+                button.remove_css_class("suggested-action");
+            } else {
+                button.add_css_class("suggested-action");
+                button.remove_css_class(stop);
+            }
+        }
+    }
+
+    /// Play, or Stop while it runs (asked first: whatever the game hasn't saved is lost).
+    fn play_or_stop(self: &Rc<Self>, id: &str) {
+        if !self.is_running(id) {
+            self.play(id);
+            return;
+        }
+        let Some(game) = self.game(id) else { return };
+        let dialog = adw::AlertDialog::new(Some(&format!("Stop {}?", game.name)), Some("Anything the game hasn't saved is lost. Use this when it's stuck; a game that doesn't quit within 5 seconds is forced to."));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("stop", "Stop");
+        dialog.set_response_appearance("stop", adw::ResponseAppearance::Destructive);
+        let u = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response != "stop" {
+                return;
+            }
+            let (u, game) = (u.clone(), game.clone());
+            u.toast(&format!("Stopping {}…", game.name));
+            glib::spawn_future_local(async move {
+                let games = u.lib.borrow().games.clone();
+                let g = game.clone();
+                let result = gio::spawn_blocking(move || crate::running::stop(&g, &games, std::time::Duration::from_secs(5))).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+                match result {
+                    Ok(true) => u.toast(&format!("{} stopped.", game.name)),
+                    Ok(false) => u.alert(&format!("{} didn't stop", game.name), "Some of its processes are still there. Something else may be holding them (a debugger or a crash reporter)."),
+                    Err(e) => u.toast(&e),
+                }
+                u.look_for_running();
+            });
+        });
+        dialog.present(Some(&self.window));
     }
 
     /// Continue playing: installed games by when they were played, the newest first, favourites
@@ -2200,7 +2298,11 @@ impl Ui {
         let play = gtk::Button::builder().label(if download { "Install" } else { "Play" }).halign(gtk::Align::Start).build();
         play.add_css_class("pill");
         play.add_css_class("suggested-action");
-        play.set_sensitive(download || !matches!(plan, Plan::Cannot(_)));
+        play.set_sensitive(download || !matches!(plan, Plan::Cannot(_)) || self.is_running(&game.id));
+        if !download {
+            self.run_widgets.borrow_mut().push((game.id.clone(), None, play.downgrade(), true));
+            self.show_running();
+        }
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).margin_top(12).build();
         buttons.append(&play);
         // In a Steam library Steam doesn't use, and not installed in Steam's own.
@@ -2354,8 +2456,10 @@ impl Ui {
         let d = dialog.clone();
         let id = game.id.clone();
         play.connect_clicked(move |_| {
-            d.close();
-            if download { u.install(&id) } else { u.play(&id) }
+            if !u.is_running(&id) {
+                d.close();
+            }
+            if download { u.install(&id) } else { u.play_or_stop(&id) }
         });
         let u = self.clone();
         let d = dialog.clone();
@@ -2867,7 +2971,17 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     }
     let u = ui.clone();
     let id = g.id.clone();
-    play.connect_clicked(move |_| if download { u.install(&id) } else { u.play(&id) });
+    play.connect_clicked(move |_| if download { u.install(&id) } else { u.play_or_stop(&id) });
+    // Running: a badge, and Stop in place of Play (`Ui::show_running`).
+    let running_badge = (!download).then(|| {
+        let b = gtk::Label::builder().label("Running").halign(gtk::Align::Start).valign(gtk::Align::End).margin_start(10).margin_bottom(14).visible(false).build();
+        b.add_css_class("running-badge");
+        cover.add_overlay(&b);
+        b.upcast::<gtk::Widget>()
+    });
+    if !download {
+        ui.run_widgets.borrow_mut().push((g.id.clone(), running_badge, play.downgrade(), false));
+    }
     cover.add_overlay(&play);
     if ui.is_installing(&g.id) {
         play.set_visible(false);

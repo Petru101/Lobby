@@ -114,3 +114,19 @@ flowboxchild.not-installed .cover > picture.cover-backdrop {
 flowboxchild.is-hidden {
   opacity: 0.45;
 }
+
+/* A game running now, on its card. */
+.running-badge {
+  background: @success_bg_color;
+  color: @success_fg_color;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 99px;
+}
+
+/* Stop shows on a running game's card without hovering. */
+flowboxchild .play-button.stop-button {
+  opacity: 1;
+  background: alpha(black, 0.75);
+  color: white;
+}

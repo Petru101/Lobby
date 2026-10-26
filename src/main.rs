@@ -11,6 +11,7 @@ mod library;
 mod log;
 mod places;
 mod run;
+mod running;
 mod playtime;
 mod sandbox;
 mod save_folders;
@@ -50,6 +51,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby launch-options <game id> [<options>]  show or set what Play adds to its command
                                (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
        lobby hide|unhide|favourite|unfavourite <game>  out of sight or back; starred or not
+       lobby running           the games running now; lobby stop <game> ends one
        lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
                                how lobby protects a game it starts; change it
        lobby search            search every drive for games outside the folders lobby looks in
@@ -75,6 +77,8 @@ fn main() -> ExitCode {
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("search"), []) => search_drives(),
+        (Some("running"), []) => running_games(),
+        (Some("stop"), words) if !words.is_empty() => stop_game(&words.join(" ")),
         (Some(what @ ("hide" | "unhide" | "favourite" | "unfavourite")), words) if !words.is_empty() => mark(what, &words.join(" ")),
         // The options as typed, -- words too (`rest` leaves those out).
         (Some("launch-options"), [_, ..]) => launch_options(&args[1], &args[2..].join(" "), args.len() > 2),
@@ -116,6 +120,28 @@ fn main() -> ExitCode {
 }
 
 /// Shows a game's launch options, or sets them (empty clears).
+/// The games running now and what holds each.
+fn running_games() -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    for (id, pids) in running::find(&lib.games) {
+        let name = lib.games.iter().find(|g| g.id == id).map_or(id.as_str(), |g| g.name.as_str());
+        println!("{name} ({id}): {}", pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "));
+    }
+    Ok(())
+}
+
+/// Ends a running game (a hanging one too: what doesn't quit within 5 s is killed).
+fn stop_game(query: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?;
+    if running::stop(game, &lib.games, std::time::Duration::from_secs(5))? {
+        println!("{} stopped.", game.name);
+        Ok(())
+    } else {
+        Err(format!("{} didn't stop.", game.name))
+    }
+}
+
 /// Hides a game or brings it back, makes it a favourite or not (the window's star and Hide).
 fn mark(what: &str, query: &str) -> Result<(), String> {
     let mut lib = Library::load().map_or_else(scan, Ok)?;
