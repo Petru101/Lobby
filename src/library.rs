@@ -118,6 +118,19 @@ pub struct Entry {
     /// made): dropped when nothing else matches it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub annotation: bool,
+    /// What the launcher records about playing it: when last (Unix) and seconds in all. Taken
+    /// into Lobby's own record after each scan (`playtime::take_in`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_played: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playtime: Option<u64>,
+    /// Its size on disk in bytes, when the launcher records it (else `sizes` measures it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// When it came to this computer or the account (Unix): installed, downloaded or bought, as
+    /// the launcher or the folder's creation time says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
 }
 
 impl Entry {
@@ -127,8 +140,14 @@ impl Entry {
     }
 
     pub fn new(source: Source, name: impl Into<String>) -> Entry {
-        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), update: None, cover: None, icon: None, note: None, annotation: false }
+        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), update: None, cover: None, icon: None, note: None, annotation: false, last_played: None, playtime: None, size: None, since: None }
     }
+}
+
+/// An ISO 8601 time as Unix time; one without a zone is local time.
+pub fn unix_time(text: &str) -> Option<u64> {
+    let t = gtk::glib::DateTime::from_iso8601(text, Some(&gtk::glib::TimeZone::local())).ok()?;
+    u64::try_from(t.to_unix()).ok().filter(|&t| t > 0)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +183,12 @@ pub struct Game {
 }
 
 impl Game {
+    /// When it came here: the earliest its launchers, its folder's creation or the store's
+    /// purchase say, else when Lobby first saw it (Unix time).
+    pub fn since(&self) -> u64 {
+        self.entries.iter().filter_map(|e| e.since).chain(Some(self.added).filter(|&a| a > 0)).min().unwrap_or(0)
+    }
+
     pub fn sources(&self) -> Vec<Source> {
         let mut s: Vec<_> = self.entries.iter().map(|e| e.source).collect();
         s.sort();

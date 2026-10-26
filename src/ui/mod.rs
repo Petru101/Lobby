@@ -12,6 +12,7 @@ use webkit6::prelude::*;
 use gtk::{gdk, gio, glib};
 use crate::stores::Store;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::rc::Rc;
@@ -180,6 +181,87 @@ impl Origin {
     }
 }
 
+/// The grid's order, kept in ~/.config/lobby/sort.
+#[derive(Clone, Copy, PartialEq)]
+enum Sort {
+    Name,
+    Played,
+    Playtime,
+    Size,
+    Added,
+}
+
+impl Sort {
+    const ALL: [(Sort, &'static str, &'static str); 5] = [(Sort::Name, "name", "Name"), (Sort::Played, "played", "Last played"), (Sort::Playtime, "playtime", "Play time"), (Sort::Size, "size", "Size"), (Sort::Added, "added", "Date added")];
+
+    fn file() -> std::path::PathBuf {
+        crate::stores::config_home().join("lobby/sort")
+    }
+
+    fn load() -> Sort {
+        let saved = std::fs::read_to_string(Self::file()).unwrap_or_default();
+        Self::ALL.iter().find(|(_, name, _)| *name == saved.trim()).map_or(Sort::Name, |(s, ..)| *s)
+    }
+
+    fn save(self) {
+        if let Some((_, name, _)) = Self::ALL.iter().find(|(s, ..)| *s == self) {
+            let _ = std::fs::create_dir_all(Self::file().parent().unwrap());
+            let _ = std::fs::write(Self::file(), name);
+        }
+    }
+}
+
+/// What a game is sorted by, worked out once per fill.
+#[derive(Clone, Copy, Default)]
+struct Facts {
+    /// Unix times (0: never, not known).
+    last: u64,
+    since: u64,
+    seconds: u64,
+    size: Option<u64>,
+}
+
+impl Facts {
+    fn of(games: &[Game]) -> HashMap<String, Facts> {
+        let played = crate::playtime::load();
+        let sizes = crate::sizes::known(games);
+        games
+            .iter()
+            .map(|g| {
+                let p = crate::playtime::of(&played, g);
+                (g.id.clone(), Facts { last: p.last, since: g.since(), seconds: p.seconds(), size: sizes.get(&g.id).copied() })
+            })
+            .collect()
+    }
+
+    /// Lower first.
+    fn rank(&self, sort: Sort) -> i64 {
+        let newest = |t: u64| -(t as i64);
+        match sort {
+            Sort::Name => 0,
+            Sort::Played => newest(self.last),
+            Sort::Playtime => newest(self.seconds),
+            Sort::Size => self.size.map_or(1, newest),
+            Sort::Added => newest(self.since),
+        }
+    }
+
+    /// What the card says about it, sorted this way.
+    fn text(&self, sort: Sort) -> Option<String> {
+        match sort {
+            Sort::Name => None,
+            Sort::Played => Some(if self.last > 0 { when(self.last) } else { "Not played".into() }),
+            Sort::Playtime => Some(if self.seconds > 0 { crate::playtime::text(self.seconds) } else { "Not played".into() }),
+            Sort::Size => self.size.map(crate::windows_saves::size_text),
+            Sort::Added => (self.since > 0).then(|| match store::now().saturating_sub(self.since) / 86_400 {
+                0 => "Added today".into(),
+                1 => "Added yesterday".into(),
+                _ => format!("Added {}", when(self.since)),
+            }),
+        }
+    }
+}
+
 struct Ui {
     window: adw::ApplicationWindow,
     /// How many games show, at the end of the source row.
@@ -194,6 +276,17 @@ struct Ui {
     origin: Cell<Origin>,
     /// The source buttons: only sources with games on the page show.
     origins: RefCell<Vec<(Origin, gtk::ToggleButton)>>,
+    sort: Cell<Sort>,
+    facts: RefCell<HashMap<String, Facts>>,
+    /// Each card's line saying what it's sorted by, by game (a game can have two cards: in
+    /// Continue playing and in the grid).
+    values: RefCell<Vec<(String, gtk::Label)>>,
+    /// Continue playing: the games played last, above the grid.
+    recent: gtk::FlowBox,
+    recent_box: gtk::Box,
+    /// The recent games shown now (the first few of the page and source picked).
+    recent_shown: RefCell<Vec<String>>,
+    measuring: Cell<bool>,
     scanning: Cell<bool>,
     /// A rescan was asked for during a scan (after an uninstall, say): another runs after it,
     /// since that scan may have read the disk before the change.
@@ -232,7 +325,13 @@ fn build(app: &adw::Application) {
     let sources = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
     let count = gtk::Label::builder().margin_end(12).build();
     count.add_css_class("dim-label");
-    let filters = gtk::CenterBox::builder().center_widget(&sources).end_widget(&count).margin_top(6).margin_bottom(6).build();
+    let sort_names: Vec<&str> = Sort::ALL.iter().map(|(_, _, label)| *label).collect();
+    let sort = gtk::DropDown::from_strings(&sort_names);
+    sort.set_tooltip_text(Some("Order of the games"));
+    sort.set_margin_start(12);
+    sort.set_valign(gtk::Align::Center);
+    sort.add_css_class("flat");
+    let filters = gtk::CenterBox::builder().start_widget(&sort).center_widget(&sources).end_widget(&count).margin_top(6).margin_bottom(6).build();
     filters.add_css_class("filters");
 
     let flow = gtk::FlowBox::builder()
@@ -249,7 +348,28 @@ fn build(app: &adw::Application) {
         .margin_start(24)
         .margin_end(24)
         .build();
-    let scrolled = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&flow).vexpand(true).build();
+    // Continue playing: one row of cards, scrolling sideways when there are more.
+    let recent = gtk::FlowBox::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .max_children_per_line(1)
+        .column_spacing(18)
+        .selection_mode(gtk::SelectionMode::None)
+        .activate_on_single_click(true)
+        .halign(gtk::Align::Start)
+        .build();
+    let recent_scroll = gtk::ScrolledWindow::builder().child(&recent).vscrollbar_policy(gtk::PolicyType::Never).hscrollbar_policy(gtk::PolicyType::Automatic).propagate_natural_height(true).build();
+    let recent_title = gtk::Label::builder().label("Continue playing").xalign(0.0).build();
+    recent_title.add_css_class("title-4");
+    let all_title = gtk::Label::builder().label("All games").xalign(0.0).margin_top(12).build();
+    all_title.add_css_class("title-4");
+    let recent_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(12).margin_start(24).margin_end(24).visible(false).build();
+    recent_box.append(&recent_title);
+    recent_box.append(&recent_scroll);
+    recent_box.append(&all_title);
+    let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    column.append(&recent_box);
+    column.append(&flow);
+    let scrolled = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&column).vexpand(true).build();
 
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();
     let loading = adw::StatusPage::builder().title("Looking for your games").description("Steam, Heroic, Lutris, Faugus, your app menu, and the games folders on every drive.").build();
@@ -268,7 +388,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), origins: RefCell::default(), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -321,13 +441,30 @@ fn build(app: &adw::Application) {
         let lib = u.lib.borrow();
         let name = |c: &gtk::FlowBoxChild| lib.games.iter().find(|g| g.id == c.widget_name()).map(|g| g.name.to_lowercase()).unwrap_or_default();
         let first = |c: &gtk::FlowBoxChild| !u.is_just_installed(&c.widget_name());
-        // In Library, installed games before the ones only owned.
-        let owned = |c: &gtk::FlowBoxChild| lib.games.iter().any(|g| g.id == c.widget_name() && g.kind == Kind::Owned);
-        (first(a), owned(a), name(a)).cmp(&(first(b), owned(b), name(b))).into()
+        // By name, in Library: installed games before the ones only owned.
+        let sort = u.sort.get();
+        let owned = |c: &gtk::FlowBoxChild| sort == Sort::Name && lib.games.iter().any(|g| g.id == c.widget_name() && g.kind == Kind::Owned);
+        let facts = u.facts.borrow();
+        let rank = |c: &gtk::FlowBoxChild| facts.get(c.widget_name().as_str()).map_or(i64::MAX, |f| f.rank(sort));
+        (first(a), owned(a), rank(a), name(a)).cmp(&(first(b), owned(b), rank(b), name(b))).into()
     });
     let u = ui.clone();
     flow.connect_child_activated(move |_, child| {
         u.details(&child.widget_name());
+    });
+    let u = ui.clone();
+    recent.connect_child_activated(move |_, child| {
+        u.details(&child.widget_name());
+    });
+    let u = ui.clone();
+    recent.set_filter_func(move |child| u.recent_shown.borrow().iter().any(|id| *id == child.widget_name()));
+    sort.set_selected(Sort::ALL.iter().position(|(s, ..)| *s == ui.sort.get()).unwrap_or(0) as u32);
+    let u = ui.clone();
+    sort.connect_selected_notify(move |d| {
+        let Some((s, ..)) = Sort::ALL.get(d.selected() as usize) else { return };
+        u.sort.set(*s);
+        s.save();
+        u.resort();
     });
     let u = ui.clone();
     search.connect_search_changed(move |_| u.refilter());
@@ -419,6 +556,15 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if let Ok(name) = std::env::var("LOBBY_SNAPSHOT_PAGE") {
             let pages = u.window.content().and_then(|c| find_named(&c, &name)).and_downcast::<gtk::ToggleButton>();
             pages.inspect(|b| b.set_active(true));
+        }
+        // LOBBY_SNAPSHOT_SORT=name|played|playtime|size|added.
+        if let Some(i) = std::env::var("LOBBY_SNAPSHOT_SORT").ok().and_then(|n| Sort::ALL.iter().position(|(_, name, _)| *name == n)) {
+            if let Some(d) = u.window.content().and_then(|c| find_type::<gtk::DropDown>(&c)) {
+                d.set_selected(i as u32);
+            }
+            while u.measuring.get() {
+                glib::timeout_future(std::time::Duration::from_millis(200)).await;
+            }
         }
         if let Ok(name) = std::env::var("LOBBY_SNAPSHOT_SOURCE") {
             if let Some((_, b)) = u.origins.borrow().iter().find(|(_, b)| b.widget_name() == name) {
@@ -543,10 +689,31 @@ impl Ui {
         }
         self.flow.invalidate_filter();
         let lib = self.lib.borrow();
+        // Continue playing: on Installed and Library, while not searching.
+        let recent: Vec<String> = if page == Page::Downloads || !self.search.text().is_empty() {
+            Vec::new()
+        } else {
+            let mut ids = Vec::new();
+            let mut child = self.recent.first_child();
+            while let Some(c) = child {
+                let id = c.widget_name().to_string();
+                if lib.games.iter().any(|g| g.id == id && self.shows(g)) {
+                    ids.push(id);
+                }
+                child = c.next_sibling();
+            }
+            ids.truncate(8);
+            ids
+        };
+        self.recent_box.set_visible(!recent.is_empty());
+        self.recent_shown.replace(recent);
+        self.recent.invalidate_filter();
         let shown = lib.games.iter().filter(|g| self.shows(g)).count();
         let total = on_page.len();
         let noun = if page == Page::Downloads { "downloads" } else { "games" };
-        self.count.set_label(&if shown == total { format!("{total} {noun}") } else { format!("{shown} of {total} {noun}") });
+        if !self.measuring.get() {
+            self.count.set_label(&if shown == total { format!("{total} {noun}") } else { format!("{shown} of {total} {noun}") });
+        }
         if !self.scanning.get() || !lib.games.is_empty() {
             self.stack.set_visible_child_name(if shown == 0 { "empty" } else { "games" });
         }
@@ -555,11 +722,75 @@ impl Ui {
     /// One card per game, rebuilt from the library.
     fn fill(self: &Rc<Self>) {
         self.flow.remove_all();
+        self.recent.remove_all();
         self.bars.borrow_mut().clear();
-        for g in self.lib.borrow().games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem | Kind::Owned)) {
+        self.values.borrow_mut().clear();
+        let lib = self.lib.borrow();
+        self.facts.replace(Facts::of(&lib.games));
+        for g in lib.games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem | Kind::Owned)) {
             self.flow.append(&card(self, g));
         }
+        // Continue playing: installed games by when they were played, the newest first.
+        let mut recent: Vec<&Game> = {
+            let facts = self.facts.borrow();
+            let mut r: Vec<&Game> = lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone && !g.missing && facts.get(&g.id).is_some_and(|f| f.last > 0)).collect();
+            r.sort_by_key(|g| std::cmp::Reverse(facts[&g.id].last));
+            r
+        };
+        recent.truncate(40);
+        for g in recent {
+            self.recent.append(&card(self, g));
+        }
+        drop(lib);
         self.refilter();
+        if self.sort.get() == Sort::Size {
+            self.measure();
+        }
+    }
+
+    /// The grid in the order picked, each card saying what it's sorted by; sizes not known
+    /// yet are measured first.
+    fn resort(self: &Rc<Self>) {
+        self.show_order();
+        if self.sort.get() == Sort::Size {
+            self.measure();
+        }
+    }
+
+    fn show_order(&self) {
+        let sort = self.sort.get();
+        let facts = self.facts.borrow();
+        for (id, label) in self.values.borrow().iter() {
+            let text = facts.get(id).and_then(|f| f.text(sort));
+            label.set_visible(text.is_some());
+            label.set_label(text.as_deref().unwrap_or_default());
+        }
+        drop(facts);
+        self.flow.invalidate_sort();
+    }
+
+    /// Measures the sizes not known yet in the background (the first time can take a minute or
+    /// two: every file of every game), then sorts again.
+    fn measure(self: &Rc<Self>) {
+        if self.measuring.replace(true) {
+            return;
+        }
+        let games = self.lib.borrow().games.clone();
+        let u = self.clone();
+        self.count.set_label("Measuring sizes…");
+        glib::spawn_future_local(async move {
+            let games2 = games.clone();
+            let measured = gio::spawn_blocking(move || crate::sizes::measure(&games2)).await.unwrap_or(0);
+            if measured > 0 {
+                let sizes = gio::spawn_blocking(move || crate::sizes::known(&games)).await.unwrap_or_default();
+                for (id, f) in u.facts.borrow_mut().iter_mut() {
+                    f.size = sizes.get(id).copied();
+                }
+            }
+            u.measuring.set(false);
+            u.show_order();
+            u.refilter();
+        });
     }
 
     fn toast(&self, text: &str) {
@@ -590,6 +821,8 @@ impl Ui {
                         u.toast(&format!("Couldn't save the library: {e}"));
                     }
                     let games = u.lib.borrow().games.clone();
+                    let played = games.clone();
+                    gio::spawn_blocking(move || crate::playtime::take_in(&played)).await.ok();
                     u.fill();
                     // Lutris's, Faugus's and Steam shortcuts' games become Lobby's own (shown as
                     // such after a rescan), and app-menu entries start games as Play does.
@@ -1906,8 +2139,18 @@ impl Ui {
         if let Some(p) = game.entries.iter().find_map(|e| e.prefix.as_ref()) {
             row("Windows setup (Wine prefix)", &p.display().to_string());
         }
-        if let Some(t) = game.played {
-            row("Last played", &when(t));
+        let played = crate::playtime::of(&crate::playtime::load(), &game);
+        if played.last > 0 {
+            row("Last played", &when(played.last));
+        }
+        if played.seconds() > 0 {
+            row("Play time", &crate::playtime::text(played.seconds()));
+        }
+        if let Some(size) = crate::sizes::known(std::slice::from_ref(&game)).get(&game.id) {
+            row("Size", &crate::windows_saves::size_text(*size));
+        }
+        if game.since() > 0 && game.kind == Kind::Game {
+            row("Added", &when(game.since()));
         }
 
         let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).hexpand(true).build();
@@ -2503,13 +2746,22 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
 
     let name = gtk::Label::builder().label(&g.name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).hexpand(true).build();
     name.add_css_class("card-name");
-    let from = gtk::Label::builder().label(origin(g)).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).build();
+    let from = gtk::Label::builder().label(origin(g)).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).hexpand(true).build();
     from.add_css_class("dim-label");
     from.add_css_class("caption");
+    // What it's sorted by (when not by name): "3 days ago", "12 h", "4.2 GB".
+    let text = ui.facts.borrow().get(&g.id).and_then(|f| f.text(ui.sort.get()));
+    let value = gtk::Label::builder().label(text.as_deref().unwrap_or_default()).visible(text.is_some()).xalign(1.0).build();
+    value.add_css_class("dim-label");
+    value.add_css_class("caption");
+    ui.values.borrow_mut().push((g.id.clone(), value.clone()));
+    let line = gtk::Box::builder().spacing(6).build();
+    line.append(&from);
+    line.append(&value);
     let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).width_request(180).halign(gtk::Align::Center).build();
     body.append(&cover);
     body.append(&name);
-    body.append(&from);
+    body.append(&line);
     let child = gtk::FlowBoxChild::builder().child(&body).name(&g.id).tooltip_text(&g.name).build();
     child.add_css_class("game-card");
     if g.kind == Kind::Owned {
@@ -2529,6 +2781,21 @@ fn find_named(w: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
     let mut child = w.first_child();
     while let Some(c) = child {
         if let Some(found) = find_named(&c, name) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// The first widget of this type inside `w`.
+fn find_type<T: IsA<gtk::Widget>>(w: &gtk::Widget) -> Option<T> {
+    if let Some(t) = w.downcast_ref::<T>() {
+        return Some(t.clone());
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(found) = find_type(&c) {
             return Some(found);
         }
         child = c.next_sibling();

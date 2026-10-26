@@ -11,7 +11,9 @@ mod library;
 mod log;
 mod places;
 mod run;
+mod playtime;
 mod sandbox;
+mod sizes;
 mod sources;
 mod steam_move;
 mod search;
@@ -183,7 +185,12 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
         eprintln!("lobby: no game \"{id}\" in the library: starting it with Standard protection.");
         Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default() }
     });
+    let start = store::now();
     let status = sandbox::command(&game, &[], command, None).and_then(|mut s| s.command.stdin(std::process::Stdio::null()).status().map_err(|e| format!("bwrap: {e}")));
+    // Timed while it runs: Battle.net's own lifetime isn't a game's.
+    if status.is_ok() && !command.iter().any(|w| w.contains("Battle.net.exe")) {
+        playtime::session(id, start, store::now());
+    }
     match status {
         Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
         Err(e) => {
@@ -243,6 +250,7 @@ fn scan() -> Result<Library, String> {
     let mut lib = Library::load().unwrap_or_default();
     lib.update(games);
     lib.save()?;
+    playtime::take_in(&lib.games);
     // Lutris's, Faugus's and Steam shortcuts' games become Lobby's own: looked at again so they
     // show as such.
     if !log::timed("scan: taking games over", || taken::take_over(&lib.games)).is_empty() {

@@ -73,6 +73,9 @@ pub fn games(home: &Home) -> Vec<Entry> {
             e.keys.extend(str_of(&g, "gameid").map(|id| Key::Faugus(id.into())));
             e.cover = str_of(&g, "cover").map(String::from);
             e.icon = str_of(&g, "icon").map(PathBuf::from);
+            // Seconds, and a local time without a zone ("2026-10-26T07:49:39.505004").
+            e.playtime = g.get("playtime").and_then(|p| p.as_u64()).filter(|&p| p > 0);
+            e.last_played = str_of(&g, "last_played").and_then(crate::library::unix_time);
             entries.push(e);
         }
     }

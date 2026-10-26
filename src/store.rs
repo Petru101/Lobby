@@ -2,7 +2,7 @@
 //! that stays the same from scan to scan. A game found once is remembered: when no source finds
 //! it any more (a drive that isn't plugged in, an uninstall), it's kept, marked gone.
 
-use crate::library::Game;
+use crate::library::{Game, Key};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -53,10 +53,14 @@ impl Library {
         let mut old: Vec<Option<Game>> = std::mem::take(&mut self.games).into_iter().map(Some).collect();
         let mut games = Vec::new();
         for mut game in found {
-            // When two saved games are now one (a game found on a drive and the same game owned
-            // on GOG), the one played, set up or installed keeps its record.
+            for e in &mut game.entries {
+                e.keys.retain(|k| !matches!(k, Key::Name(_)));
+            }
+            // The surest match; when two saved games are now one as surely (a game found on a
+            // drive and the same game owned on GOG), the one played, set up or installed keeps
+            // its record.
             let worth = |o: &Game| (o.played.is_some(), o.launch_options.is_some() || !o.protection.is_default() || o.chosen_cover.is_some(), o.kind == game.kind);
-            let best = old.iter().enumerate().filter_map(|(i, o)| o.as_ref().filter(|o| same(o, &game)).map(|o| (i, worth(o)))).max_by_key(|&(i, w)| (w, std::cmp::Reverse(i))).map(|(i, _)| i);
+            let best = old.iter().enumerate().filter_map(|(i, o)| o.as_ref().map(|o| (i, same(o, &game), worth(o)))).filter(|(_, s, _)| *s > 0).max_by_key(|&(i, s, w)| (s, w, std::cmp::Reverse(i))).map(|(i, ..)| i);
             match best.and_then(|i| old[i].take()) {
                 Some(o) => {
                     game.id = o.id;
@@ -72,7 +76,7 @@ impl Library {
         }
         for mut o in old.into_iter().flatten() {
             // Now part of another game (a download, once what it installed is found).
-            if games.iter().any(|g| same(&o, g)) {
+            if games.iter().any(|g| same(&o, g) > 0) {
                 continue;
             }
             o.gone = true;
@@ -116,12 +120,23 @@ impl Library {
     }
 }
 
-/// An old record and a new scan's game are the same game when they share a launcher's id, a
-/// program or a folder.
-fn same(old: &Game, new: &Game) -> bool {
-    let paths = |g: &Game| -> Vec<PathBuf> { g.entries.iter().flat_map(|e| [e.program.clone(), e.folder.clone()]).flatten().collect() };
-    let old_paths = paths(old);
-    old.entries.iter().any(|a| new.entries.iter().any(|b| a.keys.iter().any(|k| b.keys.contains(k)))) || paths(new).iter().any(|p| old_paths.contains(p))
+/// How surely an old record and a new scan's game are the same game: 3 a shared launcher's id,
+/// 2 the same program, 1 the same folder, 0 not. Merging's `Name` ties don't count: they're
+/// numbered by where entries were in one scan, so another scan's same number is another game
+/// (saved records still have them from before they were stripped).
+fn same(old: &Game, new: &Game) -> u8 {
+    let keys = |g: &Game| -> Vec<Key> { g.entries.iter().flat_map(|e| e.keys.iter()).filter(|k| !matches!(k, Key::Name(_))).cloned().collect() };
+    let old_keys = keys(old);
+    if keys(new).iter().any(|k| old_keys.contains(k)) {
+        return 3;
+    }
+    let paths = |g: &Game, f: fn(&crate::library::Entry) -> Option<PathBuf>| -> Vec<PathBuf> { g.entries.iter().filter_map(f).collect() };
+    let programs = paths(old, |e| e.program.clone());
+    if paths(new, |e| e.program.clone()).iter().any(|p| programs.contains(p)) {
+        return 2;
+    }
+    let folders = paths(old, |e| e.folder.clone());
+    u8::from(paths(new, |e| e.folder.clone()).iter().any(|p| folders.contains(p)))
 }
 
 /// Where a game's log goes when lobby starts it.
@@ -173,6 +188,29 @@ mod tests {
         lib.update(vec![both]);
         assert_eq!(lib.games.len(), 1);
         assert_eq!((lib.games[0].id.as_str(), lib.games[0].played), ("alien-breed-2-2", Some(7)));
+    }
+
+    #[test]
+    fn a_played_record_never_goes_to_another_game() {
+        // Saved: Borderlands 4 (played, with options) and Apeirophobia, each with merging's
+        // numbered tie from the scan they were saved in.
+        let with = |name: &str, id: &str, program: &str, tie: &str| {
+            let mut g = game(name, Key::Name(tie.into()));
+            g.id = id.into();
+            g.entries[0].program = Some(program.into());
+            g
+        };
+        let mut bl4 = with("Borderlands 4", "borderlands-4", "/g/bl4.exe", "856");
+        bl4.played = Some(9);
+        bl4.launch_options = Some("MANGOHUD=1 %command%".into());
+        let mut lib = Library { games: vec![with("Apeirophobia", "apeirophobia", "/g/apeiro.exe", "967"), bl4], ..Default::default() };
+        // A new scan numbers its ties anew: Apeirophobia's is now Borderlands 4's old number.
+        lib.update(vec![with("Apeirophobia", "", "/g/apeiro.exe", "856"), with("Borderlands 4", "", "/g/bl4.exe", "12")]);
+        let a = lib.games.iter().find(|g| g.name == "Apeirophobia").unwrap();
+        let b = lib.games.iter().find(|g| g.name == "Borderlands 4").unwrap();
+        assert_eq!((a.id.as_str(), a.played), ("apeirophobia", None));
+        assert_eq!((b.id.as_str(), b.played, b.launch_options.as_deref()), ("borderlands-4", Some(9), Some("MANGOHUD=1 %command%")));
+        assert!(lib.games.iter().all(|g| g.entries.iter().all(|e| e.keys.iter().all(|k| !matches!(k, Key::Name(_))))));
     }
 
     #[test]

@@ -39,13 +39,24 @@ fn cover(heroic: &Path, url: &str) -> String {
     if cached.is_file() { cached.display().to_string() } else { url.to_string() }
 }
 
+/// What Heroic records of playing each game, by its app name (store/timestamp.json): when
+/// last, and how long (totalPlayed is in minutes, given here in seconds).
+fn played(heroic: &Path) -> std::collections::HashMap<String, (Option<u64>, Option<u64>)> {
+    let Some(serde_json::Value::Object(map)) = json(&heroic.join("store/timestamp.json")) else { return Default::default() };
+    map.into_iter()
+        .map(|(app, t)| (app, (str_of(&t, "lastPlayed").and_then(crate::library::unix_time), t.get("totalPlayed").and_then(|m| m.as_u64()).filter(|&m| m > 0).map(|m| m * 60))))
+        .collect()
+}
+
 pub fn games(home: &Home) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut legendary: Vec<PathBuf> = Vec::new();
     for heroic in home.app_dirs("com.heroicgameslauncher.hgl", "config/heroic", ".config/heroic") {
         legendary.push(heroic.join("legendaryConfig/legendary/installed.json"));
+        let times = played(&heroic);
         let with_prefix = |mut e: Entry, runner: &str, app: &str| {
             e.prefix = prefix(&heroic, app);
+            (e.last_played, e.playtime) = times.get(app).copied().unwrap_or_default();
             e.keys.push(Key::Heroic(runner.into(), app.into()));
             if let Some(store) = store_of(runner) {
                 e.keys.push(Key::Store(store.into(), app.into()));
@@ -113,6 +124,8 @@ pub fn games(home: &Home) -> Vec<Entry> {
             }
             e.program = str_of(&g, "executable").map(|x| Path::new(path).join(x));
             e.prefix = heroic.as_ref().and_then(|h| prefix(h, &app));
+            e.size = g.get("install_size").and_then(|s| s.as_u64()).filter(|&s| s > 0);
+            (e.last_played, e.playtime) = heroic.as_ref().and_then(|h| played(h).get(&app).copied()).unwrap_or_default();
             // Started through Heroic when Heroic installed it, else it's legendary's alone.
             if heroic.is_some() {
                 e.keys.push(Key::Heroic("legendary".into(), app.clone()));

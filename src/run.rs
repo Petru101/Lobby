@@ -53,7 +53,9 @@ pub fn run(game: &Game) -> Result<(), String> {
     let mut sandboxed = crate::sandbox::command(game, &env, &words, cwd.as_deref().filter(|d| d.is_dir()))?;
     println!("lobby: protection: {}", crate::sandbox::summary(game));
     // umu-run returns when the game has quit (Proton's waitforexitandrun).
+    let start = crate::store::now();
     let status = sandboxed.command.stdin(Stdio::null()).status().map_err(|e| format!("{}: {e}", words[0]))?;
+    crate::playtime::session(&game.id, start, crate::store::now());
     println!("lobby: {} quit ({status}).", game.name);
 
     if cloud {

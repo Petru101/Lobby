@@ -118,7 +118,8 @@ pub fn unwrapped(words: &[String]) -> Option<&[String]> {
 /// which sandboxes the game itself and needs the store's sign-in outside).
 pub fn wrap(game: &Game, command: Vec<String>) -> Vec<String> {
     let lobby_run = command.first().is_some_and(|w| w.ends_with("lobby")) && command.get(1).is_some_and(|w| w == "run");
-    if level(game) == Level::Off || lobby_run || unwrapped(&command).is_some() {
+    // Off too: `lobby sandbox` then runs it as it is, and times it (`playtime`).
+    if lobby_run || unwrapped(&command).is_some() {
         return command;
     }
     [vec![lobby_exe(), "sandbox".into(), game.id.clone(), "--".into()], command].concat()

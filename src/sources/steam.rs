@@ -45,8 +45,8 @@ fn tool(appid: u32, name: &str, dir: &Path) -> bool {
     appid == 228980 || dir.join("toolmanifest.vdf").is_file() || ["Proton", "Steam Linux Runtime", "Steamworks"].iter().any(|t| name.starts_with(t))
 }
 
-/// A library's installed apps: id, name, folder (Steam's own tools left out).
-fn library_apps(lib: &Path) -> Vec<(u32, String, PathBuf)> {
+/// A library's installed apps: id, name, folder, size on disk (Steam's own tools left out).
+fn library_apps(lib: &Path) -> Vec<(u32, String, PathBuf, Option<u64>)> {
     let apps = lib.join("steamapps");
     let mut out = Vec::new();
     for file in fs::read_dir(&apps).into_iter().flatten().flatten() {
@@ -60,7 +60,7 @@ fn library_apps(lib: &Path) -> Vec<(u32, String, PathBuf)> {
         let (Some(name), Some(installdir)) = (get("name"), get("installdir")) else { continue };
         let folder = apps.join("common").join(&installdir);
         if !tool(appid, &name, &folder) {
-            out.push((appid, name, folder));
+            out.push((appid, name, folder, get("SizeOnDisk").and_then(|s| s.parse().ok()).filter(|&s| s > 0)));
         }
     }
     out
@@ -83,13 +83,16 @@ pub fn known_libraries(home: &Home) -> Vec<PathBuf> {
 pub fn apps(home: &Home) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for root in roots(home) {
+        let played = played(&root);
         for lib in libraries(&root) {
-            for (appid, name, folder) in library_apps(&lib) {
+            for (appid, name, folder, size) in library_apps(&lib) {
                 if entries.iter().any(|e| e.keys.contains(&Key::SteamApp(appid))) {
                     continue;
                 }
                 let mut e = Entry::new(Source::Steam, name);
                 e.folder = Some(folder);
+                e.size = size;
+                (e.last_played, e.playtime) = played.get(&appid).copied().unwrap_or_default();
                 e.keys.push(Key::SteamApp(appid));
                 e.cover = Some(library_art(&root, appid));
                 entries.push(e);
@@ -131,7 +134,7 @@ pub fn stray_libraries(home: &Home) -> Vec<PathBuf> {
 pub fn stray_apps(home: &Home) -> Vec<Entry> {
     let mut entries = Vec::new();
     for lib in stray_libraries(home) {
-        for (appid, name, folder) in library_apps(&lib) {
+        for (appid, name, folder, _) in library_apps(&lib) {
             if !folder.is_dir() {
                 continue;
             }
@@ -156,6 +159,32 @@ pub(super) fn library_art(root: &Path, appid: u32) -> String {
         .flat_map(|d| names.iter().map(move |n| d.join(n)))
         .find(|p| p.is_file())
         .map_or_else(|| format!("https://shared.steamstatic.com/store_item_assets/steam/apps/{appid}/library_600x900.jpg"), |p| p.display().to_string())
+}
+
+/// What Steam records of playing each app and shortcut, by id, from every account's
+/// localconfig.vdf (UserLocalConfigStore/Software/Valve/Steam/apps): when last (Unix) and how
+/// long (its Playtime is in minutes, given here in seconds).
+pub(super) fn played(root: &Path) -> std::collections::HashMap<u32, (Option<u64>, Option<u64>)> {
+    let mut out = std::collections::HashMap::new();
+    for user in fs::read_dir(root.join("userdata")).into_iter().flatten().flatten() {
+        let Ok(doc) = vdf::parse(&fs::read_to_string(user.path().join("config/localconfig.vdf")).unwrap_or_default()) else { continue };
+        let apps = ["UserLocalConfigStore", "Software", "Valve", "Steam", "apps"].iter().try_fold(&doc, |d, k| match d.iter().find(|(key, _)| key.eq_ignore_ascii_case(k)) {
+            Some((_, vdf::Node::Map(m))) => Some(m),
+            _ => None,
+        });
+        for (id, app) in apps.into_iter().flatten() {
+            let (Ok(id), vdf::Node::Map(fields)) = (id.parse::<u32>(), app) else { continue };
+            let number = |k: &str| fields.iter().find(|(key, _)| key.eq_ignore_ascii_case(k)).and_then(|(_, v)| if let vdf::Node::Str(s) = v { s.parse::<u64>().ok() } else { None }).filter(|&n| n > 0);
+            let (last, minutes) = (number("LastPlayed"), number("Playtime"));
+            if last.is_none() && minutes.is_none() {
+                continue;
+            }
+            let entry: &mut (Option<u64>, Option<u64>) = out.entry(id).or_default();
+            entry.0 = entry.0.max(last);
+            entry.1 = entry.1.max(minutes.map(|m| m * 60));
+        }
+    }
+    out
 }
 
 /// Art a user picked for a non-Steam game in Steam: `config/grid/<id>p.png` (portrait).
@@ -198,6 +227,7 @@ pub fn shortcut(appid: u32) -> Option<Shortcut> {
 pub fn shortcuts(home: &Home) -> Vec<Entry> {
     let mut entries = Vec::new();
     for root in roots(home) {
+        let played = played(&root);
         for user in fs::read_dir(root.join("userdata")).into_iter().flatten().flatten() {
             let Ok(data) = fs::read(user.path().join("config/shortcuts.vdf")) else { continue };
             let Ok(doc) = steam::parse(&data) else { continue };
@@ -210,6 +240,10 @@ pub fn shortcuts(home: &Home) -> Vec<Entry> {
                 if let Some(steam::Node::Int(id)) = field("appid") {
                     e.keys.push(Key::SteamShortcut(*id));
                     e.cover = grid_art(&user.path(), *id).map(|p| p.display().to_string());
+                    (e.last_played, e.playtime) = played.get(id).copied().unwrap_or_default();
+                }
+                if let Some(steam::Node::Int(t)) = field("LastPlayTime") {
+                    e.last_played = e.last_played.max(Some(u64::from(*t)).filter(|&t| t > 0));
                 }
                 e.icon = field("icon").and_then(text).map(PathBuf::from).filter(|p| p.is_absolute());
                 let exe = field("Exe").and_then(text).unwrap_or_default();

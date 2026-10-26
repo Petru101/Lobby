@@ -8,7 +8,7 @@
 //! - Each app's name and type: appcache/appinfo.vdf (binary key-values, key names in a table at
 //!   the end since format 29). Only type "game": not DLC, tools, demos, soundtracks.
 
-use super::steam::{library_art, roots};
+use super::steam::{library_art, played, roots};
 use super::Home;
 use crate::library::{Entry, Key, Kind, Source};
 use gamefix::vdf;
@@ -22,12 +22,23 @@ const STEAM_ID_BASE: u64 = 76561197960265728;
 pub fn games(home: &Home) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for root in roots(home) {
-        let packages: BTreeSet<u32> = accounts(&root).iter().flat_map(|a| licenses(&root, *a)).collect();
-        if packages.is_empty() {
+        let licenses: Vec<(u32, u64)> = accounts(&root).iter().flat_map(|a| licenses(&root, *a)).collect();
+        if licenses.is_empty() {
             continue;
         }
-        let apps: BTreeSet<u32> = package_apps(&fs::read(root.join("packageinfo.vdf")).unwrap_or_default(), &packages).into_iter().collect();
-        for (appid, name) in app_games(&fs::read(root.join("appinfo.vdf")).unwrap_or_default(), &apps) {
+        let packages: BTreeSet<u32> = licenses.iter().map(|(p, _)| *p).collect();
+        let pairs = package_apps(&fs::read(root.join("appcache/packageinfo.vdf")).unwrap_or_default(), &packages);
+        // When each app was first bought or added: its earliest license.
+        let mut bought: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        for (package, app) in &pairs {
+            for (_, time) in licenses.iter().filter(|(p, t)| p == package && *t > 0) {
+                let t = bought.entry(*app).or_insert(*time);
+                *t = (*t).min(*time);
+            }
+        }
+        let apps: BTreeSet<u32> = pairs.iter().map(|(_, a)| *a).collect();
+        let played = played(&root);
+        for (appid, name) in app_games(&fs::read(root.join("appcache/appinfo.vdf")).unwrap_or_default(), &apps) {
             if entries.iter().any(|e| e.keys.contains(&Key::SteamApp(appid))) {
                 continue;
             }
@@ -35,6 +46,8 @@ pub fn games(home: &Home) -> Vec<Entry> {
             e.kind = Kind::Owned;
             e.keys.push(Key::SteamApp(appid));
             e.cover = Some(library_art(&root, appid));
+            e.since = bought.get(&appid).copied();
+            (e.last_played, e.playtime) = played.get(&appid).copied().unwrap_or_default();
             entries.push(e);
         }
     }
@@ -83,8 +96,9 @@ fn accounts(root: &Path) -> Vec<u32> {
     }
 }
 
-/// The packages an account holds a working license for (not expired, cancelled or pending).
-fn licenses(root: &Path, account: u32) -> Vec<u32> {
+/// The packages an account holds a working license for (not expired, cancelled or pending),
+/// with when each license was made.
+fn licenses(root: &Path, account: u32) -> Vec<(u32, u64)> {
     let Ok(data) = fs::read(root.join(format!("userdata/{account}/config/licensecache"))) else { return Vec::new() };
     decode_licenses(&unscramble(&data, account))
 }
@@ -98,7 +112,7 @@ fn unscramble(data: &[u8], account: u32) -> Vec<u8> {
 /// by Steam, or for fraud, not activated (ELicenseFlags).
 const NOT_HELD: u64 = 0x4 | 0x8 | 0x10 | 0x20 | 0x400 | 0x800;
 
-fn decode_licenses(list: &[u8]) -> Vec<u32> {
+fn decode_licenses(list: &[u8]) -> Vec<(u32, u64)> {
     proto_fields(list)
         .into_iter()
         .filter_map(|(field, value)| if let (2, Proto::Bytes(license)) = (field, value) { Some(license) } else { None })
@@ -106,7 +120,7 @@ fn decode_licenses(list: &[u8]) -> Vec<u32> {
             let fields = proto_fields(license);
             let int = |n: u64| fields.iter().find_map(|(f, v)| if let (true, Proto::Int(i)) = (*f == n, v) { Some(*i) } else { None });
             let package = int(1)?;
-            (int(7).unwrap_or(0) & NOT_HELD == 0).then_some(package as u32)
+            (int(7).unwrap_or(0) & NOT_HELD == 0).then_some((package as u32, int(2).unwrap_or(0)))
         })
         .collect()
 }
@@ -288,9 +302,9 @@ impl Reader<'_> {
     }
 }
 
-/// The apps of the given packages, from packageinfo.vdf (format 39, or 40 with an access
-/// token per package).
-fn package_apps(b: &[u8], wanted: &BTreeSet<u32>) -> Vec<u32> {
+/// The apps of the given packages, as (package, app), from packageinfo.vdf (format 39, or 40
+/// with an access token per package).
+fn package_apps(b: &[u8], wanted: &BTreeSet<u32>) -> Vec<(u32, u32)> {
     let mut r = Reader { b, i: 0 };
     let Some(magic) = r.u32() else { return Vec::new() };
     if magic & 0xFFFF_FF00 != 0x0656_5500 || r.u32().is_none() {
@@ -312,7 +326,7 @@ fn package_apps(b: &[u8], wanted: &BTreeSet<u32>) -> Vec<u32> {
             other => other,
         };
         if let Some(Kv::Map(ids)) = info.get("appids") {
-            apps.extend(ids.iter().filter_map(|(_, v)| if let Kv::Int(i) = v { u32::try_from(*i).ok() } else { None }));
+            apps.extend(ids.iter().filter_map(|(_, v)| if let Kv::Int(i) = v { u32::try_from(*i).ok().map(|a| (package, a)) } else { None }));
         }
     }
     apps
@@ -382,7 +396,7 @@ mod tests {
         }
         let scrambled = unscramble(&list, 12345678);
         assert_eq!(&scrambled[..3], &[0x4d, 0x39, 0x41]);
-        assert_eq!(decode_licenses(&unscramble(&scrambled, 12345678)), vec![21357]);
+        assert_eq!(decode_licenses(&unscramble(&scrambled, 12345678)), vec![(21357, 0)]);
     }
 
     #[test]
@@ -406,7 +420,7 @@ mod tests {
             p.extend([8, 8, 8]);
         }
         p.extend(u32::MAX.to_le_bytes());
-        assert_eq!(package_apps(&p, &BTreeSet::from([7])), vec![10, 80]);
+        assert_eq!(package_apps(&p, &BTreeSet::from([7])), vec![(7, 10), (7, 80)]);
 
         // appinfo 29: key names in the table at the end.
         let table = ["appinfo", "common", "name", "type"];

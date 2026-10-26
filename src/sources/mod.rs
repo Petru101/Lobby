@@ -79,6 +79,15 @@ pub fn scan(home: &Home) -> Found {
     pfxs.extend(prefixes::usual(home));
     entries.extend(crate::log::timed("scan: Wine prefixes", || prefixes::scan(pfxs)));
 
+    // When each came here, where the launcher doesn't say: its folder's (a download's file's)
+    // creation time.
+    crate::log::timed("scan: creation times", || {
+        for e in entries.iter_mut().filter(|e| e.since.is_none()) {
+            let path = if e.kind == library::Kind::Download { e.program.as_deref().or(e.folder.as_deref()) } else { e.folder.as_deref().or(e.program.as_deref()) };
+            e.since = path.and_then(created);
+        }
+    });
+
     let mut wide = roots.clone();
     wide.extend(collections);
     wide.push(home.home.clone());
@@ -86,6 +95,23 @@ pub fn scan(home: &Home) -> Found {
         wide.push(home.join(d));
     }
     Found { entries, roots: wide.iter().map(|p| library::norm(p)).collect() }
+}
+
+/// When a file or folder was made (Unix time): the kernel's birth time, else, on a Windows
+/// drive through ntfs-3g (which doesn't give one), NTFS's own creation time.
+pub fn created(path: &Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    if let Some(t) = meta.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
+        return Some(t.as_secs()).filter(|&t| t > 0);
+    }
+    // ntfs-3g: 100 ns ticks since 1601, big-endian.
+    let name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())).ok()?;
+    let mut buf = [0u8; 8];
+    let n = unsafe { libc::getxattr(name.as_ptr(), c"system.ntfs_crtime_be".as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    if n != 8 {
+        return None;
+    }
+    (u64::from_be_bytes(buf) / 10_000_000).checked_sub(11_644_473_600).filter(|&t| t > 0)
 }
 
 /// Reads a JSON file, or nothing.
