@@ -16,12 +16,17 @@ pub fn plain_settings(id: &str) -> bool {
 }
 
 /// How Faugus starts a game: umu-run in its prefix, with its launch arguments (variables, and
-/// maybe a program they go before) in front and its game arguments after.
+/// maybe a program they go before) in front and its game arguments after; `env` its global
+/// variables (envar.json, "NAME=value" lines).
 pub struct Launch {
     pub program: PathBuf,
     pub prefix: PathBuf,
     pub before: String,
     pub after: String,
+    pub env: Vec<(String, String)>,
+    /// The runner Faugus uses: "Default" read as its default runner; a Proton's name
+    /// (compatibilitytools.d) or folder, "Linux-Native" or "Steam".
+    pub runner: String,
     pub protonfix: Option<String>,
     pub mangohud: bool,
 }
@@ -37,6 +42,20 @@ pub fn launch(id: &str) -> Option<Launch> {
             before: str_of(&g, "launch_arguments").unwrap_or_default().to_string(),
             after: str_of(&g, "game_arguments").unwrap_or_default().to_string(),
             protonfix: str_of(&g, "protonfix").map(String::from),
+            runner: match str_of(&g, "runner").unwrap_or("Default") {
+                "Default" => json(&home.join(".var/app/io.github.Faugus.faugus-launcher/config/faugus-launcher/config.json"))
+                    .or_else(|| json(&home.join(".config/faugus-launcher/config.json")))
+                    .and_then(|c| c.get("default-runner")?.as_str().map(|s| s.trim_matches('"').to_string()))
+                    .unwrap_or_default(),
+                other => other.to_string(),
+            },
+            env: home
+                .app_dirs("io.github.Faugus.faugus-launcher", "config/faugus-launcher", ".config/faugus-launcher")
+                .iter()
+                .filter_map(|d| json(&d.join("envar.json"))?.as_array().cloned())
+                .flatten()
+                .filter_map(|l| l.as_str().and_then(|l| l.split_once('=')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+                .collect(),
             mangohud: g.get("mangohud").is_some_and(|m| m.as_bool() == Some(true) || m.as_str() == Some("True")),
         })
     })

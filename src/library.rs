@@ -336,6 +336,14 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
         }
     }
 
+    // A folder found on a drive that holds the programs of games a launcher lists apart (two
+    // programs of one source: Age of War's and Binding of Isaac's Ruffle entries, both in
+    // Games/Flash, which the folder scan took for one game) is a folder of games: as an entry
+    // it would tie them into one.
+    let programs: Vec<(Source, PathBuf)> = entries.iter().filter(|e| !matches!(e.source, Source::Folder | Source::Itch | Source::Artwork)).filter_map(|e| Some((e.source, e.program.clone()?))).filter(|(_, p)| !store_app(p)).collect();
+    let holds_several = |folder: &Path| programs.iter().any(|(s, p)| p.starts_with(folder) && programs.iter().any(|(s2, p2)| s2 == s && p2 != p && p2.starts_with(folder)));
+    entries.retain(|e| !(e.source == Source::Folder && e.folder.as_deref().is_some_and(holds_several)));
+
     let n = entries.len();
     let mut parent: Vec<usize> = (0..n).collect();
     fn root(parent: &mut [usize], mut i: usize) -> usize {
@@ -451,6 +459,24 @@ mod tests {
             &[],
         );
         assert_eq!(names(&games), [("Dishonored - Definitive Edition".into(), vec![Source::Gog, Source::Folder])]);
+    }
+
+    #[test]
+    fn games_a_runner_opens_from_one_folder_stay_apart() {
+        let dir = std::env::temp_dir().join(format!("lobby-flash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("age_of_war.swf"), dir.join("the_binding_of_isaac_demo.swf"));
+        std::fs::write(&a, b"FWS").unwrap();
+        std::fs::write(&b, b"FWS").unwrap();
+        let mut e1 = entry(Source::AppMenu, "Age of War", None, Some(a.to_str().unwrap()));
+        e1.keys.push(Key::Desktop("/a/age-of-war-ruffle.desktop".into()));
+        let mut e2 = entry(Source::AppMenu, "The Binding of Isaac (Demo)", None, Some(b.to_str().unwrap()));
+        e2.keys.push(Key::Desktop("/a/binding-of-isaac-ruffle.desktop".into()));
+        // The folder scan's entry for the folder they're both in.
+        let folder = entry(Source::Folder, "Flash", Some(dir.to_str().unwrap()), Some(a.to_str().unwrap()));
+        let games = merge(vec![e1, e2, folder], &[]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(names(&games), [("Age of War".into(), vec![Source::AppMenu]), ("The Binding of Isaac (Demo)".into(), vec![Source::AppMenu])]);
     }
 
     #[test]

@@ -187,10 +187,12 @@ fn umu_plan(program: &Path, prefix: &Path, args: &str, how: &str) -> Plan {
     own(how, umu_command(program, prefix, &[], &args, None), program.parent().map(Path::to_path_buf))
 }
 
-/// `env WINEPREFIX=.. PROTONPATH=.. GAMEID=.. <env> umu-run <program> <args>`: the Proton that
-/// made the prefix, else `proton` (the one a launcher picked), else Steam's default, else
-/// GE-Proton. UMU_ID among the variables (Steam shortcuts' protonfixes) is umu's GAMEID.
-fn umu_command(program: &Path, prefix: &Path, env: &[(String, String)], args: &[String], proton: Option<PathBuf>) -> Vec<String> {
+/// `env WINEPREFIX=.. PROTONPATH=.. GAMEID=.. <env> umu-run <program> <args>`: the Proton the
+/// launcher picked for the game (`chosen`: Faugus's runner, Lutris's wine version, the tool
+/// forced on a Steam shortcut; the launcher always uses it, so it's the prefix's own), else the
+/// one that made the prefix, else Steam's default, else GE-Proton. UMU_ID among the variables
+/// (Steam shortcuts' protonfixes) is umu's GAMEID.
+fn umu_command(program: &Path, prefix: &Path, env: &[(String, String)], args: &[String], chosen: Option<PathBuf>) -> Vec<String> {
     // A Proton-style prefix (`<folder>/pfx` holding drive_c) is given to umu as its folder.
     let wineprefix = match prefix.file_name() {
         Some(n) if n == "pfx" && !prefix.is_symlink() && fs::symlink_metadata(prefix).is_ok_and(|m| m.is_dir()) => prefix.parent().unwrap_or(prefix),
@@ -199,8 +201,9 @@ fn umu_command(program: &Path, prefix: &Path, env: &[(String, String)], args: &[
     // The Proton that made the prefix: another would upgrade it, which can break the game for
     // the launcher that set it up.
     let steam = gamefix::steam::Steam::find();
-    let proton = proton_of(prefix)
-        .or(proton.filter(|p| p.join("proton").is_file()))
+    let proton = chosen
+        .filter(|p| p.join("proton").is_file())
+        .or_else(|| proton_of(prefix))
         .or_else(|| steam.as_ref().and_then(|s| s.tool_dir(&s.proton()?)))
         .map_or("GE-Proton".to_string(), |d| d.display().to_string());
     let gameid = env.iter().find(|(k, _)| k == "UMU_ID" || k == "GAMEID").map_or("umu-0".to_string(), |(_, v)| v.clone());
@@ -236,19 +239,37 @@ fn lutris_plan(id: i64) -> Option<Plan> {
     }
 }
 
-/// A Faugus game as Faugus starts it: umu-run in its prefix, its launch arguments' variables
-/// before, its game arguments after, its protonfix as umu's GAMEID, MangoHud when ticked.
+/// A Faugus game as Faugus starts it: umu-run in its prefix, its game arguments after the
+/// program, its protonfix as umu's GAMEID, MangoHud when ticked. Faugus's runner takes every
+/// `NAME=value` word of the whole command as a variable (faugus/runner.py
+/// `extract_env_from_message`), wherever it was typed: Minecraft Dungeons 2's
+/// `WINEDLLOVERRIDES="winmm=n,b"` is in its game arguments, and RUNE's winmm.dll needs it.
 fn faugus_plan(id: &str) -> Option<Plan> {
     let f = crate::sources::faugus::launch(id)?;
-    let mut env: Vec<(String, String)> = shell_words(&f.before).iter().filter_map(|w| w.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))).collect();
+    let words: Vec<(bool, String)> = shell_words(&f.before).into_iter().map(|w| (false, w)).chain(shell_words(&f.after).into_iter().map(|w| (true, w))).collect();
+    let variable = |w: &str| w.split_once('=').filter(|(k, _)| !k.is_empty() && !k.starts_with(|c: char| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).map(|(k, v)| (k.to_string(), v.to_string()));
+    let mut env = f.env.clone();
+    env.extend(words.iter().filter_map(|(_, w)| variable(w)));
+    let args: Vec<String> = words.iter().filter(|(after, w)| *after && variable(w).is_none()).map(|(_, w)| w.clone()).collect();
     if let Some(fix) = f.protonfix {
         env.push(("GAMEID".into(), fix));
     }
     if f.mangohud {
         env.push(("MANGOHUD".into(), "1".into()));
     }
-    let command = umu_command(&f.program, &f.prefix, &env, &shell_words(&f.after), None);
-    Some(own("Lobby, as Faugus set it up", command, f.program.parent().map(Path::to_path_buf)))
+    let how = "Lobby, as Faugus set it up";
+    match f.runner.as_str() {
+        // Faugus hands those to Steam.
+        "Steam" => None,
+        "Linux-Native" => Some(own(how, [vec!["env".to_string()], env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![f.program.display().to_string()], args].concat(), f.program.parent().map(Path::to_path_buf))),
+        runner => {
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+            let chosen = Some(PathBuf::from(runner)).filter(|p| p.is_absolute()).or_else(|| {
+                [".local/share/Steam/compatibilitytools.d", ".var/app/io.github.Faugus.faugus-launcher/data/Steam/compatibilitytools.d", ".steam/root/compatibilitytools.d"].iter().map(|d| home.join(d).join(runner)).find(|p| p.join("proton").is_file())
+            });
+            Some(own(how, umu_command(&f.program, &f.prefix, &env, &args, chosen), f.program.parent().map(Path::to_path_buf)))
+        }
+    }
 }
 
 /// A non-Steam game's Steam shortcut, started as Steam would: a Windows program with umu-run in
@@ -555,19 +576,26 @@ pub fn with_options(command: Vec<String>, options: Option<&str>) -> Result<Vec<S
     let launcher = match first {
         "xdg-open" => Some("Heroic"),
         "lutris" => Some("Lutris"),
-        "flatpak" => Some("Faugus"),
         f if f.ends_with("faugus-launcher") => Some("Faugus"),
         _ => None,
     };
     if let Some(l) = launcher {
         return Err(format!("{l} starts it: set its launch options in {l}."));
     }
+    if first == "flatpak" {
+        if !o.vars.is_empty() {
+            return Err("It runs in a Flatpak app, which doesn't get variables this way: only words after the program.".into());
+        }
+        return Ok([command, o.args].concat());
+    }
     let mut c = command;
     if c.first().is_none_or(|w| w != "env") {
         c.insert(0, "env".into());
     }
+    // After the command's own variables: the user's win (PROTONPATH=... picks another Proton).
+    let at = 1 + c[1..].iter().take_while(|w| w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))).count();
     for (i, (k, v)) in o.vars.iter().enumerate() {
-        c.insert(1 + i, format!("{k}={v}"));
+        c.insert(at + i, format!("{k}={v}"));
     }
     c.extend(o.args);
     Ok(c)
@@ -691,7 +719,11 @@ mod tests {
         let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let umu = cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/game.exe"]);
         assert_eq!(with_options(umu.clone(), Some("-dx11 -windowed")).unwrap(), cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/game.exe", "-dx11", "-windowed"]));
-        assert_eq!(with_options(umu.clone(), Some("PROTON_LOG=1 %command% -dx11")).unwrap(), cmd(&["env", "PROTON_LOG=1", "WINEPREFIX=/p", "umu-run", "/g/game.exe", "-dx11"]));
+        assert_eq!(with_options(umu.clone(), Some("PROTON_LOG=1 %command% -dx11")).unwrap(), cmd(&["env", "WINEPREFIX=/p", "PROTON_LOG=1", "umu-run", "/g/game.exe", "-dx11"]));
+        // The user's variable comes last, so it wins over the command's own.
+        let with_proton = cmd(&["env", "WINEPREFIX=/p", "PROTONPATH=/a", "umu-run", "/g/game.exe"]);
+        assert_eq!(with_options(with_proton, Some("PROTONPATH=/b %command%")).unwrap(), cmd(&["env", "WINEPREFIX=/p", "PROTONPATH=/a", "PROTONPATH=/b", "umu-run", "/g/game.exe"]));
+        assert_eq!(with_options(cmd(&["flatpak", "run", "rs.ruffle.Ruffle", "/g/a.swf"]), Some("--fullscreen")).unwrap(), cmd(&["flatpak", "run", "rs.ruffle.Ruffle", "/g/a.swf", "--fullscreen"]));
         assert_eq!(with_options(cmd(&["/g/game.x86_64"]), Some("-w \"two words\"")).unwrap(), cmd(&["env", "/g/game.x86_64", "-w", "two words"]));
         assert_eq!(with_options(umu.clone(), Some("  ")).unwrap(), umu);
         assert!(with_options(umu, Some("-dx11 %command%")).is_err());
