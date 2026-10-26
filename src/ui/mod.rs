@@ -113,62 +113,87 @@ pub fn ask_which_saves(game: &str, store: &str) -> Option<crate::stores::saves::
     choice.get()
 }
 
-/// Which games the grid shows.
+/// Which games the grid shows: one of three pages, by whether they're installed.
 #[derive(Clone, Copy, PartialEq)]
-enum Filter {
-    All,
-    Steam,
-    Stores,
-    Launchers,
-    Drives,
+enum Page {
+    Installed,
+    Library,
     Downloads,
-    Owned,
 }
 
-impl Filter {
-    const ALL: [(Filter, &'static str, &'static str); 7] = [
-        (Filter::All, "All", "Every game on this computer"),
-        (Filter::Steam, "Steam", "Installed with Steam"),
-        (Filter::Stores, "Epic · GOG · Amazon", "Games from Epic Games, GOG or Amazon: installed by Lobby, Heroic or Lutris, or found on your drives"),
-        (Filter::Launchers, "Other launchers", "Lutris, Faugus, Steam shortcuts, the app menu and gamefix"),
-        (Filter::Drives, "Only on your drives", "Games only Lobby starts: found in folders and Windows setups, or taken over from other launchers"),
-        (Filter::Downloads, "Downloads", "Downloaded but not installed yet"),
-        (Filter::Owned, "Not installed", "Games you own on Epic or GOG that aren't installed (sign in with Accounts)"),
+impl Page {
+    const ALL: [(Page, &'static str, &'static str, &'static str); 3] = [
+        (Page::Installed, "installed", "Installed", "Games ready to play on this computer"),
+        (Page::Library, "library", "Library", "Every game you have: installed, and owned on Epic or GOG but not installed (sign in with Accounts)"),
+        (Page::Downloads, "downloads", "Downloads", "Downloaded but not installed yet"),
     ];
 
     fn wants(self, g: &Game) -> bool {
+        match self {
+            Page::Installed => g.kind == Kind::Game,
+            Page::Library => matches!(g.kind, Kind::Game | Kind::Owned),
+            Page::Downloads => matches!(g.kind, Kind::Download | Kind::WrongSystem),
+        }
+    }
+}
+
+/// And where they're from, on any page. Each game is under one: a store's game under its store
+/// whoever installed it, else itch.io's, else Other.
+#[derive(Clone, Copy, PartialEq)]
+enum Origin {
+    All,
+    Steam,
+    Epic,
+    Gog,
+    Amazon,
+    Itch,
+    Other,
+}
+
+impl Origin {
+    const ALL: [(Origin, &'static str, &'static str, &'static str); 7] = [
+        (Origin::All, "all", "All sources", "Games from everywhere"),
+        (Origin::Steam, "steam", "Steam", "Steam's games"),
+        (Origin::Epic, "epic", "Epic", "Epic Games Store games: installed by Lobby, Heroic or Lutris, found on your drives, or owned"),
+        (Origin::Gog, "gog", "GOG", "GOG's games: installed by Lobby, Heroic or Lutris, found on your drives, or owned"),
+        (Origin::Amazon, "amazon", "Amazon", "Amazon Games' games"),
+        (Origin::Itch, "itch", "itch.io", "Games downloaded from itch.io"),
+        (Origin::Other, "other", "Other", "Other launchers (Lutris, Faugus, Steam shortcuts, the app menu, gamefix) and games found on your drives"),
+    ];
+
+    fn of(g: &Game) -> Origin {
         let has = |s: &[Source]| g.entries.iter().any(|e| s.contains(&e.source));
-        // A game owned on a store stays under its store, taken over or not (Lutris's GOG
-        // installs showed under both).
-        let store = has(&[Source::Steam, Source::SteamElsewhere, Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]);
-        if self == Filter::Downloads {
-            return matches!(g.kind, Kind::Download | Kind::WrongSystem);
+        let store = |id: &str| g.entries.iter().any(|e| e.keys.iter().any(|k| matches!(k, Key::Store(s, _) if s == id)));
+        if has(&[Source::Steam, Source::SteamElsewhere]) {
+            Origin::Steam
+        } else if has(&[Source::Epic]) || store("epic") {
+            Origin::Epic
+        } else if has(&[Source::Gog]) || store("gog") {
+            Origin::Gog
+        } else if has(&[Source::Amazon]) || store("amazon") {
+            Origin::Amazon
+        } else if has(&[Source::Itch]) {
+            Origin::Itch
+        } else {
+            Origin::Other
         }
-        if self == Filter::Owned {
-            return g.kind == Kind::Owned;
-        }
-        g.kind == Kind::Game
-            && match self {
-                Filter::All => true,
-                Filter::Steam => has(&[Source::Steam, Source::SteamElsewhere]),
-                Filter::Stores => has(&[Source::Epic, Source::Gog, Source::Amazon, Source::Heroic]),
-                Filter::Launchers => !store && !g.unknown_to_launchers(),
-                Filter::Drives => !store && g.unknown_to_launchers(),
-                Filter::Downloads | Filter::Owned => unreachable!(),
-            }
     }
 }
 
 struct Ui {
     window: adw::ApplicationWindow,
-    title: adw::WindowTitle,
+    /// How many games show, at the end of the source row.
+    count: gtk::Label,
     toasts: adw::ToastOverlay,
     stack: gtk::Stack,
     flow: gtk::FlowBox,
     search: gtk::SearchEntry,
     rescan_button: gtk::Button,
     lib: RefCell<Library>,
-    filter: Cell<Filter>,
+    page: Cell<Page>,
+    origin: Cell<Origin>,
+    /// The source buttons: only sources with games on the page show.
+    origins: RefCell<Vec<(Origin, gtk::ToggleButton)>>,
     scanning: Cell<bool>,
     /// A rescan was asked for during a scan (after an uninstall, say): another runs after it,
     /// since that scan may have read the disk before the change.
@@ -189,8 +214,9 @@ struct Ui {
 
 fn build(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder().application(app).title("Lobby").default_width(1280).default_height(860).build();
-    let title = adw::WindowTitle::new("Lobby", "");
-    let header = adw::HeaderBar::builder().title_widget(&title).build();
+    // The pages, in the middle of the header.
+    let pages = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
+    let header = adw::HeaderBar::builder().title_widget(&pages).build();
     let rescan_button = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Look for games again (F5)").build();
     header.pack_start(&rescan_button);
     let accounts_button = gtk::Button::builder().icon_name("avatar-default-symbolic").tooltip_text("Store accounts: Epic Games and GOG").build();
@@ -202,8 +228,11 @@ fn build(app: &adw::Application) {
     let search = gtk::SearchEntry::builder().placeholder_text("Search games").width_chars(28).build();
     header.pack_end(&search);
 
-    // Filters, as a row of toggle buttons.
-    let filters = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).halign(gtk::Align::Center).margin_top(6).margin_bottom(6).build();
+    // Sources, as a row of toggle buttons, and how many games show.
+    let sources = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
+    let count = gtk::Label::builder().margin_end(12).build();
+    count.add_css_class("dim-label");
+    let filters = gtk::CenterBox::builder().center_widget(&sources).end_widget(&count).margin_top(6).margin_bottom(6).build();
     filters.add_css_class("filters");
 
     let flow = gtk::FlowBox::builder()
@@ -239,11 +268,33 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), title, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), filter: Cell::new(Filter::All), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), origins: RefCell::default(), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
-    for (f, label, tip) in Filter::ALL {
-        let button = gtk::ToggleButton::builder().label(label).tooltip_text(tip).build();
+    for (page, name, label, tip) in Page::ALL {
+        let button = gtk::ToggleButton::builder().label(label).tooltip_text(tip).name(name).build();
+        button.add_css_class("pill");
+        if let Some(first) = &group {
+            button.set_group(Some(first));
+        } else {
+            button.set_active(true);
+            group = Some(button.clone());
+        }
+        let u = ui.clone();
+        button.connect_toggled(move |b| {
+            if b.is_active() {
+                u.page.set(page);
+                if page != Page::Downloads {
+                    u.forget_installed();
+                }
+                u.refilter();
+            }
+        });
+        pages.append(&button);
+    }
+    let mut group: Option<gtk::ToggleButton> = None;
+    for (origin, name, label, tip) in Origin::ALL {
+        let button = gtk::ToggleButton::builder().label(label).tooltip_text(tip).name(name).build();
         button.add_css_class("pill");
         button.add_css_class("flat");
         if let Some(first) = &group {
@@ -255,14 +306,12 @@ fn build(app: &adw::Application) {
         let u = ui.clone();
         button.connect_toggled(move |b| {
             if b.is_active() {
-                u.filter.set(f);
-                if !matches!(f, Filter::Downloads | Filter::Owned) {
-                    u.forget_installed();
-                }
+                u.origin.set(origin);
                 u.refilter();
             }
         });
-        filters.append(&button);
+        sources.append(&button);
+        ui.origins.borrow_mut().push((origin, button));
     }
 
     let u = ui.clone();
@@ -272,7 +321,9 @@ fn build(app: &adw::Application) {
         let lib = u.lib.borrow();
         let name = |c: &gtk::FlowBoxChild| lib.games.iter().find(|g| g.id == c.widget_name()).map(|g| g.name.to_lowercase()).unwrap_or_default();
         let first = |c: &gtk::FlowBoxChild| !u.is_just_installed(&c.widget_name());
-        (first(a), name(a)).cmp(&(first(b), name(b))).into()
+        // In Library, installed games before the ones only owned.
+        let owned = |c: &gtk::FlowBoxChild| lib.games.iter().any(|g| g.id == c.widget_name() && g.kind == Kind::Owned);
+        (first(a), owned(a), name(a)).cmp(&(first(b), owned(b), name(b))).into()
     });
     let u = ui.clone();
     flow.connect_child_activated(move |_, child| {
@@ -363,10 +414,16 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if let Ok(text) = std::env::var("LOBBY_SNAPSHOT_SEARCH") {
             u.search.set_text(&text);
         }
-        // LOBBY_SNAPSHOT_FILTER=<n>: the n-th filter (0 = All).
-        if let Some((f, ..)) = std::env::var("LOBBY_SNAPSHOT_FILTER").ok().and_then(|n| n.parse::<usize>().ok()).and_then(|n| Filter::ALL.get(n)) {
-            u.filter.set(*f);
-            u.refilter();
+        // LOBBY_SNAPSHOT_PAGE=installed|library|downloads, LOBBY_SNAPSHOT_SOURCE=steam|epic|gog|
+        // amazon|itch|other: pressed as the user would.
+        if let Ok(name) = std::env::var("LOBBY_SNAPSHOT_PAGE") {
+            let pages = u.window.content().and_then(|c| find_named(&c, &name)).and_downcast::<gtk::ToggleButton>();
+            pages.inspect(|b| b.set_active(true));
+        }
+        if let Ok(name) = std::env::var("LOBBY_SNAPSHOT_SOURCE") {
+            if let Some((_, b)) = u.origins.borrow().iter().find(|(_, b)| b.widget_name() == name) {
+                b.set_active(true);
+            }
         }
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_INSTALLED") {
             u.just_installed.replace(Some((id, None)));
@@ -443,8 +500,9 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
 
 impl Ui {
     fn shows(&self, g: &Game) -> bool {
-        let filter = self.filter.get();
-        if g.gone || g.missing || !(filter.wants(g) || matches!(filter, Filter::Downloads | Filter::Owned) && self.is_just_installed(&g.id)) {
+        let page = self.page.get();
+        let origin = self.origin.get();
+        if g.gone || g.missing || !(page.wants(g) || page == Page::Downloads && self.is_just_installed(&g.id)) || !(origin == Origin::All || Origin::of(g) == origin) {
             return false;
         }
         let q = self.search.text().to_lowercase();
@@ -467,17 +525,28 @@ impl Ui {
     }
 
     fn refilter(&self) {
+        // Only the sources with games on this page; back to all when the one picked has none.
+        let page = self.page.get();
+        let on_page: Vec<Origin> = self.lib.borrow().games.iter().filter(|g| !g.gone && !g.missing && page.wants(g)).map(Origin::of).collect();
+        let mut fallback = None;
+        for (origin, button) in self.origins.borrow().iter() {
+            let any = *origin == Origin::All || on_page.contains(origin);
+            button.set_visible(any);
+            if !any && button.is_active() {
+                fallback = self.origins.borrow().first().map(|(_, b)| b.clone());
+            }
+        }
+        if let Some(all) = fallback {
+            // Its toggled handler refilters.
+            all.set_active(true);
+            return;
+        }
         self.flow.invalidate_filter();
         let lib = self.lib.borrow();
         let shown = lib.games.iter().filter(|g| self.shows(g)).count();
-        let total = lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone && !g.missing).count();
-        let subtitle = match self.filter.get() {
-            Filter::Downloads => format!("{shown} downloads"),
-            Filter::Owned => format!("{shown} games you own, not installed"),
-            _ if shown == total => format!("{total} games"),
-            _ => format!("{shown} of {total} games"),
-        };
-        self.title.set_subtitle(&subtitle);
+        let total = on_page.len();
+        let noun = if page == Page::Downloads { "downloads" } else { "games" };
+        self.count.set_label(&if shown == total { format!("{total} {noun}") } else { format!("{shown} of {total} {noun}") });
         if !self.scanning.get() || !lib.games.is_empty() {
             self.stack.set_visible_child_name(if shown == 0 { "empty" } else { "games" });
         }
@@ -2418,8 +2487,26 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     body.append(&from);
     let child = gtk::FlowBoxChild::builder().child(&body).name(&g.id).tooltip_text(&g.name).build();
     child.add_css_class("game-card");
+    if g.kind == Kind::Owned {
+        child.add_css_class("not-installed");
+    }
     if just_installed {
         child.add_css_class("just-installed");
     }
     child
+}
+
+/// The widget with this name inside `w` (the snapshot's way to press a button).
+fn find_named(w: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+    if w.widget_name() == name {
+        return Some(w.clone());
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(found) = find_named(&c, name) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
 }

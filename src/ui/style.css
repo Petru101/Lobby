@@ -90,3 +90,13 @@ flowboxchild.just-installed .play-button {
   padding: 3px 10px;
   border-radius: 99px;
 }
+
+/* A game owned but not installed, in Library. */
+flowboxchild.not-installed .cover > picture:not(.cover-backdrop),
+flowboxchild.not-installed .cover-placeholder {
+  filter: grayscale(0.85) contrast(0.7) brightness(1.15);
+}
+
+flowboxchild.not-installed .cover > picture.cover-backdrop {
+  filter: blur(14px) brightness(0.8) grayscale(0.85);
+}
