@@ -129,7 +129,7 @@ impl Filter {
     const ALL: [(Filter, &'static str, &'static str); 7] = [
         (Filter::All, "All", "Every game on this computer"),
         (Filter::Steam, "Steam", "Installed with Steam"),
-        (Filter::Stores, "Epic · GOG · Amazon", "Installed from Epic Games, GOG or Amazon (by Lobby, or by Heroic before)"),
+        (Filter::Stores, "Epic · GOG · Amazon", "Games from Epic Games, GOG or Amazon: installed by Lobby, Heroic or Lutris, or found on your drives"),
         (Filter::Launchers, "Other launchers", "Lutris, Faugus, Steam shortcuts, the app menu and gamefix"),
         (Filter::Drives, "Only on your drives", "Games only Lobby starts: found in folders and Windows setups, or taken over from other launchers"),
         (Filter::Downloads, "Downloads", "Downloaded but not installed yet"),

@@ -289,7 +289,8 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
     }
     let Some(game) = scan::scan(dir) else { return vec![Found::Nothing] };
     // GOG's own idea of what starts the game, over a guess.
-    let gog = gamefix::gog::read(&game.root).map(|info| info.program);
+    let info = gamefix::gog::read(&game.root);
+    let gog = info.as_ref().map(|i| i.program.clone());
     // In a dumping ground, only what shows it's a game: an engine gamefix knows, GOG's record,
     // or Steam's library beside its program.
     if strict && game.engine.is_none() && gog.is_none() && !steam_api_near(&game) {
@@ -299,6 +300,10 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
     let download = [game.cd_installer, game.linux_installer, game.packed, game.disc, game.archive].into_iter().flatten().next();
     let mut e = Entry::new(Source::Folder, title(&game.root, &game.name, program.as_deref()));
     e.folder = Some(game.root.clone());
+    // A GOG install (its .info names the game): the same game as the one owned on GOG.
+    if let Some(i) = info {
+        e.keys.push(crate::library::Key::Store("gog".into(), i.id));
+    }
     // Unpacked by lobby: tied to its download.
     if let Ok(source) = fs::read_to_string(dir.join(crate::install::SOURCE_NOTE)) {
         e.keys.push(crate::library::Key::Download(PathBuf::from(source.trim())));

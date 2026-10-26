@@ -177,7 +177,9 @@ impl Game {
     /// A game Lobby took over counts too: the launcher it came from may still list it, but
     /// doesn't start it.
     pub fn unknown_to_launchers(&self) -> bool {
-        self.entries.iter().any(|e| e.source == Source::Lobby) || self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch | Source::Artwork | Source::Gamefix) || (e.source == Source::AppMenu && e.made_by_gamefix()))
+        // Owning it on a store isn't a launcher knowing it: a GOG install found on a drive is
+        // still only Lobby's to start and uninstall.
+        self.entries.iter().any(|e| e.source == Source::Lobby) || self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch | Source::Artwork | Source::Gamefix) || e.kind == Kind::Owned || (e.source == Source::AppMenu && e.made_by_gamefix()))
     }
 
     /// Entries for the game itself first, then downloads of it.

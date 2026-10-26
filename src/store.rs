@@ -53,7 +53,11 @@ impl Library {
         let mut old: Vec<Option<Game>> = std::mem::take(&mut self.games).into_iter().map(Some).collect();
         let mut games = Vec::new();
         for mut game in found {
-            match old.iter_mut().find(|o| o.as_ref().is_some_and(|o| same(o, &game))).and_then(Option::take) {
+            // When two saved games are now one (a game found on a drive and the same game owned
+            // on GOG), the one played, set up or installed keeps its record.
+            let worth = |o: &Game| (o.played.is_some(), o.launch_options.is_some() || !o.protection.is_default() || o.chosen_cover.is_some(), o.kind == game.kind);
+            let best = old.iter().enumerate().filter_map(|(i, o)| o.as_ref().filter(|o| same(o, &game)).map(|o| (i, worth(o)))).max_by_key(|&(i, w)| (w, std::cmp::Reverse(i))).map(|(i, _)| i);
+            match best.and_then(|i| old[i].take()) {
                 Some(o) => {
                     game.id = o.id;
                     game.added = o.added;
@@ -151,6 +155,24 @@ mod tests {
         assert_eq!((v.id.as_str(), v.played, v.gone), ("valheim", Some(5), false));
         assert_eq!(v.cover(), Some("/covers/valheim.png"));
         assert!(lib.games.iter().any(|g| g.name == "Brotato" && g.gone));
+    }
+
+    #[test]
+    fn merged_games_keep_the_played_ones_record() {
+        // Owned on GOG (listed first) and found on a drive, saved apart; now one game.
+        let mut owned = game("Alien Breed 2", Key::Store("gog".into(), "1".into()));
+        owned.kind = Kind::Owned;
+        owned.id = "alien-breed-2".into();
+        let mut found = game("Alien Breed 2", Key::Download("/g/ab2".into()));
+        found.id = "alien-breed-2-2".into();
+        found.played = Some(7);
+        let mut lib = Library { games: vec![owned.clone(), found.clone()], ..Default::default() };
+        let mut both = found.clone();
+        both.entries.extend(owned.entries);
+        both.played = None;
+        lib.update(vec![both]);
+        assert_eq!(lib.games.len(), 1);
+        assert_eq!((lib.games[0].id.as_str(), lib.games[0].played), ("alien-breed-2-2", Some(7)));
     }
 
     #[test]
