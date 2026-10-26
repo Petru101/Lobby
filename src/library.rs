@@ -15,6 +15,8 @@ pub enum Source {
     Gog,
     Amazon,
     Heroic,
+    /// A game Lobby took over from Lutris, Faugus or a Steam shortcut (`taken`): its own now.
+    Lobby,
     Lutris,
     Faugus,
     /// The itch.io page a game was downloaded from (not a launcher: names and covers).
@@ -38,6 +40,7 @@ impl Source {
             Source::Gog => "GOG",
             Source::Amazon => "Amazon",
             Source::Heroic => "Heroic",
+            Source::Lobby => "Lobby",
             Source::Lutris => "Lutris",
             Source::Faugus => "Faugus",
             Source::Itch => "itch.io",
@@ -171,8 +174,10 @@ impl Game {
     /// Only found by looking through folders: no launcher knows it.
     /// No launcher but lobby (and gamefix, built into it) knows the game: found in a folder or
     /// a Windows setup, and maybe set up by gamefix since.
+    /// A game Lobby took over counts too: the launcher it came from may still list it, but
+    /// doesn't start it.
     pub fn unknown_to_launchers(&self) -> bool {
-        self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch | Source::Artwork | Source::Gamefix) || (e.source == Source::AppMenu && e.made_by_gamefix()))
+        self.entries.iter().any(|e| e.source == Source::Lobby) || self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch | Source::Artwork | Source::Gamefix) || (e.source == Source::AppMenu && e.made_by_gamefix()))
     }
 
     /// Entries for the game itself first, then downloads of it.

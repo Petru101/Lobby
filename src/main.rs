@@ -16,6 +16,7 @@ mod sources;
 mod steam_move;
 mod search;
 mod store;
+mod taken;
 mod uninstall;
 mod windows_saves;
 mod stores;
@@ -242,6 +243,11 @@ fn scan() -> Result<Library, String> {
     let mut lib = Library::load().unwrap_or_default();
     lib.update(games);
     lib.save()?;
+    // Lutris's, Faugus's and Steam shortcuts' games become Lobby's own: looked at again so they
+    // show as such.
+    if !log::timed("scan: taking games over", || taken::take_over(&lib.games)).is_empty() {
+        return scan();
+    }
     log::timed("scan: app-menu entries' protection", || sandbox::sync_shortcuts(&lib.games));
     Ok(lib)
 }

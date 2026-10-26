@@ -131,7 +131,7 @@ impl Filter {
         (Filter::Steam, "Steam", "Installed with Steam"),
         (Filter::Stores, "Epic · GOG · Amazon", "Installed from Epic Games, GOG or Amazon (by Lobby, or by Heroic before)"),
         (Filter::Launchers, "Other launchers", "Lutris, Faugus, Steam shortcuts, the app menu and gamefix"),
-        (Filter::Drives, "Only on your drives", "Games no launcher knows about: found in folders and Windows setups"),
+        (Filter::Drives, "Only on your drives", "Games only Lobby starts: found in folders and Windows setups, or taken over from other launchers"),
         (Filter::Downloads, "Downloads", "Downloaded but not installed yet"),
         (Filter::Owned, "Not installed", "Games you own on Epic or GOG that aren't installed (sign in with Accounts)"),
     ];
@@ -519,7 +519,13 @@ impl Ui {
                     }
                     let games = u.lib.borrow().games.clone();
                     u.fill();
-                    // App-menu entries made or changed since start as Play does.
+                    // Lutris's, Faugus's and Steam shortcuts' games become Lobby's own (shown as
+                    // such after a rescan), and app-menu entries start games as Play does.
+                    let taking = games.clone();
+                    let taken = gio::spawn_blocking(move || crate::taken::take_over(&taking)).await.unwrap_or_default();
+                    if !taken.is_empty() {
+                        u.scan_again.set(true);
+                    }
                     gio::spawn_blocking(move || crate::log::timed("app-menu entries' protection", || crate::sandbox::sync_shortcuts(&games)));
                 }
                 Ok(Err(e)) => u.alert("Couldn't look for games", &e),
@@ -2332,6 +2338,9 @@ fn origin(g: &Game) -> String {
         let store = crate::install::owned_in(g).map_or("A store", |(s, _)| s.name());
         return format!("{store} · not installed");
     }
+    if g.entries.iter().any(|e| e.source == Source::Lobby) {
+        return "Lobby".into();
+    }
     if g.unknown_to_launchers() {
         return if g.entries.iter().any(|e| e.source == Source::Itch) { "itch.io · on your drive".into() } else { "On your drive".into() };
     }
@@ -2343,6 +2352,7 @@ fn origin(g: &Game) -> String {
         Source::Gog => "GOG",
         Source::Amazon => "Amazon",
         Source::Heroic => "Heroic",
+        Source::Lobby => "Lobby",
         Source::Lutris => "Lutris",
         Source::Faugus => "Faugus",
         Source::Itch => "itch.io",

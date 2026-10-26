@@ -58,6 +58,7 @@ pub fn scan(home: &Home) -> Found {
     entries.extend(crate::log::timed("scan: Faugus", || faugus::games(home)));
     entries.extend(crate::log::timed("scan: gamefix records", || gamefix::records(home)));
     entries.extend(crate::log::timed("scan: app menu", || menu::entries(home)));
+    entries.extend(crate::log::timed("scan: games Lobby took over", crate::taken::entries));
 
     let roots = folders::roots(home);
     let games = crate::places::Places::load().games;

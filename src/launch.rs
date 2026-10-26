@@ -61,29 +61,20 @@ pub fn plan(game: &Game) -> Plan {
     if let Some((runner, app)) = keys().find_map(|k| if let Key::Heroic(r, a) = k { Some((r, a)) } else { None }) {
         return run("Heroic", vec!["xdg-open".into(), format!("heroic://launch?appName={app}&runner={runner}")], None);
     }
+    // A game Lobby took over from Lutris, Faugus or a Steam shortcut: as Lobby recorded it.
+    if let Some(t) = crate::taken::find(game) {
+        return own("Lobby", t.command, t.cwd);
+    }
     // Lutris's, Faugus's and Steam's shortcuts' games are started by Lobby itself, as they set
     // them up (so they can be protected, and those launchers can go); the launcher only when
     // its settings can't be read.
+    if let Some((_, from, command, cwd)) = launcher_command(game) {
+        return own(&format!("Lobby, as {from} set it up"), command, cwd);
+    }
     if let Some(id) = keys().find_map(|k| if let Key::Lutris(id) = k { Some(*id) } else { None }) {
-        if let Some(p) = lutris_plan(id) {
-            return p;
-        }
         return run("Lutris", vec!["lutris".into(), format!("lutris:rungameid/{id}")], None);
     }
-    // Unreal's launcher (Starship Troopers') only checks for Microsoft's VC++ runtime, which a
-    // Proton update can put back to Wine's older one, then starts the game's program: started
-    // directly, as the launcher would, it runs on Wine's. Only when Faugus adds nothing of its own.
-    let faugus_unreal = game.entries.iter().filter(|e| e.source == Source::Faugus && e.keys.iter().any(|k| matches!(k, Key::Faugus(id) if crate::sources::faugus_plain_settings(id)))).find_map(|e| {
-        let (target, args) = gamefix::binary::unreal_bootstrap(e.program.as_ref()?)?;
-        Some(umu_plan(&target, e.prefix.as_ref()?, &args, "the game's own program in Faugus's Wine prefix, past Unreal's launcher"))
-    });
-    if let Some(p) = faugus_unreal {
-        return p;
-    }
     if let Some(id) = keys().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }) {
-        if let Some(p) = faugus_plan(&id) {
-            return p;
-        }
         let native = program_on_path("faugus-launcher");
         let command = match native {
             Some(p) => vec![p.display().to_string(), "--game".into(), id],
@@ -92,9 +83,6 @@ pub fn plan(game: &Game) -> Plan {
         return run("Faugus", command, None);
     }
     if let Some(id) = keys().find_map(|k| if let Key::SteamShortcut(id) = k { Some(*id) } else { None }) {
-        if let Some(p) = shortcut_plan(id) {
-            return p;
-        }
         // Steam's run id for a non-Steam game: the shortcut's id in the top half.
         let run_id = ((id as u64) << 32) | 0x0200_0000;
         return run("Steam (non-Steam game)", vec!["steam".into(), format!("steam://rungameid/{run_id}")], None);
@@ -214,15 +202,40 @@ fn umu_command(program: &Path, prefix: &Path, env: &[(String, String)], args: &[
     command
 }
 
+/// How Lobby starts a game Lutris, Faugus or a Steam shortcut set up, read from their settings:
+/// the launcher's key for it, the launcher's name, the command and the folder it runs in.
+pub fn launcher_command(game: &Game) -> Option<(Key, &'static str, Vec<String>, Option<PathBuf>)> {
+    let keys = || game.entries.iter().flat_map(|e| e.keys.iter());
+    if let Some(id) = keys().find_map(|k| if let Key::Lutris(id) = k { Some(*id) } else { None }) {
+        return lutris_plan(id).map(|(c, cwd)| (Key::Lutris(id), "Lutris", c, cwd));
+    }
+    // Unreal's launcher (Starship Troopers') only checks for Microsoft's VC++ runtime, which a
+    // Proton update can put back to Wine's older one, then starts the game's program: started
+    // directly, as the launcher would, it runs on Wine's. Only when Faugus adds nothing of its own.
+    let faugus_unreal = game.entries.iter().filter(|e| e.source == Source::Faugus).find_map(|e| {
+        let id = e.keys.iter().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }).filter(|id| crate::sources::faugus_plain_settings(id))?;
+        let (target, args) = gamefix::binary::unreal_bootstrap(e.program.as_ref()?)?;
+        let args: Vec<String> = args.split_whitespace().map(String::from).collect();
+        Some((Key::Faugus(id), "Faugus", umu_command(&target, e.prefix.as_ref()?, &[], &args, None), target.parent().map(Path::to_path_buf)))
+    });
+    if faugus_unreal.is_some() {
+        return faugus_unreal;
+    }
+    if let Some(id) = keys().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }) {
+        return faugus_plan(&id).map(|(c, cwd)| (Key::Faugus(id), "Faugus", c, cwd));
+    }
+    let id = keys().find_map(|k| if let Key::SteamShortcut(id) = k { Some(*id) } else { None })?;
+    shortcut_plan(id).map(|(c, cwd)| (Key::SteamShortcut(id), "Steam", c, cwd))
+}
+
 /// A Lutris game as Lutris starts it: a Windows game with umu-run in its prefix (or Lutris's
 /// own wine build when it picked one that isn't a Proton and no Proton made the prefix), a
 /// Linux one as it is; Lutris's variables and arguments added. Other runners (DOSBox,
 /// ScummVM ...) stay Lutris's.
-fn lutris_plan(id: i64) -> Option<Plan> {
+fn lutris_plan(id: i64) -> Option<(Vec<String>, Option<PathBuf>)> {
     let l = crate::sources::lutris::launch(id)?;
     let program = l.program.clone().filter(|p| p.is_file())?;
     let args = shell_words(&l.args);
-    let how = "Lobby, as Lutris set it up";
     match l.runner.as_str() {
         "wine" => {
             // No prefix named: the one the program is in.
@@ -232,9 +245,9 @@ fn lutris_plan(id: i64) -> Option<Plan> {
                 Some(wine) => [vec!["env".to_string(), format!("WINEPREFIX={}", prefix.display())], l.env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![wine.join("bin/wine").display().to_string(), program.display().to_string()], args].concat(),
                 None => umu_command(&program, &prefix, &l.env, &args, l.wine.clone()),
             };
-            Some(own(how, command, l.cwd))
+            Some((command, l.cwd))
         }
-        "linux" => Some(own(how, [vec!["env".to_string()], l.env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![program.display().to_string()], args].concat(), l.cwd)),
+        "linux" => Some(([vec!["env".to_string()], l.env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![program.display().to_string()], args].concat(), l.cwd)),
         _ => None,
     }
 }
@@ -244,7 +257,7 @@ fn lutris_plan(id: i64) -> Option<Plan> {
 /// `NAME=value` word of the whole command as a variable (faugus/runner.py
 /// `extract_env_from_message`), wherever it was typed: Minecraft Dungeons 2's
 /// `WINEDLLOVERRIDES="winmm=n,b"` is in its game arguments, and RUNE's winmm.dll needs it.
-fn faugus_plan(id: &str) -> Option<Plan> {
+fn faugus_plan(id: &str) -> Option<(Vec<String>, Option<PathBuf>)> {
     let f = crate::sources::faugus::launch(id)?;
     let words: Vec<(bool, String)> = shell_words(&f.before).into_iter().map(|w| (false, w)).chain(shell_words(&f.after).into_iter().map(|w| (true, w))).collect();
     let variable = |w: &str| w.split_once('=').filter(|(k, _)| !k.is_empty() && !k.starts_with(|c: char| c.is_ascii_digit()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).map(|(k, v)| (k.to_string(), v.to_string()));
@@ -257,17 +270,16 @@ fn faugus_plan(id: &str) -> Option<Plan> {
     if f.mangohud {
         env.push(("MANGOHUD".into(), "1".into()));
     }
-    let how = "Lobby, as Faugus set it up";
     match f.runner.as_str() {
         // Faugus hands those to Steam.
         "Steam" => None,
-        "Linux-Native" => Some(own(how, [vec!["env".to_string()], env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![f.program.display().to_string()], args].concat(), f.program.parent().map(Path::to_path_buf))),
+        "Linux-Native" => Some(([vec!["env".to_string()], env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![f.program.display().to_string()], args].concat(), f.program.parent().map(Path::to_path_buf))),
         runner => {
             let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
             let chosen = Some(PathBuf::from(runner)).filter(|p| p.is_absolute()).or_else(|| {
                 [".local/share/Steam/compatibilitytools.d", ".var/app/io.github.Faugus.faugus-launcher/data/Steam/compatibilitytools.d", ".steam/root/compatibilitytools.d"].iter().map(|d| home.join(d).join(runner)).find(|p| p.join("proton").is_file())
             });
-            Some(own(how, umu_command(&f.program, &f.prefix, &env, &args, chosen), f.program.parent().map(Path::to_path_buf)))
+            Some((umu_command(&f.program, &f.prefix, &env, &args, chosen), f.program.parent().map(Path::to_path_buf)))
         }
     }
 }
@@ -276,23 +288,22 @@ fn faugus_plan(id: &str) -> Option<Plan> {
 /// the prefix Steam gave it (STEAM_COMPAT_DATA_PATH in its options, else compatdata/<id>) and
 /// the Proton forced for it, a Linux one (or a runner like flatpak) as it is; its launch
 /// options' variables and arguments added.
-fn shortcut_plan(id: u32) -> Option<Plan> {
+fn shortcut_plan(id: u32) -> Option<(Vec<String>, Option<PathBuf>)> {
     let s = crate::sources::steam::shortcut(id)?;
     let exe = PathBuf::from(&s.exe);
     if !exe.is_absolute() || exe.file_name().is_some_and(|n| n == "lutris") {
         return None;
     }
     let (env, args) = steam_options(&s.options);
-    let how = "Lobby, as its Steam shortcut sets it up";
     if windows_program(&exe) {
         let steam = gamefix::steam::Steam::find()?;
         let prefix = env.iter().find(|(k, _)| k == "STEAM_COMPAT_DATA_PATH").map(|(_, v)| PathBuf::from(v)).unwrap_or_else(|| steam.prefix(exe.parent().unwrap_or(&exe), id));
         let prefix = if prefix.join("pfx").is_dir() { prefix.join("pfx") } else { prefix };
         let forced = gamefix::steam::compat_tool(&steam.config(), id).ok().flatten().and_then(|t| steam.tool_dir(&t));
-        return Some(own(how, umu_command(&exe, &prefix, &env, &args, forced), s.start_dir));
+        return Some((umu_command(&exe, &prefix, &env, &args, forced), s.start_dir));
     }
     let command = [vec!["env".to_string()], env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![exe.display().to_string()], args].concat();
-    Some(own(how, command, s.start_dir))
+    Some((command, s.start_dir))
 }
 
 /// Steam-style launch options: variables before %command% and words after it (no %command%:
