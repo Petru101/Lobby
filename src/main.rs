@@ -41,6 +41,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby claim             the window, at the checkout for the free games not claimed
        lobby windows-saves [<game>] [--copy]  saves found in Windows user folders on the drives;
                                --copy brings a game's into its Wine prefix
+       lobby launch-options <game id> [<options>]  show or set what Play adds to its command
+                               (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
 
@@ -63,6 +65,8 @@ fn main() -> ExitCode {
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("search"), []) => search_drives(),
+        // The options as typed, -- words too (`rest` leaves those out).
+        (Some("launch-options"), [_, ..]) => launch_options(&args[1], &args[2..].join(" "), args.len() > 2),
         (Some("windows-saves"), words) => windows_saves(&words.join(" "), args.iter().any(|a| a == "--copy")),
         (Some("free"), []) if args.iter().any(|a| a == "--notify") => free_notify(),
         (Some("free"), []) if args.iter().any(|a| a == "--daily=off") => free::set_daily(false),
@@ -95,6 +99,27 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Shows a game's launch options, or sets them (empty clears).
+fn launch_options(query: &str, text: &str, set: bool) -> Result<(), String> {
+    let mut lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    if !set {
+        println!("{}: {}", game.name, game.launch_options.as_deref().unwrap_or("(none)"));
+        if let Some(why) = launch::options_unsupported(&launch::plan(&game)) {
+            println!("  ({why})");
+        }
+        return Ok(());
+    }
+    let text = text.trim();
+    launch::parse_options(text)?;
+    if let Some(g) = lib.get_mut(&game.id) {
+        g.launch_options = (!text.is_empty()).then(|| text.to_string());
+    }
+    lib.save()?;
+    println!("{}: {}", game.name, if text.is_empty() { "launch options cleared" } else { text });
+    Ok(())
 }
 
 /// Saves found in Windows user folders: every game's (no game named), or one game's, brought
@@ -187,6 +212,7 @@ fn play(query: &str) -> Result<(), String> {
         }
     };
     let log = store::log_file(&game.id);
+    let command = launch::with_options(command, game.launch_options.as_deref())?;
     launch::start(&command, cwd.as_deref(), &log)?;
     println!("Starting {} with {how}. Its output goes to {}", game.name, log.display());
     if let Some(g) = lib.get_mut(&game.id) {
@@ -255,6 +281,14 @@ fn how(query: &str) -> Result<(), String> {
     for warning in drives::warnings(game, &drives::mounts()) {
         println!("\nWarning: {warning}");
     }
+    println!("Uninstall: {}", match uninstall::how(game) {
+        uninstall::How::Store(store, _) => format!("{}'s files go, through lobby's {} tool", game.name, store.name()),
+        uninstall::How::Steam(id) => format!("Steam uninstalls it (app {id})"),
+        uninstall::How::SteamCopy(f, _) => format!("deletes the copy in {}", f.display()),
+        uninstall::How::Folder(f) => format!("deletes {} (lobby or gamefix put it there)", f.display()),
+        uninstall::How::Found(f) => format!("deletes {} (found on your drive)", f.display()),
+        uninstall::How::Not(why) => why,
+    });
     Ok(())
 }
 

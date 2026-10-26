@@ -21,6 +21,8 @@ pub enum How {
     SteamCopy(PathBuf, u32),
     /// A folder lobby unpacked a download into, or gamefix installed a game into.
     Folder(PathBuf),
+    /// A game lobby found on a drive: its own folder (checked by `found_folder`).
+    Found(PathBuf),
     /// Not lobby's to uninstall: why.
     Not(String),
 }
@@ -48,11 +50,71 @@ pub fn how(game: &Game) -> How {
     if let Some(p) = game.entries.iter().filter_map(|e| e.prefix.clone()).chain(prefix(game)).find(|p| p.join("gamefix-install.txt").is_file()) {
         return How::Folder(p);
     }
+    // Found on a drive (set up by gamefix or not): its own folder, when that's plainly the
+    // one game's.
+    if game.unknown_to_launchers() {
+        if let Some(folder) = game.folder().map(Path::to_path_buf) {
+            return match found_folder(game, &folder) {
+                Ok(()) => How::Found(folder),
+                Err(why) => How::Not(why),
+            };
+        }
+        // A game in one file at the top of a folder lobby looks in (Downloads/MageBattle.exe).
+        if let Some(file) = game.program().filter(|p| p.is_file()).map(Path::to_path_buf) {
+            let in_root = crate::sources::Home::find().is_some_and(|home| crate::sources::folders::roots(&home).iter().any(|r| file.parent().is_some_and(|up| real(up) == real(r))));
+            if in_root {
+                return How::Found(file);
+            }
+        }
+    }
     let launcher = game.entries.iter().find(|e| matches!(e.source, crate::library::Source::Heroic | crate::library::Source::Lutris | crate::library::Source::Faugus)).map(|e| e.source.label());
     How::Not(match launcher {
         Some(l) => format!("{l} installed it: uninstall it there."),
-        None => "Lobby found it on your drive but didn't install it, so it doesn't delete it: delete its folder yourself if you're sure.".into(),
+        None if game.entries.iter().any(|e| e.source == crate::library::Source::AppMenu) => "An app-menu entry Lobby didn't make starts it, so Lobby can't tell what's the game's: delete its files and that entry yourself.".into(),
+        None => "Lobby can't tell which files are the game's: delete them yourself.".into(),
     })
+}
+
+/// Whether a found game's folder is safe to delete as that game's: its program is in it, and
+/// it isn't a drive's top, the home folder or one above it, a folder lobby looks in (Downloads,
+/// Games ...), nor one holding another game of the library.
+fn found_folder(game: &Game, folder: &Path) -> Result<(), String> {
+    let refuse = |what: &str| Err(format!("Lobby found it on your drive in {}, {what}, so Uninstall can't tell what's the game's: delete its files yourself.", folder.display()));
+    let dir = real(folder);
+    if !dir.is_dir() {
+        return refuse("which isn't there");
+    }
+    if game.program().is_none_or(|p| !real(p).starts_with(&dir)) {
+        return refuse("which doesn't hold its program");
+    }
+    let dev = |p: &Path| fs::metadata(p).map(|m| std::os::unix::fs::MetadataExt::dev(&m)).ok();
+    if dir.parent().is_none_or(|up| dev(up) != dev(&dir)) {
+        return refuse("the top of a drive");
+    }
+    if let Some(home) = crate::sources::Home::find() {
+        if real(&home.home).starts_with(&dir) {
+            return refuse("which holds your home folder");
+        }
+        if crate::sources::folders::roots(&home).iter().any(|r| real(r) == dir) {
+            return refuse("one of the folders Lobby looks in for games");
+        }
+    }
+    // A folder of downloads or games (lobby took Downloads/Downloaded Games for one game: a
+    // loose .exe at its top).
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if crate::places::games_or_downloads(&name) {
+        return refuse("which is named like a folder of downloads or games");
+    }
+    let packed = |n: &str| [".zip", ".rar", ".7z", ".iso", ".tar", ".gz", ".xz"].iter().any(|x| n.ends_with(x)) || ((n.contains("setup") || n.contains("install")) && n.ends_with(".exe"));
+    let archives = fs::read_dir(&dir).into_iter().flatten().flatten().filter(|e| packed(&e.file_name().to_string_lossy().to_lowercase())).count();
+    if archives >= 2 {
+        return refuse(&format!("which holds {archives} archives or installers"));
+    }
+    let others = crate::store::Library::load().map(|l| l.games).unwrap_or_default();
+    if let Some(other) = others.iter().filter(|g| g.id != game.id && !g.gone).find(|g| g.entries.iter().flat_map(|e| [e.folder.as_deref(), e.program.as_deref()]).flatten().any(|p| real(p).starts_with(&dir))) {
+        return refuse(&format!("which holds {} too", other.name));
+    }
+    Ok(())
 }
 
 /// For a gamefix install (its note in `folder`) whose program is outside it, on another
@@ -169,7 +231,7 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
     let prefix = crate::log::timed("uninstall: its prefix", || prefix(game));
     let folder = match &how {
         How::Store(store, id) => store.installed().into_iter().find(|g| &g.id == id).map(|g| g.folder),
-        How::Folder(f) | How::SteamCopy(f, _) => Some(f.clone()),
+        How::Folder(f) | How::SteamCopy(f, _) | How::Found(f) => Some(f.clone()),
         How::Steam(id) => {
             crate::launch::start(&["steam".into(), format!("steam://uninstall/{id}")], None, &crate::store::log_file(&game.id))?;
             return Ok(vec!["Steam asks you to confirm, then uninstalls it.".into()]);
@@ -229,6 +291,10 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
                 None => {}
             }
             crate::log::timed("uninstall: deleting the folder", || fs::remove_dir_all(f)).map_err(|e| format!("Couldn't delete {}: {e}", f.display()))?;
+            done.push(format!("✓ Deleted {}.", f.display()));
+        }
+        How::Found(f) => {
+            crate::log::timed("uninstall: deleting the folder", || if f.is_dir() { fs::remove_dir_all(f) } else { fs::remove_file(f) }).map_err(|e| format!("Couldn't delete {}: {e}", f.display()))?;
             done.push(format!("✓ Deleted {}.", f.display()));
         }
         How::SteamCopy(f, id) => {

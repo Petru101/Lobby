@@ -320,6 +320,75 @@ pub fn start(command: &[String], cwd: Option<&Path>, log: &Path) -> Result<(), S
     cmd.spawn().map(|_| ()).map_err(|e| format!("{program}: {e}"))
 }
 
+/// A game's launch options, as typed in Steam's style: words added after the game's program, or
+/// with `%command%`, variables before it and words after (`PROTON_LOG=1 %command% -dx11`).
+pub struct LaunchOptions {
+    pub vars: Vec<(String, String)>,
+    pub args: Vec<String>,
+}
+
+pub fn parse_options(text: &str) -> Result<LaunchOptions, String> {
+    let words = exec_words(text);
+    match words.iter().position(|w| w == "%command%") {
+        Some(i) => {
+            let vars = words[..i]
+                .iter()
+                .map(|w| w.split_once('=').filter(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).map(|(k, v)| (k.to_string(), v.to_string())).ok_or_else(|| format!("Before %command% go only variables (NAME=value): \"{w}\" isn't one.")))
+                .collect::<Result<_, _>>()?;
+            Ok(LaunchOptions { vars, args: words[i + 1..].to_vec() })
+        }
+        None => Ok(LaunchOptions { vars: Vec::new(), args: words }),
+    }
+}
+
+/// The command a plan runs, with the game's launch options added. An Err says why they can't be
+/// (another launcher starts the game: they're set there). `lobby run` adds them itself.
+pub fn with_options(command: Vec<String>, options: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(text) = options.filter(|o| !o.trim().is_empty()) else { return Ok(command) };
+    let o = parse_options(text)?;
+    let first = command.first().map(String::as_str).unwrap_or_default();
+    if command.get(1).is_some_and(|w| w == "run") && first.ends_with("lobby") {
+        return Ok(command);
+    }
+    if first == "steam" {
+        let id = command.get(1).and_then(|u| u.strip_prefix("steam://rungameid/")).and_then(|i| i.parse::<u64>().ok());
+        return match id {
+            Some(id) if id <= u32::MAX as u64 && o.vars.is_empty() => Ok([vec!["steam".into(), "-applaunch".into(), id.to_string()], o.args].concat()),
+            Some(id) if id <= u32::MAX as u64 => Err("Steam doesn't take variables from Lobby: put them in the game's launch options in Steam (right-click it → Properties).".into()),
+            _ => Err("Steam starts this non-Steam game: set its launch options in Steam (right-click it → Properties).".into()),
+        };
+    }
+    let launcher = match first {
+        "xdg-open" => Some("Heroic"),
+        "lutris" => Some("Lutris"),
+        "flatpak" => Some("Faugus"),
+        f if f.ends_with("faugus-launcher") => Some("Faugus"),
+        _ => None,
+    };
+    if let Some(l) = launcher {
+        return Err(format!("{l} starts it: set its launch options in {l}."));
+    }
+    let mut c = command;
+    if c.first().is_none_or(|w| w != "env") {
+        c.insert(0, "env".into());
+    }
+    for (i, (k, v)) in o.vars.iter().enumerate() {
+        c.insert(1 + i, format!("{k}={v}"));
+    }
+    c.extend(o.args);
+    Ok(c)
+}
+
+/// Why launch options can't apply to how the plan starts the game, if they can't.
+pub fn options_unsupported(plan: &Plan) -> Option<String> {
+    match plan {
+        Plan::Run { command, .. } => with_options(command.clone(), Some("-x")).err(),
+        Plan::BattleNet { .. } => Some("Battle.net starts it: set its launch options in Battle.net (the game's settings, Additional command line arguments).".into()),
+        Plan::SetUp(_) => None,
+        Plan::Cannot(why) => Some(why.clone()),
+    }
+}
+
 /// Something gamefix needs installed before it can set a game up.
 pub enum Need {
     /// A Java runtime of this version: gamefix downloads Eclipse Temurin's.
@@ -382,7 +451,7 @@ mod tests {
     use crate::library::Entry;
 
     fn game(entries: Vec<Entry>) -> Game {
-        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None }
+        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None }
     }
 
     fn with_key(source: Source, key: Key) -> Entry {
@@ -421,6 +490,20 @@ mod tests {
         installed.folder = Some("/games/G".into());
         e.folder = Some("/downloads/G".into());
         assert_eq!(plan(&game(vec![e, installed])), Plan::SetUp("/games/G".into()));
+    }
+
+    #[test]
+    fn launch_options() {
+        let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let umu = cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/game.exe"]);
+        assert_eq!(with_options(umu.clone(), Some("-dx11 -windowed")).unwrap(), cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/game.exe", "-dx11", "-windowed"]));
+        assert_eq!(with_options(umu.clone(), Some("PROTON_LOG=1 %command% -dx11")).unwrap(), cmd(&["env", "PROTON_LOG=1", "WINEPREFIX=/p", "umu-run", "/g/game.exe", "-dx11"]));
+        assert_eq!(with_options(cmd(&["/g/game.x86_64"]), Some("-w \"two words\"")).unwrap(), cmd(&["env", "/g/game.x86_64", "-w", "two words"]));
+        assert_eq!(with_options(umu.clone(), Some("  ")).unwrap(), umu);
+        assert!(with_options(umu, Some("-dx11 %command%")).is_err());
+        assert_eq!(with_options(cmd(&["steam", "steam://rungameid/49520"]), Some("-novid")).unwrap(), cmd(&["steam", "-applaunch", "49520", "-novid"]));
+        assert!(with_options(cmd(&["lutris", "lutris:rungameid/2"]), Some("-x")).is_err());
+        assert_eq!(with_options(cmd(&["/usr/bin/lobby", "run", "g"]), Some("-x")).unwrap(), cmd(&["/usr/bin/lobby", "run", "g"]));
     }
 
     #[test]

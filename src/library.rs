@@ -151,6 +151,10 @@ pub struct Game {
     /// The cover the user picked (a file or an address), over any found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_cover: Option<String>,
+    /// What the user added to the game's command (Steam's style: words after the program, or
+    /// `VAR=value %command% words`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_options: Option<String>,
 }
 
 impl Game {
@@ -379,7 +383,7 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             };
             let paths: Vec<&PathBuf> = entries.iter().flat_map(|e| [e.folder.as_ref(), e.program.as_ref()]).flatten().collect();
             let missing = !paths.is_empty() && !paths.iter().any(|p| p.exists());
-            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None }
+            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None }
         })
         .collect();
     games.sort_by_key(|g| g.name.to_lowercase());

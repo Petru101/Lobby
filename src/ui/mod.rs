@@ -641,6 +641,7 @@ impl Ui {
             how => {
                 row.set_subtitle(match how {
                     How::Steam(_) => "Steam uninstalls it (it asks first).",
+                    How::Found(_) => "Lobby found it on your drive: deletes its folder, its app-menu entry, and if you like its Windows setup.",
                     _ => "Deletes its files, its app-menu entry, and if you like its Wine prefix.",
                 });
                 let button = gtk::Button::builder().label("Uninstall…").valign(gtk::Align::Center).build();
@@ -1595,7 +1596,7 @@ impl Ui {
             self.refilter();
         }
         match launch::plan(&game) {
-            Plan::Run { command, cwd, .. } => match launch::start(&command, cwd.as_deref(), &store::log_file(&game.id)) {
+            Plan::Run { command, cwd, .. } => match launch::with_options(command, game.launch_options.as_deref()).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
                 Ok(()) => {
                     self.toast(&format!("Starting {}…", game.name));
                     self.played(&game.id, None);
@@ -1670,7 +1671,7 @@ impl Ui {
                     let result = gio::spawn_blocking(move || launch::set_up(&folder, None)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
                     match result {
                         Ok((lines, Some(entry))) => {
-                            let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id)));
+                            let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::with_options(command, game.launch_options.as_deref()).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))));
                             let mut e = Entry::new(Source::AppMenu, game.name.clone());
                             e.keys.push(Key::Desktop(entry));
                             u.played(&game.id, Some(e));
@@ -1800,6 +1801,9 @@ impl Ui {
             content.append(&row);
         }
         content.append(&info);
+        if game.kind == Kind::Game {
+            content.append(&self.options_group(&game, &plan));
+        }
         let dlc = adw::PreferencesGroup::builder().title("DLC").build();
         content.append(&dlc);
         let saves = adw::PreferencesGroup::builder().title("Saves from Windows").visible(false).build();
@@ -1844,6 +1848,32 @@ impl Ui {
         }
         dialog.present(Some(&self.window));
         Some(dialog)
+    }
+
+    /// Launch options on a game's page: what's added to its command when Lobby starts it.
+    fn options_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
+        let unsupported = launch::options_unsupported(plan);
+        let help = unsupported.clone().unwrap_or_else(|| "Added after the game's program, like -dx11 -windowed. Variables go before %command%: PROTON_LOG=1 %command% -dx11. Used when Lobby starts the game (Play), not by its app-menu shortcut.".into());
+        let group = adw::PreferencesGroup::builder().title("Launch options").description(&help).build();
+        let row = adw::EntryRow::builder().title("Options").text(game.launch_options.as_deref().unwrap_or_default()).show_apply_button(true).sensitive(unsupported.is_none()).build();
+        let (u, id) = (self.clone(), game.id.clone());
+        row.connect_apply(move |row| {
+            let text = row.text().trim().to_string();
+            if let Err(e) = launch::parse_options(&text) {
+                u.alert("Those launch options can't be used", &e);
+                return;
+            }
+            let mut lib = u.lib.borrow_mut();
+            if let Some(g) = lib.get_mut(&id) {
+                g.launch_options = (!text.is_empty()).then_some(text.clone());
+            }
+            match lib.save() {
+                Ok(()) => u.toast(if text.is_empty() { "Launch options cleared." } else { "Launch options saved: Play uses them." }),
+                Err(e) => u.toast(&format!("Couldn't save the library: {e}")),
+            }
+        });
+        group.add(&row);
+        group
     }
 
     /// Saves the user's cover for a game (None: back to the one found), and shows it.

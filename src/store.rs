@@ -59,6 +59,7 @@ impl Library {
                     game.added = o.added;
                     game.played = o.played;
                     game.chosen_cover = o.chosen_cover;
+                    game.launch_options = o.launch_options;
                 }
                 None => game.added = now,
             }
@@ -132,7 +133,7 @@ mod tests {
     fn game(name: &str, key: Key) -> Game {
         let mut e = Entry::new(Source::Steam, name);
         e.keys.push(key);
-        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None }
+        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None }
     }
 
     #[test]
