@@ -202,7 +202,7 @@ mod tests {
 }
 
 /// gamefix's record of its setup for the game: the one that made its app-menu entry.
-fn gamefix_record(game: &Game) -> Option<PathBuf> {
+pub fn gamefix_record(game: &Game) -> Option<PathBuf> {
     let entries: Vec<&PathBuf> = game.entries.iter().flat_map(|e| e.keys.iter()).filter_map(|k| if let Key::Desktop(p) = k { Some(p) } else { None }).collect();
     let dir = PathBuf::from(std::env::var_os("HOME")?).join(".local/share/gamefix/games");
     fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|record| {

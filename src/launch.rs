@@ -541,6 +541,9 @@ mod tests {
         let (exec, path) = desktop_exec(text).unwrap();
         assert_eq!(exec, ["env", "WINEPREFIX=/p", "PROTONPATH=/s/Proton - Experimental", "/usr/bin/umu-run", "/g/A \\$B.exe"]);
         assert_eq!(path, Some(PathBuf::from("/g")));
+        // Carrying lobby's sandbox (gamefix puts it first): the game's own command.
+        let wrapped = "[Desktop Entry]\nExec=/home/p/.local/bin/lobby sandbox g -- env WINEPREFIX=/p /usr/bin/umu-run /g/x.exe\n";
+        assert_eq!(desktop_exec(wrapped).unwrap().0, ["env", "WINEPREFIX=/p", "/usr/bin/umu-run", "/g/x.exe"]);
         // Both ways of quoting a prefix with a space (gamefix's, and Wine's own entries').
         for exec in ["env \"WINEPREFIX=/g/My Game 2\" umu-run x.exe", "env WINEPREFIX=\"/g/My Game 2\" wine x.exe"] {
             let (words, _) = desktop_exec(&format!("[Desktop Entry]\nExec={exec}\n")).unwrap();

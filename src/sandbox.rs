@@ -17,6 +17,8 @@
 //! (they take lock files there, and a game must not change what every game runs).
 //!
 //! A game runs as `lobby sandbox <id> -- <command>`, which looks the level up at each start.
+//! gamefix puts the same first in the game's app-menu entry (`sync_shortcut`), so the
+//! shortcut starts it protected too.
 
 use crate::library::{Game, Key, Kind, Source};
 use serde::{Deserialize, Serialize};
@@ -120,6 +122,40 @@ pub fn wrap(game: &Game, command: Vec<String>) -> Vec<String> {
         return command;
     }
     [vec![lobby_exe(), "sandbox".into(), game.id.clone(), "--".into()], command].concat()
+}
+
+/// The installed lobby (run/install.sh's), which app-menu entries name: not a build being tried.
+fn installed_lobby() -> String {
+    let installed = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/bin/lobby");
+    if installed.is_file() { installed.display().to_string() } else { lobby_exe() }
+}
+
+/// Makes gamefix's app-menu entry for the game start it as Play does: `lobby sandbox <id> --`
+/// first in its Exec, or nothing when it's Off (or the entry runs a Flatpak, which has a
+/// sandbox of its own). Only when that changes (gamefix rebuilds the menu each time). Whether
+/// it did.
+pub fn sync_shortcut(game: &Game) -> Result<bool, String> {
+    let Some(record) = crate::uninstall::gamefix_record(game) else { return Ok(false) };
+    let text = fs::read_to_string(&record).unwrap_or_default();
+    let current: Option<Vec<String>> = text.lines().find_map(|l| l.strip_prefix("wrapper\t")).map(|w| w.split('\t').map(String::from).collect());
+    let entry = text.lines().filter_map(|l| l.strip_prefix("created\t")).filter(|p| p.ends_with(".desktop")).find_map(|p| crate::launch::desktop_exec(&fs::read_to_string(p).ok()?));
+    let Some((words, _)) = entry else { return Ok(false) };
+    let wanted = (level(game) != Level::Off && words.first().is_some_and(|w| w != "flatpak")).then(|| vec![installed_lobby(), "sandbox".into(), game.id.clone(), "--".into()]);
+    if current == wanted {
+        return Ok(false);
+    }
+    gamefix::setup::set_wrapper(&record, wanted.as_deref()).map(|()| true)
+}
+
+/// Every game's shortcut as its protection says (after a scan: games set up since, ids).
+pub fn sync_shortcuts(games: &[Game]) {
+    for g in games.iter().filter(|g| g.kind == Kind::Game && !g.gone) {
+        match sync_shortcut(g) {
+            Ok(true) => crate::log::line(&format!("protection: {}'s app-menu entry now {}", g.name, if level(g) == Level::Off { "starts it unprotected" } else { "starts it in its sandbox" })),
+            Ok(false) => {}
+            Err(e) => crate::log::line(&format!("protection: {}'s app-menu entry: {e}", g.name)),
+        }
+    }
 }
 
 /// A command ready to run in the game's sandbox; the D-Bus proxy lives as long as it.

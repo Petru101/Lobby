@@ -161,6 +161,9 @@ fn protection(query: &str, level: Option<&str>, args: &[String]) -> Result<(), S
     }
     let game = lib.find(&id)?;
     println!("{}: {}", game.name, sandbox::summary(game));
+    if changing && sandbox::sync_shortcut(game)? {
+        println!("  its app-menu entry starts it the same way now");
+    }
     for f in &game.protection.folders {
         println!("  shared with it: {}", f.display());
     }
@@ -172,14 +175,14 @@ fn protection(query: &str, level: Option<&str>, args: &[String]) -> Result<(), S
 
 /// Runs a game's command in its sandbox and waits for it; exits as it did.
 fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
-    let started = Library::load().ok_or("No library yet: run lobby scan.".to_string()).and_then(|lib| {
-        let game = lib.games.iter().find(|g| g.id == id).ok_or(format!("No game with the id \"{id}\" in the library."))?.clone();
-        let mut s = sandbox::command(&game, &[], command, None)?;
-        let status = s.command.stdin(std::process::Stdio::null()).status().map_err(|e| format!("bwrap: {e}"))?;
-        Ok(status.code().unwrap_or(1))
+    // A shortcut naming a game the library lost (deleted, say) still starts it, at Standard.
+    let game = Library::load().unwrap_or_default().games.into_iter().find(|g| g.id == id).unwrap_or_else(|| {
+        eprintln!("lobby: no game \"{id}\" in the library: starting it with Standard protection.");
+        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default() }
     });
-    match started {
-        Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
+    let status = sandbox::command(&game, &[], command, None).and_then(|mut s| s.command.stdin(std::process::Stdio::null()).status().map_err(|e| format!("bwrap: {e}")));
+    match status {
+        Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
         Err(e) => {
             eprintln!("lobby: {e}");
             ExitCode::FAILURE
@@ -237,6 +240,7 @@ fn scan() -> Result<Library, String> {
     let mut lib = Library::load().unwrap_or_default();
     lib.update(games);
     lib.save()?;
+    log::timed("scan: app-menu entries' protection", || sandbox::sync_shortcuts(&lib.games));
     Ok(lib)
 }
 
@@ -282,6 +286,10 @@ fn play(query: &str) -> Result<(), String> {
         if sandbox::settle(g) {
             lib.save()?;
         }
+    }
+    // Its app-menu shortcut too (one gamefix just made, or one from before protection).
+    if let Err(e) = sandbox::sync_shortcut(lib.find(&game.id)?) {
+        eprintln!("lobby: its app-menu entry couldn't be protected: {e}");
     }
     let log = store::log_file(&game.id);
     let command = launch::final_command(&game, command, protect)?;

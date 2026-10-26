@@ -519,8 +519,11 @@ impl Ui {
                     if let Err(e) = lib.save() {
                         u.toast(&format!("Couldn't save the library: {e}"));
                     }
+                    let games = lib.games.clone();
                     drop(lib);
                     u.fill();
+                    // App-menu entries made or changed since start as Play does.
+                    gio::spawn_blocking(move || crate::log::timed("app-menu entries' protection", || crate::sandbox::sync_shortcuts(&games)));
                 }
                 Ok(Err(e)) => u.alert("Couldn't look for games", &e),
                 Err(_) => u.alert("Couldn't look for games", "The scan stopped with an error."),
@@ -1603,6 +1606,7 @@ impl Ui {
                 let _ = lib.save();
             }
         }
+        self.sync_shortcut(id);
         match launch::plan(&game) {
             Plan::Run { command, cwd, protect, .. } => match launch::final_command(&game, command, protect).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
                 Ok(()) => {
@@ -1683,6 +1687,7 @@ impl Ui {
                             let mut e = Entry::new(Source::AppMenu, game.name.clone());
                             e.keys.push(Key::Desktop(entry));
                             u.played(&game.id, Some(e));
+                            u.sync_shortcut(&game.id);
                             match started {
                                 Ok(()) => u.toast(&format!("Starting {}…", game.name)),
                                 Err(e) => u.alert(&format!("{} didn't start", game.name), &e),
@@ -2000,6 +2005,19 @@ impl Ui {
         };
         if let Err(e) = saved {
             self.toast(&format!("Couldn't save the library: {e}"));
+        }
+        self.sync_shortcut(id);
+    }
+
+    /// The game's app-menu shortcut made to start it as Play does (in the background: gamefix
+    /// rebuilds the menu).
+    fn sync_shortcut(&self, id: &str) {
+        if let Some(game) = self.game(id) {
+            gio::spawn_blocking(move || {
+                if let Err(e) = crate::sandbox::sync_shortcut(&game) {
+                    crate::log::line(&format!("protection: {}'s app-menu entry: {e}", game.name));
+                }
+            });
         }
     }
 
