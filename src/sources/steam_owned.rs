@@ -26,8 +26,8 @@ pub fn games(home: &Home) -> Vec<Entry> {
         if packages.is_empty() {
             continue;
         }
-        let apps: BTreeSet<u32> = package_apps(&fs::read(root.join("appcache/packageinfo.vdf")).unwrap_or_default(), &packages).into_iter().collect();
-        for (appid, name) in app_games(&fs::read(root.join("appcache/appinfo.vdf")).unwrap_or_default(), &apps) {
+        let apps: BTreeSet<u32> = package_apps(&fs::read(root.join("packageinfo.vdf")).unwrap_or_default(), &packages).into_iter().collect();
+        for (appid, name) in app_games(&fs::read(root.join("appinfo.vdf")).unwrap_or_default(), &apps) {
             if entries.iter().any(|e| e.keys.contains(&Key::SteamApp(appid))) {
                 continue;
             }
@@ -440,5 +440,32 @@ mod tests {
             a.extend(format!("{t}\0").bytes());
         }
         assert_eq!(app_games(&a, &BTreeSet::from([10, 80])), vec![(10, "Counter-Strike".to_string())]);
+
+        // A Steam update that changes the files must never crash a scan: cut short anywhere,
+        // any byte changed, or the license cache scrambled another way, they read as less or
+        // nothing.
+        let all = BTreeSet::from([7, 8, 10, 80]);
+        for file in [&p, &a] {
+            for cut in 0..file.len() {
+                package_apps(&file[..cut], &all);
+                app_games(&file[..cut], &all);
+            }
+            for at in 0..file.len() {
+                for x in [0x01, 0x80, 0xff] {
+                    let mut changed = file.clone();
+                    changed[at] ^= x;
+                    package_apps(&changed, &all);
+                    app_games(&changed, &all);
+                }
+            }
+        }
+        let mut noise = UniformRandomStream::new(1);
+        for len in [0, 1, 7, 100, 5000] {
+            let bytes: Vec<u8> = (0..len).map(|_| noise.int(0, 255) as u8).collect();
+            decode_licenses(&bytes);
+            decode_licenses(&unscramble(&bytes, 42));
+            package_apps(&bytes, &all);
+            app_games(&bytes, &all);
+        }
     }
 }
