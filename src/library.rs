@@ -118,6 +118,11 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// An app-menu entry gamefix made (gamefix-<slug>.desktop).
+    pub fn made_by_gamefix(&self) -> bool {
+        self.keys.iter().any(|k| matches!(k, Key::Desktop(p) if p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("gamefix-"))))
+    }
+
     pub fn new(source: Source, name: impl Into<String>) -> Entry {
         Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), update: None, cover: None, icon: None, note: None, annotation: false }
     }
@@ -157,8 +162,10 @@ impl Game {
     }
 
     /// Only found by looking through folders: no launcher knows it.
+    /// No launcher but lobby (and gamefix, built into it) knows the game: found in a folder or
+    /// a Windows setup, and maybe set up by gamefix since.
     pub fn unknown_to_launchers(&self) -> bool {
-        self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch | Source::Artwork))
+        self.entries.iter().all(|e| matches!(e.source, Source::Folder | Source::Prefix | Source::Itch | Source::Artwork | Source::Gamefix) || (e.source == Source::AppMenu && e.made_by_gamefix()))
     }
 
     /// Entries for the game itself first, then downloads of it.

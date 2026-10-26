@@ -69,13 +69,10 @@ fn read(file: &Path) -> Option<Entry> {
     // Its working folder is the game's when the program is in it, or when no program could be
     // found (a runner's command naming a folder that was since deleted).
     e.folder = get("Path").filter(|p| !p.is_empty()).map(PathBuf::from).filter(|p| e.program.as_ref().is_none_or(|prog| prog.starts_with(p)));
-    // Wine's entries: `env WINEPREFIX="/path" wine C:\\...\\game.exe`.
-    if let Some(rest) = exec.split("WINEPREFIX=").nth(1) {
-        let pfx = match rest.strip_prefix('"') {
-            Some(quoted) => quoted.split('"').next(),
-            None => rest.split_whitespace().next(),
-        };
-        e.prefix = pfx.filter(|p| p.starts_with('/')).map(PathBuf::from);
-    }
+    // Wine's entries: `env WINEPREFIX="/path" wine C:\\...\\game.exe`, or with the whole
+    // `"WINEPREFIX=/a path"` quoted (gamefix's): the command's own words, as the desktop-entry
+    // spec splits them.
+    let words = crate::launch::desktop_exec(&text).map(|(w, _)| w).unwrap_or_default();
+    e.prefix = words.iter().find_map(|w| w.strip_prefix("WINEPREFIX=")).filter(|p| p.starts_with('/')).map(PathBuf::from);
     Some(e)
 }

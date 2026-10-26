@@ -241,7 +241,10 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
         let fallback = if disc::shortcuts(&pfx).is_empty() {
             let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             match disc::installed_program(&pfx, &name) {
-                disc::Installed::Program(exe, label) => {
+                // Only a program in the prefix's own C:. gamefix also looks for new programs on
+                // the prefix's other drive letters (right for its own install run), which in an
+                // old prefix with v: = /run/media found Borderlands 4 for dome-keeper's prefix.
+                disc::Installed::Program(exe, label) if fs::canonicalize(&exe).is_ok_and(|e| e.starts_with(fs::canonicalize(pfx.join("drive_c")).unwrap_or_default())) => {
                     let mut e = Entry::new(Source::Folder, label);
                     e.program = Some(exe);
                     e.prefix = Some(pfx.clone());
