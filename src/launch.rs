@@ -33,12 +33,15 @@ pub fn plan(game: &Game) -> Plan {
         return Plan::Cannot("It's downloaded, not installed yet. Install unpacks it into your games folder (or runs its installer) and sets it up.".into());
     }
     if game.kind == Kind::Owned {
+        if crate::install::steam_owned(game).is_some() {
+            return Plan::Cannot("You own it on Steam; it isn't installed. Install opens Steam's install window for it.".into());
+        }
         let store = game.entries.iter().find(|e| e.kind == Kind::Owned).map_or("a store", |e| e.source.label());
         return Plan::Cannot(format!("You own it on {store}; it isn't installed. Install downloads it into your games folder and sets it up."));
     }
     let keys = || game.entries.iter().flat_map(|e| e.keys.iter());
     // Steam's own install (a copy in a library Steam doesn't list isn't one Steam can start).
-    let steam_app = game.entries.iter().filter(|e| e.source != Source::SteamElsewhere).flat_map(|e| e.keys.iter()).find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
+    let steam_app = game.entries.iter().filter(|e| e.source != Source::SteamElsewhere && e.kind != Kind::Owned).flat_map(|e| e.keys.iter()).find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
     if let Some(id) = steam_app {
         return run("Steam", vec!["steam".into(), format!("steam://rungameid/{id}")], None);
     }

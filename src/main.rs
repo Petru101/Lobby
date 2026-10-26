@@ -320,6 +320,11 @@ fn install(query: &str) -> Result<(), String> {
     if !matches!(game.kind, Kind::Download | Kind::Owned) {
         return Err(format!("{} isn't a download or an owned game waiting to be installed.", game.name));
     }
+    if let Some(appid) = install::steam_owned(&game) {
+        install::install_with_steam(&game, appid)?;
+        println!("Steam's install window for {} is opening; once Steam has it, `lobby scan` finds it.", game.name);
+        return Ok(());
+    }
     println!("Installing {}…", game.name);
     let placed = install::place(&game, &progress_printer())?;
     // What it needs to run (Java, a runner from Flathub): asked on the terminal.
@@ -391,6 +396,9 @@ fn how(query: &str) -> Result<(), String> {
     }
     for warning in drives::warnings(game, &drives::mounts()) {
         println!("\nWarning: {warning}");
+    }
+    if game.kind != Kind::Game {
+        return Ok(());
     }
     println!("Uninstall: {}", match uninstall::how(game) {
         uninstall::How::Store(store, _) => format!("{}'s files go, through lobby's {} tool", game.name, store.name()),

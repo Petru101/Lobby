@@ -145,6 +145,21 @@ pub fn set_up(placed: Placed) -> Installed {
     }
 }
 
+/// The app id of a game the Steam account owns and hasn't installed: Steam installs it
+/// (`install_with_steam`), not Lobby.
+pub fn steam_owned(game: &Game) -> Option<u32> {
+    if game.kind != Kind::Owned {
+        return None;
+    }
+    game.entries.iter().filter(|e| e.source == crate::library::Source::Steam).flat_map(|e| e.keys.iter()).find_map(|k| if let crate::library::Key::SteamApp(id) = k { Some(*id) } else { None })
+}
+
+/// Opens Steam's install window for a game the account owns (Steam picks the library and
+/// downloads it; the next scan finds it).
+pub fn install_with_steam(game: &Game, appid: u32) -> Result<(), String> {
+    crate::launch::start(&["steam".to_string(), format!("steam://install/{appid}")], None, &crate::store::log_file(&game.id))
+}
+
 /// The store and the game's id there, for a game owned in a store lobby is signed in to.
 pub fn owned_in(game: &Game) -> Option<(crate::stores::Store, String)> {
     game.entries.iter().filter(|e| e.kind == Kind::Owned).flat_map(|e| e.keys.iter()).find_map(|k| match k {

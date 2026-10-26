@@ -664,6 +664,13 @@ impl Ui {
         if self.is_installing(&game.id) {
             return;
         }
+        if let Some(appid) = crate::install::steam_owned(&game) {
+            match crate::install::install_with_steam(&game, appid) {
+                Ok(()) => self.toast(&format!("Steam's install window for {} is opening. Once Steam has installed it, it shows here as installed (F5 looks again).", game.name)),
+                Err(e) => self.alert(&format!("Steam couldn't be opened for {}", game.name), &e),
+            }
+            return;
+        }
         if game.kind == Kind::Owned {
             let store = crate::install::owned_in(&game).map_or("the store", |(s, _)| s.name());
             self.toast(&format!("Downloading {} from {store}…", game.name));
@@ -1541,7 +1548,7 @@ impl Ui {
     fn accounts(self: &Rc<Self>) {
         let group = adw::PreferencesGroup::builder()
             .title("Store accounts")
-            .description("Sign in to see the games you own and install them from here. Steam games come from the Steam app, which keeps doing its own downloads, updates and cloud saves.")
+            .description("Sign in to Epic and GOG to see the games you own and install them from here. Steam's come from the Steam app signed in on this computer, which keeps doing its own downloads, updates and cloud saves.")
             .build();
         let view = adw::ToolbarView::new();
         view.add_top_bar(&adw::HeaderBar::new());
@@ -1549,6 +1556,24 @@ impl Ui {
         page.add(&group);
         view.set_content(Some(&page));
         let dialog = adw::Dialog::builder().title("Accounts").content_width(560).content_height(560).child(&view).build();
+        // Steam: the Steam app's own sign-in, read from its files; nothing to sign in to here.
+        let steam = crate::sources::Home::find().and_then(|h| crate::sources::steam_owned::account(&h));
+        let row = adw::ActionRow::builder().title("Steam").build();
+        match steam {
+            Some((name, count)) => {
+                let who = if name.is_empty() { String::new() } else { format!(" as {name}") };
+                row.set_subtitle(&format!("Signed in to the Steam app{who} · {count} games owned"));
+            }
+            None => {
+                row.set_subtitle("Sign in to the Steam app to see your Steam games here");
+                let button = gtk::Button::builder().label("Open Steam").valign(gtk::Align::Center).build();
+                button.connect_clicked(|_| {
+                    let _ = crate::launch::start(&["steam".to_string()], None, &crate::store::log_file("steam"));
+                });
+                row.add_suffix(&button);
+            }
+        }
+        group.add(&row);
         for store in Store::ALL {
             let row = adw::ActionRow::builder().title(store.name()).build();
             let account = store.account();
@@ -1827,7 +1852,7 @@ impl Ui {
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).margin_top(12).build();
         buttons.append(&play);
         // In a Steam library Steam doesn't use, and not installed in Steam's own.
-        let stray = game.entries.iter().find(|e| e.source == Source::SteamElsewhere).filter(|_| !game.sources().contains(&Source::Steam)).and_then(|e| Some((e.folder.clone()?, e.keys.iter().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None })?)));
+        let stray = game.entries.iter().find(|e| e.source == Source::SteamElsewhere).filter(|_| !game.entries.iter().any(|e| e.source == Source::Steam && e.kind != Kind::Owned)).and_then(|e| Some((e.folder.clone()?, e.keys.iter().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None })?)));
         if let Some((folder, appid)) = stray.clone() {
             play.set_visible(false);
             let b = gtk::Button::builder().label("Move into Steam").tooltip_text("Copy it into one of Steam's libraries, where Steam starts it").build();
@@ -2407,7 +2432,7 @@ fn origin(g: &Game) -> String {
         return "Not installed yet".into();
     }
     if g.kind == Kind::Owned {
-        let store = crate::install::owned_in(g).map_or("A store", |(s, _)| s.name());
+        let store = if crate::install::steam_owned(g).is_some() { "Steam" } else { crate::install::owned_in(g).map_or("A store", |(s, _)| s.name()) };
         return format!("{store} · not installed");
     }
     // A store's game is labelled with the store's name, taken over or not.

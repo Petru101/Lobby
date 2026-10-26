@@ -31,7 +31,7 @@ pub fn how(game: &Game) -> How {
     if let Some((store, id)) = crate::stores::installed_in(game) {
         return How::Store(store, id);
     }
-    let steam_id = |source: Source| game.entries.iter().filter(|e| e.source == source).flat_map(|e| e.keys.iter()).find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
+    let steam_id = |source: Source| game.entries.iter().filter(|e| e.source == source && e.kind != Kind::Owned).flat_map(|e| e.keys.iter()).find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
     if let Some(id) = steam_id(Source::Steam) {
         return How::Steam(id);
     }

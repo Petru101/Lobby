@@ -11,6 +11,7 @@ pub mod lutris;
 mod menu;
 mod prefixes;
 pub mod steam;
+pub mod steam_owned;
 mod stores;
 
 use crate::library::{self, Entry};
@@ -52,6 +53,7 @@ pub fn scan(home: &Home) -> Found {
     entries.extend(crate::log::timed("scan: Steam games", || steam::apps(home)));
     entries.extend(crate::log::timed("scan: Steam libraries Steam doesn't list", || steam::stray_apps(home)));
     entries.extend(crate::log::timed("scan: Steam shortcuts", || steam::shortcuts(home)));
+    entries.extend(crate::log::timed("scan: Steam account's games", || steam_owned::games(home)));
     entries.extend(crate::log::timed("scan: lobby's store games", || stores::games()));
     entries.extend(crate::log::timed("scan: Heroic", || heroic::games(home)));
     entries.extend(crate::log::timed("scan: Lutris", || lutris::games(home)));

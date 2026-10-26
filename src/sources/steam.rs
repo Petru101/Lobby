@@ -7,7 +7,7 @@ use gamefix::{steam, vdf};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn roots(home: &Home) -> Vec<PathBuf> {
+pub(super) fn roots(home: &Home) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = [".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"]
         .iter()
         .map(|p| home.join(p))
@@ -147,7 +147,7 @@ pub fn stray_apps(home: &Home) -> Vec<Entry> {
 
 /// Steam's portrait art for an app it has shown: `appcache/librarycache/<appid>/` or a folder
 /// inside it (newer clients call it library_capsule.jpg), else the same art on Steam's CDN.
-fn library_art(root: &Path, appid: u32) -> String {
+pub(super) fn library_art(root: &Path, appid: u32) -> String {
     let dir = root.join("appcache/librarycache").join(appid.to_string());
     let names = ["library_600x900.jpg", "library_capsule.jpg"];
     let mut dirs = vec![dir.clone()];
