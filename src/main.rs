@@ -134,12 +134,15 @@ fn running_games() -> Result<(), String> {
 fn stop_game(query: &str) -> Result<(), String> {
     let lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?;
-    if running::stop(game, &lib.games, std::time::Duration::from_secs(5))? {
-        println!("{} stopped.", game.name);
-        Ok(())
-    } else {
-        Err(format!("{} didn't stop.", game.name))
+    let stopped = running::stop(game, &lib.games, std::time::Duration::from_secs(5))?;
+    if !stopped.gone {
+        return Err(format!("{} didn't stop.", game.name));
     }
+    match stopped.held_by {
+        Some(holder) => println!("{} stopped; {holder} still holds one of its ended processes (it goes when {holder} lets go).", game.name),
+        None => println!("{} stopped.", game.name),
+    }
+    Ok(())
 }
 
 /// Hides a game or brings it back, makes it a favourite or not (the window's star and Hide).

@@ -130,9 +130,17 @@ fn descends(procs: &[Process], pid: i32, ancestor: i32) -> bool {
     false
 }
 
+pub struct Stopped {
+    /// Every process of it ended.
+    pub gone: bool,
+    /// A program still holding an ended process of it (ferret-helper, gdb): nothing runs, but
+    /// that one goes only when the holder lets go.
+    pub held_by: Option<String>,
+}
+
 /// Ends a running game: what's under its wrappers, or its own processes and theirs. Waits up to
-/// `patience` for them to quit after SIGTERM, then SIGKILLs the rest. Whether it's gone.
-pub fn stop(game: &Game, all: &[Game], patience: std::time::Duration) -> Result<bool, String> {
+/// `patience` for them to quit after SIGTERM, then SIGKILLs the rest.
+pub fn stop(game: &Game, all: &[Game], patience: std::time::Duration) -> Result<Stopped, String> {
     let roots = find(all).remove(&game.id).ok_or_else(|| format!("{} isn't running.", game.name))?;
     let targets = |procs: &[Process]| -> Vec<i32> {
         let wrapper = |pid: i32| procs.iter().find(|p| p.pid == pid).is_some_and(|p| p.args.first().is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "lobby")) || p.args.iter().any(|a| a == "SteamLaunch"));
@@ -141,15 +149,18 @@ pub fn stop(game: &Game, all: &[Game], patience: std::time::Duration) -> Result<
         t.extend(roots.iter().filter(|&&r| !wrapper(r)));
         t
     };
-    let first = targets(&processes());
+    let procs = processes();
+    let first = targets(&procs);
+    // Ended processes under it now too (a zombie a tracer holds isn't killed: it's dead).
+    let everything: Vec<i32> = procs.iter().filter(|p| roots.iter().any(|&r| p.pid == r || descends(&procs, p.pid, r))).map(|p| p.pid).collect();
     for &pid in &first {
         unsafe { libc::kill(pid, libc::SIGTERM) };
     }
     let start = std::time::Instant::now();
-    loop {
+    let gone = loop {
         let left: Vec<i32> = first.iter().copied().filter(|&pid| alive(pid)).collect();
         if left.is_empty() {
-            return Ok(true);
+            break true;
         }
         if start.elapsed() >= patience {
             // Hanging: what's left, and anything it started meanwhile.
@@ -159,13 +170,26 @@ pub fn stop(game: &Game, all: &[Game], patience: std::time::Duration) -> Result<
                 unsafe { libc::kill(pid, libc::SIGKILL) };
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
-            return Ok(first.iter().all(|&pid| !alive(pid)));
+            break first.iter().all(|&pid| !alive(pid));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    };
+    let held_by = everything.iter().filter(|&&pid| !alive(pid)).find_map(|&pid| holder(pid));
+    Ok(Stopped { gone, held_by })
 }
 
-/// Still running (a process that ended but wasn't collected yet is a zombie: gone).
+/// Still running: not a zombie (ended, not collected yet), and not exiting (its memory already
+/// gone: a sandbox's first process waits there until every process inside is collected).
 fn alive(pid: i32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().next().map(|st| st != "Z"))).unwrap_or(false)
+    let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status")) else { return false };
+    !status.lines().any(|l| l.starts_with("State:") && l.contains("Z (zombie)")) && status.lines().any(|l| l.starts_with("VmSize:"))
+}
+
+/// What holds an ended process of the game so it can't be collected: the program tracing it
+/// (a debugger, a crash reporter), by name.
+fn holder(pid: i32) -> Option<String> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let tracer: i32 = status.lines().find_map(|l| l.strip_prefix("TracerPid:"))?.trim().parse().ok().filter(|&t| t > 0)?;
+    let name = fs::read_to_string(format!("/proc/{tracer}/comm")).ok()?;
+    Some(name.trim().to_string())
 }

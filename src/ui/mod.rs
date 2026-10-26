@@ -889,8 +889,11 @@ impl Ui {
                 let g = game.clone();
                 let result = gio::spawn_blocking(move || crate::running::stop(&g, &games, std::time::Duration::from_secs(5))).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
                 match result {
-                    Ok(true) => u.toast(&format!("{} stopped.", game.name)),
-                    Ok(false) => u.alert(&format!("{} didn't stop", game.name), "Some of its processes are still there. Something else may be holding them (a debugger or a crash reporter)."),
+                    Ok(s) if s.gone => match s.held_by {
+                        Some(holder) => u.toast(&format!("{} stopped. {holder} still holds one of its ended processes; it goes when {holder} lets go.", game.name)),
+                        None => u.toast(&format!("{} stopped.", game.name)),
+                    },
+                    Ok(_) => u.alert(&format!("{} didn't stop", game.name), "Some of its processes are still running even after being forced to quit."),
                     Err(e) => u.toast(&e),
                 }
                 u.look_for_running();
