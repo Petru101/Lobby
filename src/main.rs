@@ -48,6 +48,7 @@ const USAGE: &str = "usage: lobby                   open the window
                                --copy brings a game's into its Wine prefix
        lobby launch-options <game id> [<options>]  show or set what Play adds to its command
                                (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
+       lobby hide|unhide|favourite|unfavourite <game>  out of sight or back; starred or not
        lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
                                how lobby protects a game it starts; change it
        lobby search            search every drive for games outside the folders lobby looks in
@@ -73,6 +74,7 @@ fn main() -> ExitCode {
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("search"), []) => search_drives(),
+        (Some(what @ ("hide" | "unhide" | "favourite" | "unfavourite")), words) if !words.is_empty() => mark(what, &words.join(" ")),
         // The options as typed, -- words too (`rest` leaves those out).
         (Some("launch-options"), [_, ..]) => launch_options(&args[1], &args[2..].join(" "), args.len() > 2),
         (Some("protection"), [game, level @ ..]) if level.len() <= 1 => protection(game, level.first().copied(), &args),
@@ -113,6 +115,21 @@ fn main() -> ExitCode {
 }
 
 /// Shows a game's launch options, or sets them (empty clears).
+/// Hides a game or brings it back, makes it a favourite or not (the window's star and Hide).
+fn mark(what: &str, query: &str) -> Result<(), String> {
+    let mut lib = Library::load().map_or_else(scan, Ok)?;
+    let id = lib.find(query)?.id.clone();
+    let g = lib.get_mut(&id).ok_or("no such game")?;
+    match what {
+        "hide" => g.hidden = true,
+        "unhide" => g.hidden = false,
+        "favourite" => g.favourite = true,
+        _ => g.favourite = false,
+    }
+    println!("{}: {}", g.name, if g.hidden { "hidden" } else if g.favourite { "a favourite" } else { "shown" });
+    lib.save()
+}
+
 fn launch_options(query: &str, text: &str, set: bool) -> Result<(), String> {
     let mut lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?.clone();
@@ -183,7 +200,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     // A shortcut naming a game the library lost (deleted, say) still starts it, at Standard.
     let game = Library::load().unwrap_or_default().games.into_iter().find(|g| g.id == id).unwrap_or_else(|| {
         eprintln!("lobby: no game \"{id}\" in the library: starting it with Standard protection.");
-        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default() }
+        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false }
     });
     let start = store::now();
     let status = sandbox::command(&game, &[], command, None).and_then(|mut s| s.command.stdin(std::process::Stdio::null()).status().map_err(|e| format!("bwrap: {e}")));

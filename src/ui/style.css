@@ -100,3 +100,17 @@ flowboxchild.not-installed .cover-placeholder {
 flowboxchild.not-installed .cover > picture.cover-backdrop {
   filter: blur(14px) brightness(0.8) grayscale(0.85);
 }
+
+/* A favourite's star, on its cover. */
+.favourite-badge {
+  color: #f6d32d;
+  background: alpha(black, 0.55);
+  border-radius: 99px;
+  padding: 6px;
+  -gtk-icon-size: 16px;
+}
+
+/* A hidden game, while Show → Hidden games is on. */
+flowboxchild.is-hidden {
+  opacity: 0.45;
+}

@@ -72,7 +72,7 @@ fn parse_owned(list: &serde_json::Value, items: &[serde_json::Value]) -> Vec<Own
             let images = g.get("metadata").and_then(|m| m.get("keyImages")).and_then(|k| k.as_array());
             let image = |kind: &str| images.into_iter().flatten().find(|i| i.get("type").and_then(|t| t.as_str()) == Some(kind)).and_then(|i| i.get("url")?.as_str().map(String::from));
             let dlc = items.iter().filter(|d| main_game(d).as_deref() == Some(id.as_str())).filter_map(|d| Some(Dlc { id: d.get("app_name")?.as_str()?.to_string(), title: d.get("app_title")?.as_str()?.to_string(), installed: false })).collect();
-            Some(Owned { id, title, cover: image("DieselGameBoxTall").or_else(|| image("Thumbnail")), installable: Some(true), dlc })
+            Some(Owned { id, title, cover: image("DieselGameBoxTall").or_else(|| image("Thumbnail")), installable: Some(true), dlc, demo: false })
         })
         .collect();
     games.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
@@ -339,7 +339,7 @@ mod tests {
         ]);
         let games = parse_owned(&list, list.as_array().unwrap());
         assert_eq!(games.len(), 2);
-        assert_eq!(games[0], Owned { id: "abc".into(), title: "another game".into(), cover: None, installable: Some(true), dlc: vec![] });
+        assert_eq!(games[0], Owned { id: "abc".into(), title: "another game".into(), cover: None, installable: Some(true), dlc: vec![], demo: false });
         assert_eq!(games[1].cover.as_deref(), Some("https://x/tall.jpg"));
         assert_eq!(games[1].dlc, [Dlc { id: "dlc1".into(), title: "Fall Guys: Pack".into(), installed: false }]);
     }

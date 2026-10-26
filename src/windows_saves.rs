@@ -476,7 +476,7 @@ Some Game:
         assert_eq!(found.files, 2);
         assert_eq!(found.copies.len(), 1);
         assert_eq!(found.copies[0].to, user.join("Documents/StarCraft II/Accounts/1/2-S2/a.SC2Bank"));
-        let mut game = crate::library::Game { id: "t".into(), name: "T".into(), kind: crate::library::Kind::Game, entries: vec![], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default() };
+        let mut game = crate::library::Game { id: "t".into(), name: "T".into(), kind: crate::library::Kind::Game, entries: vec![], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false };
         game.id = format!("test-{}", std::process::id());
         let (copied, replaced) = bring_over(&game.id, &found).unwrap();
         assert_eq!((copied, replaced), (1, 0));

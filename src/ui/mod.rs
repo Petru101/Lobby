@@ -211,6 +211,38 @@ impl Sort {
     }
 }
 
+/// What the Show menu lets through, kept in ~/.config/lobby/show.json.
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+struct Show {
+    /// Demos and prologues the account owns but hasn't installed (GOG adds every free one
+    /// clicked on its store).
+    #[serde(default)]
+    demos: bool,
+    #[serde(default)]
+    favourites_only: bool,
+    #[serde(default)]
+    hidden: bool,
+}
+
+impl Show {
+    fn file() -> std::path::PathBuf {
+        crate::stores::config_home().join("lobby/show.json")
+    }
+
+    fn load() -> Show {
+        std::fs::read_to_string(Self::file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+
+    fn save(self) {
+        let _ = std::fs::create_dir_all(Self::file().parent().unwrap());
+        let _ = serde_json::to_string(&self).map(|t| std::fs::write(Self::file(), t));
+    }
+
+    fn lets_through(self, g: &Game) -> bool {
+        (self.hidden || !g.hidden) && (!self.favourites_only || g.favourite) && (self.demos || g.kind != Kind::Owned || !g.demo())
+    }
+}
+
 /// What a game is sorted by, worked out once per fill.
 #[derive(Clone, Copy, Default)]
 struct Facts {
@@ -287,6 +319,7 @@ struct Ui {
     /// The recent games shown now (the first few of the page and source picked).
     recent_shown: RefCell<Vec<String>>,
     measuring: Cell<bool>,
+    show: Cell<Show>,
     scanning: Cell<bool>,
     /// A rescan was asked for during a scan (after an uninstall, say): another runs after it,
     /// since that scan may have read the disk before the change.
@@ -331,7 +364,13 @@ fn build(app: &adw::Application) {
     sort.set_margin_start(12);
     sort.set_valign(gtk::Align::Center);
     sort.add_css_class("flat");
-    let filters = gtk::CenterBox::builder().start_widget(&sort).center_widget(&sources).end_widget(&count).margin_top(6).margin_bottom(6).build();
+    let show_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
+    let show_menu = gtk::MenuButton::builder().label("Show").tooltip_text("Demos, favourites and hidden games").popover(&gtk::Popover::builder().child(&show_box).build()).build();
+    show_menu.add_css_class("flat");
+    let start = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).build();
+    start.append(&sort);
+    start.append(&show_menu);
+    let filters = gtk::CenterBox::builder().start_widget(&start).center_widget(&sources).end_widget(&count).margin_top(6).margin_bottom(6).build();
     filters.add_css_class("filters");
 
     let flow = gtk::FlowBox::builder()
@@ -388,7 +427,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -452,6 +491,24 @@ fn build(app: &adw::Application) {
     flow.connect_child_activated(move |_, child| {
         u.details(&child.widget_name());
     });
+    // The Show menu's switches.
+    let shown = ui.show.get();
+    for (label, on, set) in [
+        ("Demos and prologues not installed", shown.demos, (|s: &mut Show, v| s.demos = v) as fn(&mut Show, bool)),
+        ("Only favourites", shown.favourites_only, |s, v| s.favourites_only = v),
+        ("Hidden games", shown.hidden, |s, v| s.hidden = v),
+    ] {
+        let check = gtk::CheckButton::builder().label(label).active(on).build();
+        let u = ui.clone();
+        check.connect_toggled(move |c| {
+            let mut s = u.show.get();
+            set(&mut s, c.is_active());
+            s.save();
+            u.show.set(s);
+            u.refilter();
+        });
+        show_box.append(&check);
+    }
     let u = ui.clone();
     recent.connect_child_activated(move |_, child| {
         u.details(&child.widget_name());
@@ -557,6 +614,11 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
             let pages = u.window.content().and_then(|c| find_named(&c, &name)).and_downcast::<gtk::ToggleButton>();
             pages.inspect(|b| b.set_active(true));
         }
+        // LOBBY_SNAPSHOT_SHOW=demos,favourites,hidden: the Show menu's switches (not saved).
+        if let Ok(on) = std::env::var("LOBBY_SNAPSHOT_SHOW") {
+            u.show.set(Show { demos: on.contains("demos"), favourites_only: on.contains("favourites"), hidden: on.contains("hidden") });
+            u.refilter();
+        }
         // LOBBY_SNAPSHOT_SORT=name|played|playtime|size|added.
         if let Some(i) = std::env::var("LOBBY_SNAPSHOT_SORT").ok().and_then(|n| Sort::ALL.iter().position(|(_, name, _)| *name == n)) {
             if let Some(d) = u.window.content().and_then(|c| find_type::<gtk::DropDown>(&c)) {
@@ -648,7 +710,7 @@ impl Ui {
     fn shows(&self, g: &Game) -> bool {
         let page = self.page.get();
         let origin = self.origin.get();
-        if g.gone || g.missing || !(page.wants(g) || page == Page::Downloads && self.is_just_installed(&g.id)) || !(origin == Origin::All || Origin::of(g) == origin) {
+        if g.gone || g.missing || !(page.wants(g) || page == Page::Downloads && self.is_just_installed(&g.id)) || !(origin == Origin::All || Origin::of(g) == origin) || !self.show.get().lets_through(g) {
             return false;
         }
         let q = self.search.text().to_lowercase();
@@ -673,7 +735,8 @@ impl Ui {
     fn refilter(&self) {
         // Only the sources with games on this page; back to all when the one picked has none.
         let page = self.page.get();
-        let on_page: Vec<Origin> = self.lib.borrow().games.iter().filter(|g| !g.gone && !g.missing && page.wants(g)).map(Origin::of).collect();
+        let show = self.show.get();
+        let on_page: Vec<Origin> = self.lib.borrow().games.iter().filter(|g| !g.gone && !g.missing && page.wants(g) && show.lets_through(g)).map(Origin::of).collect();
         let mut fallback = None;
         for (origin, button) in self.origins.borrow().iter() {
             let any = *origin == Origin::All || on_page.contains(origin);
@@ -730,22 +793,52 @@ impl Ui {
         for g in lib.games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem | Kind::Owned)) {
             self.flow.append(&card(self, g));
         }
-        // Continue playing: installed games by when they were played, the newest first.
-        let mut recent: Vec<&Game> = {
-            let facts = self.facts.borrow();
-            let mut r: Vec<&Game> = lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone && !g.missing && facts.get(&g.id).is_some_and(|f| f.last > 0)).collect();
-            r.sort_by_key(|g| std::cmp::Reverse(facts[&g.id].last));
-            r
-        };
-        recent.truncate(40);
-        for g in recent {
-            self.recent.append(&card(self, g));
-        }
         drop(lib);
+        self.fill_recent();
         self.refilter();
         if self.sort.get() == Sort::Size {
             self.measure();
         }
+    }
+
+    /// Continue playing: installed games by when they were played, the newest first, favourites
+    /// before the rest.
+    fn fill_recent(self: &Rc<Self>) {
+        self.recent.remove_all();
+        let lib = self.lib.borrow();
+        let facts = self.facts.borrow();
+        let mut recent: Vec<&Game> = lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone && !g.missing && facts.get(&g.id).is_some_and(|f| f.last > 0)).collect();
+        recent.sort_by_key(|g| (!g.favourite, std::cmp::Reverse(facts[&g.id].last)));
+        recent.truncate(40);
+        drop(facts);
+        for g in recent {
+            self.recent.append(&card(self, g));
+        }
+    }
+
+    /// Marks a game a favourite or not, hides it or brings it back.
+    fn mark(self: &Rc<Self>, id: &str, change: impl FnOnce(&mut Game)) {
+        if let Err(e) = self.change_lib(|lib| {
+            if let Some(g) = lib.get_mut(id) {
+                change(g);
+            }
+        }) {
+            self.toast(&format!("Couldn't save the library: {e}"));
+            return;
+        }
+        // Its card again (the star, dimmed when hidden), then the rows.
+        let mut child = self.flow.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            if c.widget_name() == id {
+                self.flow.remove(&c);
+            }
+        }
+        if let Some(g) = self.game(id) {
+            self.flow.append(&card(self, &g));
+        }
+        self.fill_recent();
+        self.refilter();
     }
 
     /// The grid in the order picked, each card saying what it's sorted by; sizes not known
@@ -2110,6 +2203,23 @@ impl Ui {
         let change = gtk::Button::builder().label("Change cover").build();
         change.add_css_class("pill");
         buttons.append(&change);
+        // Favourite and Hide, as icons at the end.
+        let star = gtk::ToggleButton::builder().icon_name(if game.favourite { "starred-symbolic" } else { "non-starred-symbolic" }).active(game.favourite).tooltip_text("Favourite").valign(gtk::Align::Center).build();
+        star.add_css_class("circular");
+        let (u, id) = (self.clone(), game.id.clone());
+        star.connect_toggled(move |b| {
+            let on = b.is_active();
+            b.set_icon_name(if on { "starred-symbolic" } else { "non-starred-symbolic" });
+            u.mark(&id, |g| g.favourite = on);
+        });
+        let hide = gtk::ToggleButton::builder().icon_name("view-conceal-symbolic").active(game.hidden).tooltip_text(if game.hidden { "Hidden: press to show it again" } else { "Hide it (Show → Hidden games brings it back)" }).valign(gtk::Align::Center).build();
+        hide.add_css_class("circular");
+        let (u, id) = (self.clone(), game.id.clone());
+        hide.connect_toggled(move |b| {
+            let on = b.is_active();
+            b.set_tooltip_text(Some(if on { "Hidden: press to show it again" } else { "Hide it (Show → Hidden games brings it back)" }));
+            u.mark(&id, |g| g.hidden = on);
+        });
         let folder = game.folder().map(Path::to_path_buf).or_else(|| game.program().and_then(Path::parent).map(Path::to_path_buf)).filter(|f| f.is_dir());
         if let Some(folder) = folder.clone() {
             let open = gtk::Button::builder().label("Open folder").build();
@@ -2120,6 +2230,8 @@ impl Ui {
             });
             buttons.append(&open);
         }
+        buttons.append(&star);
+        buttons.append(&hide);
 
         let info = adw::PreferencesGroup::new();
         let row = |title: &str, value: &str| {
@@ -2730,6 +2842,11 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
         cover.add_overlay(&bar);
         ui.bars.borrow_mut().push((g.id.clone(), bar));
     }
+    if g.favourite {
+        let star = gtk::Image::builder().icon_name("starred-symbolic").halign(gtk::Align::End).valign(gtk::Align::Start).margin_end(10).margin_top(10).tooltip_text("A favourite").build();
+        star.add_css_class("favourite-badge");
+        cover.add_overlay(&star);
+    }
     let just_installed = ui.is_just_installed(&g.id);
     if g.update().is_some() && !just_installed {
         let badge = gtk::Label::builder().label("Update").halign(gtk::Align::Start).valign(gtk::Align::Start).margin_start(10).margin_top(10).tooltip_text("A newer version is ready to download: open the game's page").build();
@@ -2765,6 +2882,42 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     body.append(&line);
     let child = gtk::FlowBoxChild::builder().child(&body).name(&g.id).tooltip_text(&g.name).build();
     child.add_css_class("game-card");
+    if g.hidden {
+        child.add_css_class("is-hidden");
+    }
+    // Right-click (or a long press): favourite, hide.
+    let menu = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    let popover = gtk::Popover::builder().child(&menu).has_arrow(false).build();
+    popover.set_parent(&child);
+    for (label, action) in [(if g.favourite { "Remove from favourites" } else { "Add to favourites" }, 0), (if g.hidden { "Show again" } else { "Hide" }, 1)] {
+        let b = gtk::Button::builder().label(label).build();
+        b.add_css_class("flat");
+        b.child().and_downcast::<gtk::Label>().inspect(|l| l.set_xalign(0.0));
+        let (u, id, p) = (ui.clone(), g.id.clone(), popover.clone());
+        b.connect_clicked(move |_| {
+            p.popdown();
+            // After the menu has closed: marking rebuilds the card it belongs to.
+            let (u, id) = (u.clone(), id.clone());
+            glib::idle_add_local_once(move || u.mark(&id, |g| if action == 0 { g.favourite = !g.favourite } else { g.hidden = !g.hidden }));
+        });
+        menu.append(&b);
+    }
+    let pop = popover.clone();
+    let right = gtk::GestureClick::builder().button(3).build();
+    right.connect_pressed(move |_, _, x, y| {
+        pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        pop.popup();
+    });
+    child.add_controller(right);
+    let pop = popover.clone();
+    let long = gtk::GestureLongPress::new();
+    long.connect_pressed(move |_, x, y| {
+        pop.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        pop.popup();
+    });
+    child.add_controller(long);
+    // The popover goes with the card.
+    child.connect_destroy(move |_| popover.unparent());
     if g.kind == Kind::Owned {
         child.add_css_class("not-installed");
     }

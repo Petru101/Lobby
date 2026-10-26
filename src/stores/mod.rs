@@ -199,6 +199,10 @@ pub struct Owned {
     /// The DLC the account owns for it, when the owned list says (Epic's does).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dlc: Vec<Dlc>,
+    /// A demo or prologue (GOG's product slug says so: "shores_unknown_demo" is titled
+    /// "Shores Unknown: Arrival").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub demo: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]

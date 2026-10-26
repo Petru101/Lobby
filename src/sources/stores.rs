@@ -27,6 +27,7 @@ pub fn games() -> Vec<Entry> {
             let mut e = Entry::new(store.source(), o.title);
             e.kind = Kind::Owned;
             e.cover = o.cover;
+            e.demo = o.demo;
             e.keys.push(Key::Store(store.id().into(), o.id));
             entries.push(e);
         }

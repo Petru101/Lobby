@@ -131,6 +131,9 @@ pub struct Entry {
     /// the launcher or the folder's creation time says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
+    /// A demo or prologue, as its store says (else its name does: `Game::demo`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub demo: bool,
 }
 
 impl Entry {
@@ -140,8 +143,17 @@ impl Entry {
     }
 
     pub fn new(source: Source, name: impl Into<String>) -> Entry {
-        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), update: None, cover: None, icon: None, note: None, annotation: false, last_played: None, playtime: None, size: None, since: None }
+        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), update: None, cover: None, icon: None, note: None, annotation: false, last_played: None, playtime: None, size: None, since: None, demo: false }
     }
+}
+
+/// Words that make a name or a store's slug a demo's.
+pub const DEMO_WORDS: [&str; 4] = ["demo", "prologue", "playtest", "demos"];
+
+/// A demo's or prologue's name: "Hell Pie Demo", "Farlanders Prologue", "Vertical Third Tech
+/// Demo" (not "Book of Demons" or "Trials of the Olympian Gods").
+pub fn named_like_demo(name: &str) -> bool {
+    name.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| DEMO_WORDS[..3].contains(&w))
 }
 
 /// An ISO 8601 time as Unix time; one without a zone is local time.
@@ -180,6 +192,11 @@ pub struct Game {
     /// How it's protected when Lobby starts it (`sandbox`).
     #[serde(default, skip_serializing_if = "crate::sandbox::Protection::is_default")]
     pub protection: crate::sandbox::Protection,
+    /// The user put it out of sight (Show → Hidden games brings it back).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub favourite: bool,
 }
 
 impl Game {
@@ -187,6 +204,11 @@ impl Game {
     /// purchase say, else when Lobby first saw it (Unix time).
     pub fn since(&self) -> u64 {
         self.entries.iter().filter_map(|e| e.since).chain(Some(self.added).filter(|&a| a > 0)).min().unwrap_or(0)
+    }
+
+    /// A demo or prologue: its store says so, or its name.
+    pub fn demo(&self) -> bool {
+        named_like_demo(&self.name) || self.entries.iter().any(|e| e.demo || named_like_demo(&e.name))
     }
 
     pub fn sources(&self) -> Vec<Source> {
@@ -432,7 +454,7 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             };
             let paths: Vec<&PathBuf> = entries.iter().flat_map(|e| [e.folder.as_ref(), e.program.as_ref()]).flatten().collect();
             let missing = !paths.is_empty() && !paths.iter().any(|p| p.exists());
-            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default() }
+            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false }
         })
         .collect();
     games.sort_by_key(|g| g.name.to_lowercase());
@@ -475,6 +497,16 @@ fn same_game(a: &Entry, b: &Entry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demos_by_name() {
+        for n in ["Hell Pie Demo", "Farlanders Prologue", "Vertical Third Tech Demo", "Retro Bike Shooter (Demo)", "Some Game Playtest"] {
+            assert!(named_like_demo(n), "{n}");
+        }
+        for n in ["Book of Demons", "Populous 2: Trials of the Olympian Gods", "SpellForce 2: Demons Of The Past", "Demolition Company"] {
+            assert!(!named_like_demo(n), "{n}");
+        }
+    }
 
     fn entry(source: Source, name: &str, folder: Option<&str>, program: Option<&str>) -> Entry {
         let mut e = Entry::new(source, name);

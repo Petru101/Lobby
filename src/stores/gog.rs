@@ -80,7 +80,8 @@ pub fn owned(old: &[Owned]) -> Result<Vec<Owned>, String> {
             let before = old.iter().find(|o| o.id == id);
             let cover = before.and_then(|o| o.cover.clone());
             let wide = p.get("image").and_then(|i| i.as_str()).filter(|i| !i.is_empty()).map(|i| format!("https:{i}_784.jpg"));
-            games.push((Owned { id, title: title.to_string(), cover, installable: before.and_then(|o| o.installable), dlc: Vec::new() }, wide));
+            let demo = p.get("slug").and_then(|s| s.as_str()).is_some_and(|s| s.split('_').any(|w| crate::library::DEMO_WORDS.contains(&w)));
+            games.push((Owned { id, title: title.to_string(), cover, installable: before.and_then(|o| o.installable), dlc: Vec::new(), demo }, wide));
         }
         let pages = v.get("totalPages").and_then(|t| t.as_u64()).unwrap_or(1);
         if page >= pages {
