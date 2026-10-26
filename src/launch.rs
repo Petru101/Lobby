@@ -9,8 +9,9 @@ use std::process::{Command, Stdio};
 
 #[derive(Debug, PartialEq)]
 pub enum Plan {
-    /// A command that starts it, and what it goes through.
-    Run { how: String, command: Vec<String>, cwd: Option<PathBuf> },
+    /// A command that starts it, and what it goes through. `protect`: the command is the game's
+    /// own (not another launcher's), so Lobby can run it in a sandbox (`sandbox`).
+    Run { how: String, command: Vec<String>, cwd: Option<PathBuf>, protect: bool },
     /// No launcher knows it: gamefix sets it up first.
     SetUp(PathBuf),
     /// A Blizzard game: started through lobby's Battle.net (installed the first time), with
@@ -118,7 +119,31 @@ impl Plan {
 }
 
 fn run(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
-    Plan::Run { how: how.into(), command, cwd }
+    Plan::Run { how: how.into(), command, cwd, protect: false }
+}
+
+/// The game's own command, which Lobby can protect (Flatpak's runners have Flatpak's sandbox).
+fn own(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
+    let protect = command.first().is_some_and(|w| w != "flatpak");
+    Plan::Run { how: how.into(), command, cwd, protect }
+}
+
+/// What Play runs for a plan's command: the launch options added, then the sandbox around it
+/// when the command is the game's own.
+pub fn final_command(game: &Game, command: Vec<String>, protect: bool) -> Result<Vec<String>, String> {
+    let command = with_options(command, game.launch_options.as_deref())?;
+    Ok(if protect && command.first().is_some_and(|w| w != "flatpak") { crate::sandbox::wrap(game, command) } else { command })
+}
+
+/// Why Lobby can't protect the game the way it starts, if it can't.
+pub fn protection_unsupported(plan: &Plan) -> Option<String> {
+    match plan {
+        Plan::Run { protect: true, .. } | Plan::SetUp(_) => None,
+        Plan::Run { how, command, .. } if command.first().is_some_and(|w| w == "flatpak") && !how.contains("Faugus") => Some("It runs in a Flatpak app, inside Flatpak's own sandbox.".into()),
+        Plan::Run { how, .. } => Some(format!("It starts with {how}, which Lobby can't protect.")),
+        Plan::BattleNet { .. } => Some("Battle.net starts it, so Lobby can't protect it.".into()),
+        Plan::Cannot(why) => Some(why.clone()),
+    }
 }
 
 fn windows_program(p: &Path) -> bool {
@@ -152,7 +177,7 @@ fn umu_plan(program: &Path, prefix: &Path, args: &str, how: &str) -> Plan {
         program.display().to_string(),
     ];
     let command = command.into_iter().chain(args.split_whitespace().map(String::from)).collect();
-    run(how, command, program.parent().map(Path::to_path_buf))
+    own(how, command, program.parent().map(Path::to_path_buf))
 }
 
 /// The Proton a prefix was made or last upgraded with: Proton's `config_info` (beside drive_c,
@@ -185,7 +210,7 @@ fn store_plan(game: &Game) -> Option<Plan> {
         crate::stores::Store::Epic => format!("Lobby (Epic's sign-in and cloud saves), {setup}"),
         crate::stores::Store::Gog => format!("Lobby (GOG cloud saves, when the game has them), {setup}"),
     };
-    Some(run(&how, vec![lobby, "run".into(), game.id.clone()], Some(folder)))
+    Some(own(&how, vec![lobby, "run".into(), game.id.clone()], Some(folder)))
 }
 
 /// How a store game lobby installed runs, split: the environment (NAME=value words), umu-run
@@ -229,8 +254,10 @@ pub struct WineCommand {
 fn desktop_plan(e: &Entry) -> Option<Plan> {
     let file = e.keys.iter().find_map(|k| if let Key::Desktop(p) = k { Some(p) } else { None })?;
     let (exec, path) = desktop_exec(&fs::read_to_string(file).ok()?)?;
-    let how = if is_gamefix_entry(e) { "its gamefix app-menu entry" } else { "its app-menu entry" };
-    Some(run(how, exec, path))
+    if is_gamefix_entry(e) {
+        return Some(own("its gamefix app-menu entry", exec, path));
+    }
+    Some(run("its app-menu entry", exec, path))
 }
 
 /// A .desktop file's command (field codes dropped) and working folder.
@@ -249,6 +276,8 @@ pub fn desktop_exec(text: &str) -> Option<(Vec<String>, Option<PathBuf>)> {
         }
     }
     let words: Vec<String> = exec_words(&exec?).into_iter().filter(|w| !(w.len() == 2 && w.starts_with('%') && w != "%%")).map(|w| w.replace("%%", "%")).collect();
+    // Run in Lobby's sandbox (gamefix writes it first when asked): the game's own command after.
+    let words = crate::sandbox::unwrapped(&words).map_or(words.clone(), <[String]>::to_vec);
     (!words.is_empty()).then_some((words, path))
 }
 
@@ -451,7 +480,7 @@ mod tests {
     use crate::library::Entry;
 
     fn game(entries: Vec<Entry>) -> Game {
-        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None }
+        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default() }
     }
 
     fn with_key(source: Source, key: Key) -> Entry {

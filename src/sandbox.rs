@@ -1,0 +1,595 @@
+//! Protection for the games Lobby starts itself (its store installs, gamefix's set-ups, games
+//! found in a prefix): the game runs in a bubblewrap sandbox, at the level picked on its page.
+//!
+//! - Standard: the home folder and drives stay, minus what a stealer is after (keys, browser
+//!   profiles, chat and store sign-ins, password managers: `HIDDEN`, plus names like *token*),
+//!   with the files that run code at login read-only (`LOCKED`).
+//! - Isolated: a home of its own (~/.local/share/lobby/sandboxes/<id>), and only the game's
+//!   folder, its prefix and folders the user shares with it; no internet unless allowed.
+//! - Off: as before.
+//!
+//! Both: a PID namespace of its own (ptrace and /proc/<pid>/root would get around the rest),
+//! the session bus only through xdg-dbus-proxy (notifications, screensaver and sleep inhibit,
+//! the portal's settings, GameMode: no systemd, keyring, Flatpak or URI opener, each a way out),
+//! no system bus, a /tmp and /run/user of its own with only the display, sound and Discord
+//! sockets. Steam's folder is hidden but for its client libraries (Proton's steam.exe loads
+//! them through ~/.steam/sdk64); umu's runtime and Proton get a throwaway writable layer
+//! (they take lock files there, and a game must not change what every game runs).
+//!
+//! A game runs as `lobby sandbox <id> -- <command>`, which looks the level up at each start.
+
+use crate::library::{Game, Key, Kind, Source};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    Standard,
+    Isolated,
+    Off,
+}
+
+impl Level {
+    pub const ALL: [Level; 3] = [Level::Standard, Level::Isolated, Level::Off];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Standard => "Standard",
+            Level::Isolated => "Isolated",
+            Level::Off => "Off",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Level::Standard => "Your files stay, but not your passwords, keys, browser profiles or sign-ins, and the game can't make itself start with your computer.",
+            Level::Isolated => "The game sees only its own folder and Wine prefix, with a home folder of its own: nothing else of yours.",
+            Level::Off => "The game can do anything you can.",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Level> {
+        Level::ALL.into_iter().find(|l| l.name().eq_ignore_ascii_case(s))
+    }
+}
+
+/// What the user chose for a game (none of it: the defaults).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Protection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<Level>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internet: Option<bool>,
+    /// Folders an isolated game may use too (mods, a level editor's files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<PathBuf>,
+}
+
+impl Protection {
+    pub fn is_default(&self) -> bool {
+        *self == Protection::default()
+    }
+}
+
+/// The game's level: the user's, else Isolated for a game from itch.io or a download not played
+/// yet (played ones keep their saves where they are), else Standard.
+pub fn level(game: &Game) -> Level {
+    game.protection.level.unwrap_or_else(|| if untrusted(game) && game.played.is_none() { Level::Isolated } else { Level::Standard })
+}
+
+/// Internet: the user's choice, else on unless isolated.
+pub fn internet(game: &Game) -> bool {
+    game.protection.internet.unwrap_or(level(game) != Level::Isolated)
+}
+
+/// From itch.io or a download, and no store or launcher vouches for it.
+fn untrusted(game: &Game) -> bool {
+    let from_download = game.entries.iter().any(|e| e.source == Source::Itch || e.keys.iter().any(|k| matches!(k, Key::Download(_))) || e.folder.as_ref().is_some_and(|f| f.join(".lobby-download").is_file()));
+    game.unknown_to_launchers() && from_download
+}
+
+/// The level and internet written down, so a later default (the game has been played now)
+/// doesn't change them. Returns whether anything changed.
+pub fn settle(game: &mut Game) -> bool {
+    let (level, internet) = (level(game), internet(game));
+    let changed = game.protection.level.is_none() || game.protection.internet.is_none();
+    game.protection.level = Some(level);
+    game.protection.internet = Some(internet);
+    changed
+}
+
+fn lobby_exe() -> String {
+    std::env::current_exe().map_or_else(|_| "lobby".to_string(), |p| p.display().to_string())
+}
+
+/// `<lobby> sandbox <id> --` before a command: how lobby (and gamefix's entries, once they
+/// carry it) runs a game protected. The words after it, when there.
+pub fn unwrapped(words: &[String]) -> Option<&[String]> {
+    let lobby = words.first().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "lobby"));
+    (lobby && words.get(1).is_some_and(|w| w == "sandbox") && words.get(3).is_some_and(|w| w == "--")).then(|| &words[4..])
+}
+
+/// The command Play runs: the game's own inside the sandbox, unless it's off (or `lobby run`,
+/// which sandboxes the game itself and needs the store's sign-in outside).
+pub fn wrap(game: &Game, command: Vec<String>) -> Vec<String> {
+    let lobby_run = command.first().is_some_and(|w| w.ends_with("lobby")) && command.get(1).is_some_and(|w| w == "run");
+    if level(game) == Level::Off || lobby_run || unwrapped(&command).is_some() {
+        return command;
+    }
+    [vec![lobby_exe(), "sandbox".into(), game.id.clone(), "--".into()], command].concat()
+}
+
+/// A command ready to run in the game's sandbox; the D-Bus proxy lives as long as it.
+pub struct Sandboxed {
+    pub command: Command,
+    proxy: Option<(Child, PathBuf)>,
+}
+
+impl Drop for Sandboxed {
+    fn drop(&mut self) {
+        if let Some((mut child, socket)) = self.proxy.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(socket);
+        }
+    }
+}
+
+/// The game's command (`env` words and all) in its sandbox. `env` is what the caller adds to
+/// the command's environment (the paths in both are what the game gets to use).
+pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Option<&Path>) -> Result<Sandboxed, String> {
+    let (program, args) = words.split_first().ok_or("empty command")?;
+    let level = level(game);
+    if level == Level::Off {
+        let mut c = Command::new(program);
+        c.args(args).envs(env.iter().cloned());
+        if let Some(dir) = cwd {
+            c.current_dir(dir);
+        }
+        return Ok(Sandboxed { command: c, proxy: None });
+    }
+    let bwrap = crate::launch::program_on_path("bwrap").ok_or("Protecting the game needs bubblewrap (bwrap), which isn't installed.")?;
+    let home = real(&PathBuf::from(std::env::var_os("HOME").ok_or("HOME isn't set")?));
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|r| r.is_dir());
+    let proxy = runtime.as_deref().and_then(start_proxy);
+    let private = (level == Level::Isolated).then(|| private_home(&game.id)).transpose()?;
+    let spec = Spec {
+        level,
+        internet: internet(game),
+        game: game_folders(game, env, words, cwd, &home),
+        reads: named_paths(env, words).into_iter().filter(|p| hidden_area(p, &home)).collect(),
+        devices: devices(),
+        sockets: runtime.as_deref().map(sockets).unwrap_or_default(),
+        x11: x11_socket(),
+        bus: proxy.as_ref().map(|(_, s)| s.clone()),
+        present: present(&home),
+        home,
+        runtime,
+        private,
+    };
+    let mut c = Command::new(bwrap);
+    c.args(args_for(&spec)).arg("--").arg(program).args(args).envs(env.iter().cloned());
+    if let Some(dir) = cwd {
+        c.current_dir(dir);
+    }
+    Ok(Sandboxed { command: c, proxy })
+}
+
+/// Everything about the computer the sandbox's arguments depend on, gathered first so that
+/// building them stays a plain function.
+struct Spec {
+    level: Level,
+    internet: bool,
+    home: PathBuf,
+    runtime: Option<PathBuf>,
+    /// The isolated game's own home.
+    private: Option<PathBuf>,
+    /// Writable: the game's folders, prefix, the folders shared with it.
+    game: Vec<PathBuf>,
+    /// Read-only: other paths the command names (Java, a config file gamefix wrote ...).
+    reads: Vec<PathBuf>,
+    devices: Vec<PathBuf>,
+    /// Display, sound and Discord sockets under the runtime folder: (the socket, where it goes).
+    sockets: Vec<(PathBuf, PathBuf)>,
+    x11: Option<PathBuf>,
+    bus: Option<PathBuf>,
+    /// Which of the home's files and folders this exists (relative to the home).
+    present: Vec<(PathBuf, bool)>,
+}
+
+/// Paths a stealer is after, relative to the home: hidden in Standard. Names holding
+/// "token", "credential", "secret", "password" or "wallet" are hidden too (`secret_name`).
+const HIDDEN: &[&str] = &[
+    ".ssh", ".gnupg", ".pki", ".password-store", ".local/share/keyrings", ".local/share/kwalletd", ".config/kdeconnect",
+    // Browsers and mail.
+    ".mozilla", ".config/mozilla", ".thunderbird", ".librewolf", ".waterfox", ".zen", ".floorp",
+    ".config/google-chrome", ".config/google-chrome-beta", ".config/google-chrome-unstable", ".config/chromium", ".config/BraveSoftware", ".config/vivaldi", ".config/opera", ".config/microsoft-edge",
+    ".var/app/org.mozilla.firefox", ".var/app/org.mozilla.Thunderbird", ".var/app/net.waterfox.waterfox", ".var/app/io.gitlab.librewolf-community", ".var/app/app.zen_browser.zen", ".var/app/one.ablaze.floorp",
+    ".var/app/com.google.Chrome", ".var/app/com.google.ChromeDev", ".var/app/org.chromium.Chromium", ".var/app/io.github.ungoogled_software.ungoogled_chromium", ".var/app/com.brave.Browser", ".var/app/com.microsoft.Edge", ".var/app/com.vivaldi.Vivaldi", ".var/app/com.opera.Opera",
+    // Chat.
+    ".config/discord", ".config/discordcanary", ".config/discordptb", ".config/vesktop", ".config/Signal", ".config/Element", ".config/Slack", ".config/stoat-desktop", ".config/revolt-desktop", ".local/share/TelegramDesktop",
+    ".var/app/com.discordapp.Discord", ".var/app/com.discordapp.DiscordCanary", ".var/app/dev.vencord.Vesktop", ".var/app/org.signal.Signal", ".var/app/org.telegram.desktop", ".var/app/im.riot.Riot", ".var/app/com.slack.Slack", ".var/app/chat.revolt.RevoltDesktop",
+    // Password managers.
+    ".config/Bitwarden", ".config/KeePassXC", ".config/1Password", ".var/app/com.bitwarden.desktop", ".var/app/org.keepassxc.KeePassXC", ".var/app/com.onepassword.OnePassword",
+    // Game stores and launchers' sign-ins (Steam's whole folder is hidden apart).
+    ".config/lobby", ".config/heroic", ".config/heroic_gogdl", ".config/legendary", ".var/app/com.heroicgameslauncher.hgl", ".cache/lutris", ".config/unityhub", ".local/share/UnityAuthBroker", ".var/app/com.valvesoftware.Steam",
+    // Developer and cloud sign-ins.
+    ".claude", ".claude.json", ".config/Claude", ".local/share/claude", ".config/gh", ".git-credentials", ".config/git/credentials", ".netrc", ".npmrc", ".pypirc", ".cargo/credentials", ".cargo/credentials.toml",
+    ".docker", ".kube", ".aws", ".azure", ".config/gcloud", ".config/rclone", ".config/.wrangler", ".config/configstore", ".config/turborepo", ".local/share/ferret-signing",
+    // Wallets.
+    ".electrum", ".bitcoin", ".ethereum", ".config/Exodus", ".config/Ledger Live",
+];
+
+/// What runs code at login, or when another program starts, relative to the home: read-only in
+/// Standard. Lobby's and gamefix's own folders too (a game must not turn its protection off,
+/// or change the fixes other games get), and the user's programs.
+const LOCKED: &[&str] = &[
+    ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin", ".config/fish", ".config/nushell",
+    ".xprofile", ".xinitrc", ".xsession", ".xsessionrc", ".pam_environment", ".config/environment.d",
+    ".config/autostart", ".config/autostart-scripts", ".config/plasma-workspace", ".config/systemd", ".local/share/systemd", ".local/share/dbus-1",
+    ".config/kglobalshortcutsrc", ".config/khotkeysrc", ".config/kwinrc", ".local/share/kwin", ".local/share/plasma", ".local/share/kservices5", ".local/share/kservices6",
+    ".config/mimeapps.list", ".local/share/applications", ".local/share/mime", ".local/share/flatpak", ".var/app", ".local/bin", ".local/lib", ".cargo/bin",
+    ".local/share/lobby", ".local/share/gamefix", ".config/gamefix", ".wine",
+];
+
+/// Folders under the home the umu/Proton tools live in: a throwaway writable layer over them.
+const TOOLS: &[&str] = &[".local/share/umu", ".local/share/Steam/compatibilitytools.d"];
+
+/// Read-only in an isolated home, for looks (fonts, cursors) and MangoHud.
+const LOOKS: &[&str] = &[".local/share/fonts", ".fonts", ".config/fontconfig", ".icons", ".local/share/icons", ".config/MangoHud"];
+
+fn secret_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    ["token", "credential", "secret", "password", "wallet"].iter().any(|w| n.contains(w))
+}
+
+/// What of HIDDEN, LOCKED, TOOLS, LOOKS, Steam and the secret-named files exists in the home.
+fn present(home: &Path) -> Vec<(PathBuf, bool)> {
+    let mut names: Vec<PathBuf> = HIDDEN.iter().chain(LOCKED).chain(TOOLS).chain(LOOKS).map(PathBuf::from).collect();
+    names.extend([".local/share/Steam", ".local/share/Steam/linux32", ".local/share/Steam/linux64"].map(PathBuf::from));
+    for dir in ["", ".config", ".local/share"] {
+        for entry in fs::read_dir(home.join(dir)).into_iter().flatten().flatten() {
+            if secret_name(&entry.file_name().to_string_lossy()) {
+                names.push(Path::new(dir).join(entry.file_name()));
+            }
+        }
+    }
+    // Proton builds in Steam's libraries in the home.
+    for entry in fs::read_dir(home.join(".local/share/Steam/steamapps/common")).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with("Proton") {
+            names.push(Path::new(".local/share/Steam/steamapps/common").join(entry.file_name()));
+        }
+    }
+    names.into_iter().filter_map(|n| fs::symlink_metadata(home.join(&n)).ok().filter(|m| !m.is_symlink()).map(|m| (n, m.is_dir()))).collect()
+}
+
+fn args_for(s: &Spec) -> Vec<String> {
+    let mut a: Vec<String> = Vec::new();
+    let mut push = |words: &[&str]| a.extend(words.iter().map(|w| w.to_string()));
+    let p = |path: &Path| path.display().to_string();
+    let at_home = |rel: &Path| s.home.join(rel);
+    let has = |rel: &str| s.present.iter().find(|(n, _)| n == Path::new(rel)).map(|(_, dir)| *dir);
+    match s.level {
+        Level::Isolated => push(&["--ro-bind", "/", "/"]),
+        _ => push(&["--bind", "/", "/"]),
+    }
+    push(&["--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--unshare-cgroup-try", "--die-with-parent", "--new-session"]);
+    for d in &s.devices {
+        push(&["--dev-bind", &p(d), &p(d)]);
+    }
+    if !s.internet {
+        push(&["--unshare-net"]);
+    }
+    // Shared places of their own: /tmp, the system bus's folder, the runtime folder.
+    push(&["--tmpfs", "/tmp", "--tmpfs", "/var/tmp"]);
+    if Path::new("/run/dbus").is_dir() {
+        push(&["--tmpfs", "/run/dbus"]);
+    }
+    if let Some(x) = &s.x11 {
+        push(&["--ro-bind", &p(x), &p(x)]);
+    }
+    if let Some(r) = &s.runtime {
+        push(&["--tmpfs", &p(r)]);
+        for (sock, to) in &s.sockets {
+            push(&["--ro-bind", &p(sock), &p(to)]);
+        }
+        match &s.bus {
+            Some(bus) => push(&["--ro-bind", &p(bus), &p(&r.join("bus")), "--setenv", "DBUS_SESSION_BUS_ADDRESS", &format!("unix:path={}", r.join("bus").display())]),
+            None => push(&["--unsetenv", "DBUS_SESSION_BUS_ADDRESS"]),
+        }
+    }
+    push(&["--unsetenv", "SSH_AUTH_SOCK", "--unsetenv", "GPG_AGENT_INFO", "--unsetenv", "GNOME_KEYRING_CONTROL", "--unsetenv", "AT_SPI_BUS_ADDRESS", "--unsetenv", "SESSION_MANAGER"]);
+    match s.level {
+        Level::Isolated => {
+            // No home, no drives: a home of its own.
+            for mask in masks(&s.home) {
+                push(&["--tmpfs", &p(&mask)]);
+            }
+            if let Some(private) = &s.private {
+                push(&["--bind", &p(private), &p(&s.home)]);
+            }
+            for look in LOOKS.iter().filter(|l| has(l).is_some()) {
+                push(&["--ro-bind", &p(&at_home(Path::new(look))), &p(&at_home(Path::new(look)))]);
+            }
+        }
+        _ => {
+            // Read-only first: hidden folders inside one (.var/app) are hidden after.
+            for rel in LOCKED.iter().filter(|l| has(l).is_some()) {
+                push(&["--ro-bind", &p(&at_home(Path::new(rel))), &p(&at_home(Path::new(rel)))]);
+            }
+            for (rel, dir) in s.present.iter().filter(|(n, _)| HIDDEN.iter().any(|h| Path::new(h) == n) || n.file_name().is_some_and(|f| secret_name(&f.to_string_lossy()))) {
+                match dir {
+                    true => push(&["--tmpfs", &p(&at_home(rel))]),
+                    false => push(&["--ro-bind", "/dev/null", &p(&at_home(rel))]),
+                }
+            }
+            if has(".local/share/Steam") == Some(true) {
+                push(&["--tmpfs", &p(&at_home(Path::new(".local/share/Steam")))]);
+            }
+        }
+    }
+    // Steam's client libraries, where Proton's steam.exe looks (~/.steam/sdk*: links into
+    // Steam's folder, which an isolated home doesn't have).
+    for bits in ["32", "64"] {
+        let lib = at_home(Path::new(&format!(".local/share/Steam/linux{bits}")));
+        if has(&format!(".local/share/Steam/linux{bits}")) == Some(true) {
+            let to = if s.level == Level::Isolated { at_home(Path::new(&format!(".steam/sdk{bits}"))) } else { lib.clone() };
+            push(&["--ro-bind", &p(&lib), &p(&to)]);
+        }
+    }
+    // umu's runtime and Proton: usable, unchanged.
+    for (rel, _) in s.present.iter().filter(|(n, dir)| *dir && (TOOLS.iter().any(|t| Path::new(t) == n) || n.starts_with(".local/share/Steam/steamapps/common"))) {
+        let path = p(&at_home(rel));
+        push(&["--overlay-src", &path, "--tmp-overlay", &path]);
+    }
+    for r in s.reads.iter().filter(|r| s.level == Level::Isolated && !s.game.iter().any(|g| r.starts_with(g))) {
+        push(&["--ro-bind", &p(r), &p(r)]);
+    }
+    for g in &s.game {
+        push(&["--bind", &p(g), &p(g)]);
+    }
+    a
+}
+
+/// Where an isolated game sees nothing: the folders holding homes, and the drives.
+fn masks(home: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = home.parent().map(Path::to_path_buf).into_iter().collect();
+    for top in ["/home", "/run/media", "/media", "/mnt", "/sysroot", "/var/mnt"] {
+        let path = real(Path::new(top));
+        if path.is_dir() && !out.contains(&path) && path != Path::new("/") {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// The isolated game's home, made the first time.
+fn private_home(id: &str) -> Result<PathBuf, String> {
+    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
+    let dir = data.join("lobby/sandboxes").join(id);
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(real(&dir))
+}
+
+fn real(p: &Path) -> PathBuf {
+    fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The game's writable folders: its own (not one too wide to be a game's), its Wine prefix,
+/// the folder it runs in when that's the game's, and the folders the user shared with it.
+fn game_folders(game: &Game, env: &[(String, String)], words: &[String], cwd: Option<&Path>, home: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let add = |p: PathBuf, out: &mut Vec<PathBuf>| {
+        let p = real(&p);
+        if p.is_dir() && !out.iter().any(|o| p.starts_with(o)) {
+            out.retain(|o| !o.starts_with(&p));
+            out.push(p);
+        }
+    };
+    for e in game.entries.iter().filter(|e| e.kind != Kind::Download) {
+        let folder = e.folder.clone().or_else(|| e.program.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)));
+        if let Some(f) = folder.filter(|f| !too_wide(f, home)) {
+            add(f, &mut out);
+        }
+        if let Some(prefix) = &e.prefix {
+            add(prefix.clone(), &mut out);
+        }
+    }
+    let word_env = words.iter().skip_while(|w| *w == "env").map_while(|w| w.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string()));
+    for (k, v) in env.iter().cloned().chain(word_env) {
+        if matches!(k.as_str(), "WINEPREFIX" | "STEAM_COMPAT_DATA_PATH") {
+            add(PathBuf::from(v), &mut out);
+        }
+    }
+    if let Some(dir) = cwd.filter(|d| !too_wide(d, home) && game.entries.iter().any(|e| e.folder.as_ref().is_some_and(|f| real(d).starts_with(real(f))))) {
+        add(dir.to_path_buf(), &mut out);
+    }
+    for f in &game.protection.folders {
+        add(f.clone(), &mut out);
+    }
+    out
+}
+
+/// A folder holding more than the game: the home or above it, a drive's top, a folder Lobby
+/// looks in, or one named like a folder of downloads or games.
+fn too_wide(folder: &Path, home: &Path) -> bool {
+    let dir = real(folder);
+    let dev = |p: &Path| fs::metadata(p).map(|m| std::os::unix::fs::MetadataExt::dev(&m)).ok();
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    home.starts_with(&dir)
+        || dir.parent().is_none_or(|up| dev(up) != dev(&dir))
+        || crate::places::games_or_downloads(&name)
+        || crate::sources::Home::find().is_some_and(|h| crate::sources::folders::roots(&h).iter().any(|r| real(r) == dir))
+}
+
+/// Absolute paths the command names (its words, `NAME=value` words and variables, values split
+/// at ':'), as they are: a program, a jar, PATH's folders, gamefix's sound settings.
+fn named_paths(env: &[(String, String)], words: &[String]) -> Vec<PathBuf> {
+    let values = env.iter().map(|(_, v)| v.clone()).chain(words.iter().map(|w| w.split_once('=').map_or(w.clone(), |(_, v)| v.to_string())));
+    let mut out = Vec::new();
+    for v in values {
+        for part in v.split(':').filter(|p| p.starts_with('/')) {
+            let path = real(Path::new(part));
+            if path.exists() && !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    // A Java runtime is its whole folder (bin/java needs lib/).
+    out.into_iter().map(|p| p.ancestors().find(|a| a.parent().is_some_and(|up| up.ends_with("gamefix/java"))).map_or(p.clone(), Path::to_path_buf)).collect()
+}
+
+/// Whether the sandbox hides the place a path is in (so it's bound back): the home, drives.
+fn hidden_area(path: &Path, home: &Path) -> bool {
+    let tops = masks(home);
+    (path.starts_with(home) || tops.iter().any(|t| path.starts_with(t))) && !path.starts_with(home.join(".local/share/Steam")) && !path.starts_with(home.join(".local/share/umu"))
+}
+
+/// The GPU (and NVIDIA's), controllers, Wine's ntsync.
+fn devices() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = ["/dev/dri", "/dev/input", "/dev/ntsync", "/dev/kfd", "/dev/udmabuf", "/dev/nvidia-caps"].iter().map(PathBuf::from).filter(|p| p.exists()).collect();
+    for entry in fs::read_dir("/dev").into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if (name.starts_with("nvidia") && name != "nvidia-caps") || name.starts_with("hidraw") {
+            out.push(entry.path());
+        }
+    }
+    out
+}
+
+/// The display's, sound's and Discord's sockets (Rich Presence) in the runtime folder, each
+/// with where it goes: a link (Discord's flatpak puts its socket in app/...) is replaced by the
+/// socket it points at.
+fn sockets(runtime: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let mut names: Vec<String> = ["WAYLAND_DISPLAY", "GAMESCOPE_WAYLAND_DISPLAY"].iter().filter_map(|v| std::env::var(v).ok()).filter(|n| !n.contains('/')).collect();
+    names.extend(["pipewire-0", "pulse/native"].map(String::from));
+    names.extend((0..10).map(|i| format!("discord-ipc-{i}")));
+    let mut out: Vec<(PathBuf, PathBuf)> = names.iter().map(|n| runtime.join(n)).filter(|p| p.exists()).map(|p| (real(&p), p)).collect();
+    if let Some(auth) = std::env::var_os("XAUTHORITY").map(PathBuf::from).filter(|a| a.starts_with(runtime) && a.exists()) {
+        out.push((auth.clone(), auth));
+    }
+    out
+}
+
+/// The X server's socket for $DISPLAY.
+fn x11_socket() -> Option<PathBuf> {
+    let display = std::env::var("DISPLAY").ok()?;
+    let n = display.strip_prefix(':')?.split('.').next()?;
+    Some(PathBuf::from(format!("/tmp/.X11-unix/X{n}"))).filter(|p| p.exists())
+}
+
+/// xdg-dbus-proxy in front of the session bus, letting through only what games use.
+fn start_proxy(runtime: &Path) -> Option<(Child, PathBuf)> {
+    let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok()?;
+    let proxy = crate::launch::program_on_path("xdg-dbus-proxy").or_else(|| Some(PathBuf::from("/usr/libexec/xdg-dbus-proxy")).filter(|p| p.is_file()))?;
+    let dir = runtime.join("lobby");
+    fs::create_dir_all(&dir).ok()?;
+    // Sockets left by a `lobby sandbox` that was killed (its proxy went with it).
+    for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.strip_prefix("bus-").is_some_and(|pid| !Path::new("/proc").join(pid).exists()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    let socket = dir.join(format!("bus-{}", std::process::id()));
+    let desktop = "org.freedesktop.portal.Desktop";
+    let rules = [
+        "--filter".to_string(),
+        "--talk=org.freedesktop.Notifications".into(),
+        "--talk=com.feralinteractive.GameMode".into(),
+        "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.*@/org/freedesktop/ScreenSaver".into(),
+        "--call=org.freedesktop.ScreenSaver=org.freedesktop.ScreenSaver.*@/ScreenSaver".into(),
+        format!("--call={desktop}=org.freedesktop.portal.Settings.*@/org/freedesktop/portal/desktop"),
+        format!("--call={desktop}=org.freedesktop.portal.Inhibit.*@/org/freedesktop/portal/desktop"),
+        format!("--call={desktop}=org.freedesktop.DBus.Properties.*@/org/freedesktop/portal/desktop"),
+        format!("--broadcast={desktop}=org.freedesktop.portal.Settings.SettingChanged@/org/freedesktop/portal/desktop"),
+    ];
+    let child = Command::new(proxy).arg(address).arg(&socket).args(rules).stdin(Stdio::null()).stdout(Stdio::null()).spawn().ok()?;
+    for _ in 0..100 {
+        if socket.exists() {
+            return Some((child, socket));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut child = child;
+    let _ = child.kill();
+    None
+}
+
+/// For the game's page and `lobby how`: what protection it gets, in a sentence.
+pub fn summary(game: &Game) -> String {
+    let level = level(game);
+    let net = if internet(game) { "" } else { ", no internet" };
+    match level {
+        Level::Off => "Off: the game can do anything you can.".into(),
+        _ => format!("{}{net}. {}", level.name(), level.describe()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(level: Level) -> Spec {
+        Spec {
+            level,
+            internet: level != Level::Isolated,
+            home: "/home/p".into(),
+            runtime: Some("/run/user/1000".into()),
+            private: Some("/home/p/.local/share/lobby/sandboxes/g".into()),
+            game: vec!["/run/media/p/Games/G".into(), "/home/p/.local/share/gamefix/prefixes/g".into()],
+            reads: vec!["/home/p/.local/share/gamefix/java/25".into(), "/run/media/p/Games/G/G.exe".into()],
+            devices: vec!["/dev/dri".into()],
+            sockets: vec![("/run/user/1000/wayland-0".into(), "/run/user/1000/wayland-0".into())],
+            x11: None,
+            bus: Some("/run/user/1000/lobby/bus-1".into()),
+            present: vec![(".ssh".into(), true), (".bashrc".into(), false), (".local/share/umu".into(), true), (".local/share/Steam".into(), true), (".local/share/Steam/linux64".into(), true), ("invent-kde-token".into(), false), (".local/share/gamefix".into(), true)],
+        }
+    }
+
+    #[test]
+    fn standard_hides_secrets_and_locks_startup_files() {
+        let a = args_for(&spec(Level::Standard));
+        assert!(a.windows(2).any(|w| w == ["--tmpfs", "/home/p/.ssh"]));
+        assert!(a.windows(3).any(|w| w == ["--ro-bind", "/dev/null", "/home/p/invent-kde-token"]));
+        assert!(a.windows(3).any(|w| w == ["--ro-bind", "/home/p/.bashrc", "/home/p/.bashrc"]));
+        assert!(a.windows(2).any(|w| w == ["--tmpfs", "/home/p/.local/share/Steam"]));
+        assert!(a.windows(3).any(|w| w == ["--ro-bind", "/home/p/.local/share/Steam/linux64", "/home/p/.local/share/Steam/linux64"]));
+        assert!(a.windows(4).any(|w| w == ["--overlay-src", "/home/p/.local/share/umu", "--tmp-overlay", "/home/p/.local/share/umu"]));
+        assert!(!a.contains(&"--unshare-net".to_string()));
+        assert!(a.contains(&"--unshare-pid".to_string()));
+        // The prefix under gamefix's (read-only) folder is writable: bound after it.
+        let locked = a.windows(3).position(|w| w == ["--ro-bind", "/home/p/.local/share/gamefix", "/home/p/.local/share/gamefix"]).unwrap();
+        let prefix = a.windows(3).position(|w| w == ["--bind", "/home/p/.local/share/gamefix/prefixes/g", "/home/p/.local/share/gamefix/prefixes/g"]).unwrap();
+        assert!(locked < prefix);
+        assert!(a.windows(3).any(|w| w == ["--setenv", "DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"]));
+    }
+
+    #[test]
+    fn isolated_sees_only_the_game() {
+        let a = args_for(&spec(Level::Isolated));
+        assert_eq!(&a[..3], ["--ro-bind", "/", "/"]);
+        assert!(a.contains(&"--unshare-net".to_string()));
+        assert!(a.windows(3).any(|w| w == ["--bind", "/home/p/.local/share/lobby/sandboxes/g", "/home/p"]));
+        assert!(a.windows(3).any(|w| w == ["--bind", "/run/media/p/Games/G", "/run/media/p/Games/G"]));
+        // Java is read-only; the game's own program is in its (writable) folder.
+        assert!(a.windows(3).any(|w| w == ["--ro-bind", "/home/p/.local/share/gamefix/java/25", "/home/p/.local/share/gamefix/java/25"]));
+        assert!(!a.windows(3).any(|w| w == ["--ro-bind", "/run/media/p/Games/G/G.exe", "/run/media/p/Games/G/G.exe"]));
+        assert!(!a.iter().any(|w| w == "/home/p/.ssh"));
+        // The home's own home comes before the game's folders bound into it.
+        let home = a.windows(3).position(|w| w[2] == "/home/p" && w[0] == "--bind").unwrap();
+        let prefix = a.windows(3).position(|w| w[1] == "/home/p/.local/share/gamefix/prefixes/g").unwrap();
+        assert!(home < prefix);
+    }
+
+    #[test]
+    fn wrapping() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let wrapped = words(&["/home/p/.local/bin/lobby", "sandbox", "g", "--", "env", "A=1", "umu-run", "x.exe"]);
+        assert_eq!(unwrapped(&wrapped).unwrap(), words(&["env", "A=1", "umu-run", "x.exe"]).as_slice());
+        assert!(unwrapped(&words(&["env", "A=1"])).is_none());
+    }
+}

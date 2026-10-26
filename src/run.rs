@@ -47,24 +47,13 @@ pub fn run(game: &Game) -> Result<(), String> {
     // The user's launch options: variables for the game, words after its arguments.
     let options = crate::launch::parse_options(game.launch_options.as_deref().unwrap_or_default())?;
     let program: Vec<String> = program.into_iter().chain(options.args).collect();
-    let mut command = match &wine.umu {
-        Some(umu) => {
-            let mut c = Command::new(umu);
-            c.args(&program);
-            c
-        }
-        None => {
-            let mut c = Command::new(&program[0]);
-            c.args(&program[1..]);
-            c
-        }
-    };
-    command.stdin(Stdio::null()).envs(env.into_iter().chain(extra_env).chain(options.vars));
-    if let Some(dir) = cwd.filter(|d| d.is_dir()) {
-        command.current_dir(dir);
-    }
+    let words: Vec<String> = wine.umu.iter().cloned().chain(program).collect();
+    let env: Vec<(String, String)> = env.into_iter().chain(extra_env).chain(options.vars).collect();
+    // In the game's sandbox: the store's sign-in and its saves' sync stay out here.
+    let mut sandboxed = crate::sandbox::command(game, &env, &words, cwd.as_deref().filter(|d| d.is_dir()))?;
+    println!("lobby: protection: {}", crate::sandbox::summary(game));
     // umu-run returns when the game has quit (Proton's waitforexitandrun).
-    let status = command.status().map_err(|e| format!("{}: {e}", program[0]))?;
+    let status = sandboxed.command.stdin(Stdio::null()).status().map_err(|e| format!("{}: {e}", words[0]))?;
     println!("lobby: {} quit ({status}).", game.name);
 
     if cloud {

@@ -155,6 +155,9 @@ pub struct Game {
     /// `VAR=value %command% words`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_options: Option<String>,
+    /// How it's protected when Lobby starts it (`sandbox`).
+    #[serde(default, skip_serializing_if = "crate::sandbox::Protection::is_default")]
+    pub protection: crate::sandbox::Protection,
 }
 
 impl Game {
@@ -383,7 +386,7 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             };
             let paths: Vec<&PathBuf> = entries.iter().flat_map(|e| [e.folder.as_ref(), e.program.as_ref()]).flatten().collect();
             let missing = !paths.is_empty() && !paths.iter().any(|p| p.exists());
-            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None }
+            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default() }
         })
         .collect();
     games.sort_by_key(|g| g.name.to_lowercase());

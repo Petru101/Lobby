@@ -347,7 +347,8 @@ fn build(app: &adw::Application) {
 /// shows that game as just installed, LOBBY_SNAPSHOT_ACCOUNTS=1 the accounts,
 /// LOBBY_SNAPSHOT_SIGNIN=epic|gog a store's sign-in page, LOBBY_SNAPSHOT_UNINSTALL=<game id>
 /// the question before uninstalling it, LOBBY_SNAPSHOT_FREE=1 the free games,
-/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page),
+/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page, LOBBY_SNAPSHOT_SCROLL=protection
+/// scrolls a game's page to its Protection),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
@@ -1595,8 +1596,15 @@ impl Ui {
             self.forget_installed();
             self.refilter();
         }
+        // The protection it starts with is kept (a default can change once it's been played).
+        {
+            let mut lib = self.lib.borrow_mut();
+            if lib.get_mut(id).is_some_and(crate::sandbox::settle) {
+                let _ = lib.save();
+            }
+        }
         match launch::plan(&game) {
-            Plan::Run { command, cwd, .. } => match launch::with_options(command, game.launch_options.as_deref()).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
+            Plan::Run { command, cwd, protect, .. } => match launch::final_command(&game, command, protect).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
                 Ok(()) => {
                     self.toast(&format!("Starting {}…", game.name));
                     self.played(&game.id, None);
@@ -1671,7 +1679,7 @@ impl Ui {
                     let result = gio::spawn_blocking(move || launch::set_up(&folder, None)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
                     match result {
                         Ok((lines, Some(entry))) => {
-                            let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::with_options(command, game.launch_options.as_deref()).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))));
+                            let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::final_command(&game, command, true).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))));
                             let mut e = Entry::new(Source::AppMenu, game.name.clone());
                             e.keys.push(Key::Desktop(entry));
                             u.played(&game.id, Some(e));
@@ -1801,8 +1809,10 @@ impl Ui {
             content.append(&row);
         }
         content.append(&info);
+        let protection = self.protection_group(&game, &plan);
         if game.kind == Kind::Game {
             content.append(&self.options_group(&game, &plan));
+            content.append(&protection);
         }
         let dlc = adw::PreferencesGroup::builder().title("DLC").build();
         content.append(&dlc);
@@ -1817,7 +1827,17 @@ impl Ui {
 
         let view = adw::ToolbarView::new();
         view.add_top_bar(&adw::HeaderBar::new());
-        view.set_content(Some(&gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build()));
+        let scrolled = gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        view.set_content(Some(&scrolled));
+        // A checking run's snapshot of the page further down (LOBBY_SNAPSHOT_SCROLL=protection).
+        if std::env::var("LOBBY_SNAPSHOT_SCROLL").is_ok_and(|s| s == "protection") {
+            let (scrolled, content) = (scrolled.clone(), content.clone());
+            glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+                if let Some(at) = protection.compute_point(&content, &gtk::graphene::Point::zero()) {
+                    scrolled.vadjustment().set_value(at.y() as f64 - 120.0);
+                }
+            });
+        }
         let dialog = adw::Dialog::builder().title(&game.name).content_width(720).child(&view).build();
         dialog_slot.replace(Some(dialog.clone()));
         let u = self.clone();
@@ -1874,6 +1894,113 @@ impl Ui {
         });
         group.add(&row);
         group
+    }
+
+    /// Protection on a game's page: its level, internet, and (isolated) the folders it may use.
+    fn protection_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> gtk::Box {
+        use crate::sandbox::{self, Level};
+        let unsupported = launch::protection_unsupported(plan);
+        let help = unsupported.clone().unwrap_or_else(|| "What the game can reach when Lobby starts it (Play). Its app-menu shortcut doesn't use this yet.".into());
+        let level = sandbox::level(game);
+        let group = adw::PreferencesGroup::builder().title("Protection").description(&help).build();
+        let names: Vec<&str> = Level::ALL.iter().map(|l| l.name()).collect();
+        let combo = adw::ComboRow::builder()
+            .title("Level")
+            .model(&gtk::StringList::new(&names))
+            .selected(Level::ALL.iter().position(|l| *l == level).unwrap_or(0) as u32)
+            .subtitle(level.describe())
+            .subtitle_lines(0)
+            .build();
+        let internet = adw::SwitchRow::builder()
+            .title("Internet")
+            .subtitle("Off: it can't reach the internet or your network.")
+            .active(sandbox::internet(game))
+            .sensitive(level != Level::Off)
+            .build();
+        if unsupported.is_none() {
+            group.add(&combo);
+            group.add(&internet);
+        }
+
+        let add = gtk::Button::builder().icon_name("list-add-symbolic").tooltip_text("Share a folder with it").valign(gtk::Align::Center).build();
+        add.add_css_class("flat");
+        let folders = adw::PreferencesGroup::builder()
+            .title("Folders it can use")
+            .description("Isolated, it sees only its own folder and these (a mods folder, say).")
+            .header_suffix(&add)
+            .visible(unsupported.is_none() && level == Level::Isolated)
+            .build();
+        let (u, id, list) = (self.clone(), game.id.clone(), folders.clone());
+        let add_row: Rc<dyn Fn(std::path::PathBuf)> = Rc::new(move |folder| {
+            let row = adw::ActionRow::builder().title(folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).subtitle(folder.display().to_string()).build();
+            let remove = gtk::Button::builder().icon_name("user-trash-symbolic").tooltip_text("Stop sharing it").valign(gtk::Align::Center).build();
+            remove.add_css_class("flat");
+            let (u, id, l, r) = (u.clone(), id.clone(), list.clone(), row.clone());
+            remove.connect_clicked(move |_| {
+                u.change_protection(&id, |p| p.folders.retain(|f| *f != folder));
+                l.remove(&r);
+            });
+            row.add_suffix(&remove);
+            list.add(&row);
+        });
+        for f in &game.protection.folders {
+            add_row(f.clone());
+        }
+        let (u, id) = (self.clone(), game.id.clone());
+        add.connect_clicked(move |_| {
+            let chooser = gtk::FileDialog::builder().title("A folder the game can use").build();
+            let (u, id, add_row) = (u.clone(), id.clone(), add_row.clone());
+            chooser.select_folder(Some(&u.window.clone()), gio::Cancellable::NONE, move |r| {
+                let Some(path) = r.ok().and_then(|f| f.path()) else { return };
+                let path = std::fs::canonicalize(&path).unwrap_or(path);
+                let mut added = false;
+                u.change_protection(&id, |p| {
+                    if !p.folders.contains(&path) {
+                        p.folders.push(path.clone());
+                        added = true;
+                    }
+                });
+                if added {
+                    add_row(path);
+                }
+            });
+        });
+
+        let (u, id, net, list) = (self.clone(), game.id.clone(), internet.clone(), folders.clone());
+        combo.connect_selected_notify(move |row| {
+            let level = Level::ALL[row.selected() as usize];
+            row.set_subtitle(level.describe());
+            net.set_sensitive(level != Level::Off);
+            list.set_visible(level == Level::Isolated);
+            u.change_protection(&id, |p| p.level = Some(level));
+            // Internet not chosen yet: the new level's default (off when isolated).
+            if u.game(&id).is_some_and(|g| g.protection.internet.is_none()) {
+                net.set_active(level != Level::Isolated);
+            }
+        });
+        let (u, id) = (self.clone(), game.id.clone());
+        internet.connect_active_notify(move |row| {
+            let on = row.is_active();
+            u.change_protection(&id, |p| p.internet = Some(on));
+        });
+
+        let both = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(24).build();
+        both.append(&group);
+        both.append(&folders);
+        both
+    }
+
+    fn change_protection(&self, id: &str, change: impl FnOnce(&mut crate::sandbox::Protection)) {
+        let saved = {
+            let mut lib = self.lib.borrow_mut();
+            if let Some(g) = lib.get_mut(id) {
+                change(&mut g.protection);
+            }
+            lib.save()
+        };
+        if let Err(e) = saved {
+            self.toast(&format!("Couldn't save the library: {e}"));
+        }
     }
 
     /// Saves the user's cover for a game (None: back to the one found), and shows it.

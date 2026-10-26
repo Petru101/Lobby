@@ -11,6 +11,7 @@ mod library;
 mod log;
 mod places;
 mod run;
+mod sandbox;
 mod sources;
 mod steam_move;
 mod search;
@@ -43,6 +44,8 @@ const USAGE: &str = "usage: lobby                   open the window
                                --copy brings a game's into its Wine prefix
        lobby launch-options <game id> [<options>]  show or set what Play adds to its command
                                (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
+       lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
+                               how lobby protects a game it starts; change it
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
 
@@ -67,6 +70,9 @@ fn main() -> ExitCode {
         (Some("search"), []) => search_drives(),
         // The options as typed, -- words too (`rest` leaves those out).
         (Some("launch-options"), [_, ..]) => launch_options(&args[1], &args[2..].join(" "), args.len() > 2),
+        (Some("protection"), [game, level @ ..]) if level.len() <= 1 => protection(game, level.first().copied(), &args),
+        // How Play runs a game protected: `lobby sandbox <id> -- <command>`.
+        (Some("sandbox"), _) if args.get(2).is_some_and(|a| a == "--") && args.len() > 3 => return in_sandbox(&args[1], &args[3..]),
         (Some("windows-saves"), words) => windows_saves(&words.join(" "), args.iter().any(|a| a == "--copy")),
         (Some("free"), []) if args.iter().any(|a| a == "--notify") => free_notify(),
         (Some("free"), []) if args.iter().any(|a| a == "--daily=off") => free::set_daily(false),
@@ -120,6 +126,65 @@ fn launch_options(query: &str, text: &str, set: bool) -> Result<(), String> {
     lib.save()?;
     println!("{}: {}", game.name, if text.is_empty() { "launch options cleared" } else { text });
     Ok(())
+}
+
+/// Shows how a game is protected, or changes it.
+fn protection(query: &str, level: Option<&str>, args: &[String]) -> Result<(), String> {
+    let mut lib = Library::load().map_or_else(scan, Ok)?;
+    let id = lib.find(query)?.id.clone();
+    let flag = |name: &str| args.iter().find_map(|a| a.strip_prefix(&format!("--{name}=")).map(str::to_string));
+    let changing = level.is_some() || flag("internet").is_some() || flag("share").is_some() || flag("unshare").is_some();
+    if changing {
+        let g = lib.get_mut(&id).unwrap();
+        match level {
+            Some("default") => g.protection = sandbox::Protection { folders: std::mem::take(&mut g.protection.folders), ..Default::default() },
+            Some(l) => g.protection.level = Some(sandbox::Level::parse(l).ok_or(format!("\"{l}\": standard, isolated, off or default."))?),
+            None => {}
+        }
+        match flag("internet").as_deref() {
+            Some("on") => g.protection.internet = Some(true),
+            Some("off") => g.protection.internet = Some(false),
+            Some(other) => return Err(format!("--internet={other}: on or off.")),
+            None => {}
+        }
+        if let Some(f) = flag("share") {
+            let f = std::fs::canonicalize(&f).map_err(|e| format!("{f}: {e}"))?;
+            if !g.protection.folders.contains(&f) {
+                g.protection.folders.push(f);
+            }
+        }
+        if let Some(f) = flag("unshare") {
+            let f = std::fs::canonicalize(&f).unwrap_or_else(|_| f.into());
+            g.protection.folders.retain(|o| *o != f);
+        }
+        lib.save()?;
+    }
+    let game = lib.find(&id)?;
+    println!("{}: {}", game.name, sandbox::summary(game));
+    for f in &game.protection.folders {
+        println!("  shared with it: {}", f.display());
+    }
+    if let Some(why) = launch::protection_unsupported(&launch::plan(game)) {
+        println!("  ({why})");
+    }
+    Ok(())
+}
+
+/// Runs a game's command in its sandbox and waits for it; exits as it did.
+fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
+    let started = Library::load().ok_or("No library yet: run lobby scan.".to_string()).and_then(|lib| {
+        let game = lib.games.iter().find(|g| g.id == id).ok_or(format!("No game with the id \"{id}\" in the library."))?.clone();
+        let mut s = sandbox::command(&game, &[], command, None)?;
+        let status = s.command.stdin(std::process::Stdio::null()).status().map_err(|e| format!("bwrap: {e}"))?;
+        Ok(status.code().unwrap_or(1))
+    });
+    match started {
+        Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
+        Err(e) => {
+            eprintln!("lobby: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Saves found in Windows user folders: every game's (no game named), or one game's, brought
@@ -178,8 +243,8 @@ fn scan() -> Result<Library, String> {
 fn play(query: &str) -> Result<(), String> {
     let mut lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?.clone();
-    let (how, command, cwd) = match launch::plan(&game) {
-        launch::Plan::Run { how, command, cwd } => (how, command, cwd),
+    let plan = match launch::plan(&game) {
+        launch::Plan::Run { how, command, cwd, protect } => (how, command, cwd, protect),
         launch::Plan::Cannot(why) => return Err(format!("{}: {why}", game.name)),
         launch::Plan::BattleNet { folder, launch } => {
             if !battlenet::installed() {
@@ -208,11 +273,18 @@ fn play(query: &str) -> Result<(), String> {
                 e.keys.push(library::Key::Desktop(entry.clone()));
                 g.entries.push(e);
             }
-            ("its new gamefix app-menu entry".to_string(), command, cwd)
+            ("its new gamefix app-menu entry".to_string(), command, cwd, true)
         }
     };
+    let (how, command, cwd, protect) = plan;
+    // The protection it starts with is kept (a default can change once it's been played).
+    if let Some(g) = lib.get_mut(&game.id) {
+        if sandbox::settle(g) {
+            lib.save()?;
+        }
+    }
     let log = store::log_file(&game.id);
-    let command = launch::with_options(command, game.launch_options.as_deref())?;
+    let command = launch::final_command(&game, command, protect)?;
     launch::start(&command, cwd.as_deref(), &log)?;
     println!("Starting {} with {how}. Its output goes to {}", game.name, log.display());
     if let Some(g) = lib.get_mut(&game.id) {
@@ -261,13 +333,17 @@ fn how(query: &str) -> Result<(), String> {
     let lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?;
     match launch::plan(game) {
-        launch::Plan::Run { how, command, cwd } => {
+        launch::Plan::Run { how, command, cwd, protect } => {
             println!("{} starts with {how}:\n  {}", game.name, command.join(" "));
+            match protect {
+                true => println!("  protected: {}", sandbox::summary(game)),
+                false => println!("  not protected: {}", launch::protection_unsupported(&launch::plan(game)).unwrap_or_default()),
+            }
             if let Some(dir) = cwd {
                 println!("  in {}", dir.display());
             }
         }
-        launch::Plan::SetUp(folder) => println!("{}: no launcher knows it; gamefix sets up {} first (an app-menu entry), then that starts it.", game.name, folder.display()),
+        launch::Plan::SetUp(folder) => println!("{}: no launcher knows it; gamefix sets up {} first (an app-menu entry), then that starts it.\n  protected: {}", game.name, folder.display(), sandbox::summary(game)),
         launch::Plan::BattleNet { folder, launch } => {
             if !battlenet::installed() {
                 println!("{}: a Blizzard game; Battle.net isn't installed yet: lobby installs it into {} first.", game.name, battlenet::prefix().display());
