@@ -532,7 +532,10 @@ pub fn start(command: &[String], cwd: Option<&Path>, log: &Path) -> Result<(), S
     if let Some(dir) = cwd.filter(|d| d.is_dir()) {
         cmd.current_dir(dir);
     }
-    cmd.spawn().map(|_| ()).map_err(|e| format!("{program}: {e}"))
+    let mut child = cmd.spawn().map_err(|e| format!("{program}: {e}"))?;
+    // Collected when it ends, or each game played would stay a zombie while the window is open.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// A game's launch options, as typed in Steam's style: words added after the game's program, or

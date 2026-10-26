@@ -514,13 +514,10 @@ impl Ui {
             u.rescan_button.set_sensitive(true);
             match found {
                 Ok(Ok(games)) => {
-                    let mut lib = u.lib.borrow_mut();
-                    lib.update(games);
-                    if let Err(e) = lib.save() {
+                    if let Err(e) = u.change_lib(|lib| lib.update(games)) {
                         u.toast(&format!("Couldn't save the library: {e}"));
                     }
-                    let games = lib.games.clone();
-                    drop(lib);
+                    let games = u.lib.borrow().games.clone();
                     u.fill();
                     // App-menu entries made or changed since start as Play does.
                     gio::spawn_blocking(move || crate::log::timed("app-menu entries' protection", || crate::sandbox::sync_shortcuts(&games)));
@@ -556,12 +553,25 @@ impl Ui {
     }
 
     fn played(&self, id: &str, entry: Option<Entry>) {
+        let _ = self.change_lib(|lib| {
+            if let Some(g) = lib.get_mut(id) {
+                g.played = Some(store::now());
+                g.entries.extend(entry);
+            }
+        });
+    }
+
+    /// Changes the library as it is saved now, saves it and keeps it: a `lobby` command
+    /// (launch options, protection, a scan) may have changed it since this window read it,
+    /// and saving the window's own copy would undo that (a launch option set in a terminal
+    /// was lost when a game was played from an open window).
+    fn change_lib(&self, change: impl FnOnce(&mut Library)) -> Result<(), String> {
         let mut lib = self.lib.borrow_mut();
-        if let Some(g) = lib.get_mut(id) {
-            g.played = Some(store::now());
-            g.entries.extend(entry);
+        if let Some(saved) = Library::load() {
+            *lib = saved;
         }
-        let _ = lib.save();
+        change(&mut lib);
+        lib.save()
     }
 
     fn is_installing(&self, id: &str) -> bool {
@@ -1594,18 +1604,19 @@ impl Ui {
     }
 
     fn play(self: &Rc<Self>, id: &str) {
+        // As saved now: its launch options or protection may have been changed elsewhere.
+        if let Some(saved) = Library::load() {
+            *self.lib.borrow_mut() = saved;
+        }
         let Some(game) = self.game(id) else { return };
         if self.is_just_installed(id) {
             self.forget_installed();
             self.refilter();
         }
         // The protection it starts with is kept (a default can change once it's been played).
-        {
-            let mut lib = self.lib.borrow_mut();
-            if lib.get_mut(id).is_some_and(crate::sandbox::settle) {
-                let _ = lib.save();
-            }
-        }
+        let _ = self.change_lib(|lib| {
+            lib.get_mut(id).map(crate::sandbox::settle);
+        });
         self.sync_shortcut(id);
         match launch::plan(&game) {
             Plan::Run { command, cwd, protect, .. } => match launch::final_command(&game, command, protect).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
@@ -1889,11 +1900,12 @@ impl Ui {
                 u.alert("Those launch options can't be used", &e);
                 return;
             }
-            let mut lib = u.lib.borrow_mut();
-            if let Some(g) = lib.get_mut(&id) {
-                g.launch_options = (!text.is_empty()).then_some(text.clone());
-            }
-            match lib.save() {
+            let saved = u.change_lib(|lib| {
+                if let Some(g) = lib.get_mut(&id) {
+                    g.launch_options = (!text.is_empty()).then_some(text.clone());
+                }
+            });
+            match saved {
                 Ok(()) => u.toast(if text.is_empty() { "Launch options cleared." } else { "Launch options saved: Play uses them." }),
                 Err(e) => u.toast(&format!("Couldn't save the library: {e}")),
             }
@@ -1997,13 +2009,11 @@ impl Ui {
     }
 
     fn change_protection(&self, id: &str, change: impl FnOnce(&mut crate::sandbox::Protection)) {
-        let saved = {
-            let mut lib = self.lib.borrow_mut();
+        let saved = self.change_lib(|lib| {
             if let Some(g) = lib.get_mut(id) {
                 change(&mut g.protection);
             }
-            lib.save()
-        };
+        });
         if let Err(e) = saved {
             self.toast(&format!("Couldn't save the library: {e}"));
         }
@@ -2024,14 +2034,13 @@ impl Ui {
 
     /// Saves the user's cover for a game (None: back to the one found), and shows it.
     fn set_cover(self: &Rc<Self>, id: &str, cover: Option<String>, details: &adw::Dialog) {
-        {
-            let mut lib = self.lib.borrow_mut();
+        let saved = self.change_lib(|lib| {
             if let Some(g) = lib.get_mut(id) {
                 g.chosen_cover = cover;
             }
-            if let Err(e) = lib.save() {
-                self.toast(&format!("Couldn't save the library: {e}"));
-            }
+        });
+        if let Err(e) = saved {
+            self.toast(&format!("Couldn't save the library: {e}"));
         }
         self.fill();
         details.close();
