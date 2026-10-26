@@ -31,13 +31,22 @@ pub struct SavePaths {
     #[serde(default)]
     cloud: Vec<String>,
     paths: Vec<String>,
+    /// Every save path, for the game's save folders here (`save_folders`): its install folder's
+    /// (<base>), Windows' shared folders, Linux's; with the system it applies to, if one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub all: Vec<(String, Option<String>)>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct Index {
     fetched: u64,
     games: Vec<SavePaths>,
+    /// 2: with `all`.
+    #[serde(default)]
+    version: u32,
 }
+
+const INDEX_VERSION: u32 = 2;
 
 fn index_file() -> PathBuf {
     crate::stores::cache_dir().join("save-paths.json")
@@ -89,8 +98,16 @@ fn parse_manifest(text: &str) -> Result<Vec<SavePaths>, String> {
         .filter_map(|(name, g)| {
             let mut paths: Vec<String> = g.files.iter().filter(|(p, r)| usable(p, r)).map(|(p, _)| p.clone()).collect();
             paths.sort();
+            let mut all: Vec<(String, Option<String>)> = g
+                .files
+                .iter()
+                .filter(|(_, r)| r.tags.iter().any(|t| t == "save"))
+                .flat_map(|(p, r)| if r.when.is_empty() { vec![(p.clone(), None)] } else { r.when.iter().map(|w| (p.clone(), w.os.clone())).collect() })
+                .collect();
+            all.sort();
+            all.dedup();
             let cloud = g.cloud.iter().filter(|(_, on)| **on).map(|(s, _)| s.clone()).collect();
-            (!paths.is_empty()).then(|| SavePaths { name, steam: g.steam.and_then(|s| s.id), gog: g.gog.and_then(|s| s.id), cloud, paths })
+            (!all.is_empty()).then(|| SavePaths { name, steam: g.steam.and_then(|s| s.id), gog: g.gog.and_then(|s| s.id), cloud, paths, all })
         })
         .collect();
     games.sort_by(|a, b| a.name.cmp(&b.name));
@@ -98,9 +115,9 @@ fn parse_manifest(text: &str) -> Result<Vec<SavePaths>, String> {
 }
 
 /// The index, fetched again when over a week old (the old one serves when that fails).
-fn index() -> Vec<SavePaths> {
+pub(crate) fn index() -> Vec<SavePaths> {
     let saved: Option<Index> = fs::read_to_string(index_file()).ok().and_then(|t| serde_json::from_str(&t).ok());
-    if let Some(i) = saved.as_ref().filter(|i| crate::store::now().saturating_sub(i.fetched) < WEEK) {
+    if let Some(i) = saved.as_ref().filter(|i| i.version >= INDEX_VERSION && crate::store::now().saturating_sub(i.fetched) < WEEK) {
         return i.games.clone();
     }
     let fetched = crate::log::timed("windows saves: Ludusavi's manifest", || {
@@ -113,7 +130,7 @@ fn index() -> Vec<SavePaths> {
     match fetched {
         Ok(games) => {
             let _ = fs::create_dir_all(index_file().parent().unwrap());
-            let _ = fs::write(index_file(), serde_json::to_string(&Index { fetched: crate::store::now(), games: games.clone() }).unwrap());
+            let _ = fs::write(index_file(), serde_json::to_string(&Index { fetched: crate::store::now(), games: games.clone(), version: INDEX_VERSION }).unwrap());
             games
         }
         Err(e) => {
@@ -124,7 +141,7 @@ fn index() -> Vec<SavePaths> {
 }
 
 /// The manifest's entry for a game: by Steam or GOG id, else by name.
-fn paths_for<'a>(game: &Game, index: &'a [SavePaths]) -> Option<&'a SavePaths> {
+pub(crate) fn paths_for<'a>(game: &Game, index: &'a [SavePaths]) -> Option<&'a SavePaths> {
     let keys = || game.entries.iter().flat_map(|e| e.keys.iter());
     if let Some(id) = keys().find_map(|k| if let Key::SteamApp(id) = k { Some(u64::from(*id)) } else { None }) {
         if let Some(p) = index.iter().find(|p| p.steam == Some(id)) {
@@ -220,7 +237,7 @@ fn matches(pattern: &str, name: &str) -> bool {
 }
 
 /// The paths under `dir` matching the pattern's parts, each part ignoring case ("**" any depth).
-fn expand(dir: &Path, parts: &[&str], out: &mut Vec<PathBuf>) {
+pub(crate) fn expand(dir: &Path, parts: &[&str], out: &mut Vec<PathBuf>) {
     let Some((first, rest)) = parts.split_first() else {
         out.push(dir.to_path_buf());
         return;
@@ -299,7 +316,7 @@ pub fn prefix(game: &Game) -> Option<PathBuf> {
 }
 
 /// The prefix's user folder (Proton's steamuser, else Wine's own user).
-fn prefix_user(prefix: &Path) -> PathBuf {
+pub(crate) fn prefix_user(prefix: &Path) -> PathBuf {
     let users = prefix.join("drive_c/users");
     if users.join("steamuser").is_dir() {
         return users.join("steamuser");

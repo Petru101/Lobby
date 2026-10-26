@@ -595,8 +595,8 @@ fn build(app: &adw::Application) {
 /// shows that game as just installed, LOBBY_SNAPSHOT_ACCOUNTS=1 the accounts,
 /// LOBBY_SNAPSHOT_SIGNIN=epic|gog a store's sign-in page, LOBBY_SNAPSHOT_UNINSTALL=<game id>
 /// the question before uninstalling it, LOBBY_SNAPSHOT_FREE=1 the free games,
-/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page, LOBBY_SNAPSHOT_SCROLL=protection
-/// scrolls a game's page to its Protection),
+/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page, LOBBY_SNAPSHOT_SCROLL=protection|saves
+/// scrolls a game's page to its Protection or Saves),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
@@ -1159,6 +1159,31 @@ impl Ui {
     /// hidden when there's none.
     /// Also says, in `info`, whether lobby syncs the game's cloud saves.
     /// The game's saves found in a Windows user folder on the drives, and bringing them over.
+    /// Where the game keeps its saves here, each with Open (looked up off the main thread: the
+    /// manifest's index is a few MB).
+    fn fill_save_folders(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup) {
+        let (u, group, g) = (self.clone(), group.clone(), game.clone());
+        glib::spawn_future_local(async move {
+            let found = gio::spawn_blocking(move || crate::save_folders::find(&g)).await.unwrap_or_default();
+            for f in found {
+                let title = match f.what {
+                    "Saves" => "Save folder".to_string(),
+                    cloud => format!("Save folder ({cloud})"),
+                };
+                let row = adw::ActionRow::builder().title(title).subtitle(f.path.display().to_string()).subtitle_selectable(true).use_markup(false).build();
+                row.add_css_class("property");
+                let open = gtk::Button::builder().label("Open").valign(gtk::Align::Center).build();
+                let (w, path) = (u.window.clone(), f.path.clone());
+                open.connect_clicked(move |_| {
+                    gtk::FileLauncher::new(Some(&gio::File::for_path(&path))).launch(Some(&w), gio::Cancellable::NONE, |_| {});
+                });
+                row.add_suffix(&open);
+                group.add(&row);
+                group.set_visible(true);
+            }
+        });
+    }
+
     fn fill_windows_saves(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup) {
         use crate::windows_saves::{size_text, Saves};
         let (u, group, g) = (self.clone(), group.clone(), game.clone());
@@ -2292,6 +2317,11 @@ impl Ui {
         }
         let dlc = adw::PreferencesGroup::builder().title("DLC").build();
         content.append(&dlc);
+        let save_folders = adw::PreferencesGroup::builder().title("Saves").visible(false).build();
+        content.append(&save_folders);
+        if game.kind == Kind::Game && !game.gone {
+            self.fill_save_folders(&game, &save_folders);
+        }
         let saves = adw::PreferencesGroup::builder().title("Saves from Windows").visible(false).build();
         content.append(&saves);
         if game.kind == Kind::Game && !game.gone {
@@ -2305,11 +2335,15 @@ impl Ui {
         view.add_top_bar(&adw::HeaderBar::new());
         let scrolled = gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build();
         view.set_content(Some(&scrolled));
-        // A checking run's snapshot of the page further down (LOBBY_SNAPSHOT_SCROLL=protection).
-        if std::env::var("LOBBY_SNAPSHOT_SCROLL").is_ok_and(|s| s == "protection") {
+        // A checking run's snapshot of the page further down (LOBBY_SNAPSHOT_SCROLL=protection|saves).
+        if let Some(target) = std::env::var("LOBBY_SNAPSHOT_SCROLL").ok().and_then(|s| match s.as_str() {
+            "protection" => Some(protection.clone().upcast::<gtk::Widget>()),
+            "saves" => Some(save_folders.clone().upcast::<gtk::Widget>()),
+            _ => None,
+        }) {
             let (scrolled, content) = (scrolled.clone(), content.clone());
             glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
-                if let Some(at) = protection.compute_point(&content, &gtk::graphene::Point::zero()) {
+                if let Some(at) = target.compute_point(&content, &gtk::graphene::Point::zero()) {
                     scrolled.vadjustment().set_value(at.y() as f64 - 120.0);
                 }
             });

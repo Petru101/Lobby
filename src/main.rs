@@ -13,6 +13,7 @@ mod places;
 mod run;
 mod playtime;
 mod sandbox;
+mod save_folders;
 mod sizes;
 mod sources;
 mod steam_move;
@@ -424,6 +425,9 @@ fn how(query: &str) -> Result<(), String> {
     }
     if game.kind != Kind::Game {
         return Ok(());
+    }
+    for f in save_folders::find(game) {
+        println!("{}: {}", f.what, f.path.display());
     }
     println!("Uninstall: {}", match uninstall::how(game) {
         uninstall::How::Store(store, _) => format!("{}'s files go, through lobby's {} tool", game.name, store.name()),

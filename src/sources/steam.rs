@@ -7,7 +7,7 @@ use gamefix::{steam, vdf};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(super) fn roots(home: &Home) -> Vec<PathBuf> {
+pub(crate) fn roots(home: &Home) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = [".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"]
         .iter()
         .map(|p| home.join(p))

@@ -122,6 +122,11 @@ fn locations(storage: Option<&serde_json::Value>, client: &str) -> Vec<(String, 
     named
 }
 
+/// Where GOG's cloud keeps a game's saves in its prefix (Galaxy's locations, resolved).
+pub fn gog_folders(id: &str, prefix: &Path, game_folder: &Path) -> Vec<PathBuf> {
+    gog_locations(id).iter().map(|(_, l)| resolve(l, prefix, game_folder)).collect()
+}
+
 /// A Galaxy location as a folder in the game's Proton prefix (its user is steamuser).
 fn resolve(location: &str, prefix: &Path, game_folder: &Path) -> PathBuf {
     let user = prefix.join("drive_c/users/steamuser");
