@@ -1557,7 +1557,9 @@ impl Ui {
         let u = self.clone();
         glib::spawn_future_local(async move {
             let g = game.clone();
-            let placed = u.with_progress(&game.id, "Installing…", move |p| crate::install::place(&g, p)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
+            // A store's install reports how much is downloaded; unpacking an archive doesn't.
+            let what = if game.kind == Kind::Owned { "Downloading…" } else { "Installing…" };
+            let placed = u.with_progress(&game.id, what, move |p| crate::install::place(&g, p)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
             let result = match placed {
                 Ok(placed) => {
                     // Java or a runner from Flathub first, when the game needs one: asked.
@@ -1976,7 +1978,7 @@ impl Ui {
         self.toast(&format!("Updating {}…", game.name));
         let u = self.clone();
         glib::spawn_future_local(async move {
-            match u.with_progress(&game.id, "Updating…", move |p| store.update(&sid, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
+            match u.with_progress(&game.id, "Downloading…", move |p| store.update(&sid, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
                 Ok(()) => u.toast(&format!("{} is up to date.", game.name)),
                 Err(e) => u.alert(&format!("{} couldn't be updated", game.name), &e),
             }
@@ -1996,7 +1998,7 @@ impl Ui {
         let u = self.clone();
         glib::spawn_future_local(async move {
             let ids = vec![dlc.id.clone()];
-            match u.with_progress(&game.id, "Installing…", move |p| store.install_dlc(&sid, &ids, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
+            match u.with_progress(&game.id, "Downloading…", move |p| store.install_dlc(&sid, &ids, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
                 Ok(()) => u.toast(&format!("{} is installed.", dlc.title)),
                 Err(e) => u.alert(&format!("{} couldn't be installed", dlc.title), &e),
             }
@@ -2015,7 +2017,8 @@ impl Ui {
                 bar.set_text(Some(what));
             } else {
                 bar.set_fraction(p / 100.0);
-                bar.set_text(Some(&format!("Downloading {p:.0}%")));
+                // "Moving 37%", "Downloading 37%": the job's own word.
+                bar.set_text(Some(&format!("{} {p:.0}%", what.trim_end_matches('…'))));
             }
         }
     }
