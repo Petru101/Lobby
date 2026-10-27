@@ -29,6 +29,12 @@ pub struct Client {
     cloud: Option<&'static str>,
     /// Files or folders in a game's folder that say it needs the app (lowercase, relative).
     marks: &'static [&'static str],
+    /// What the app's installer needs in the prefix first (winetricks verbs), its installer's
+    /// arguments, and settings files written before it runs (relative to the prefix's user
+    /// folder): as Lutris's published install scripts do them, which work.
+    winetricks: &'static [&'static str],
+    args: &'static [&'static str],
+    files: &'static [(&'static str, &'static str)],
 }
 
 pub const CLIENTS: &[Client] = &[
@@ -40,6 +46,10 @@ pub const CLIENTS: &[Client] = &[
         store: Some("ea"),
         cloud: Some("origin"),
         marks: &["__installer/installerdata.xml", "core/activation64.dll", "core/activation.dll"],
+        winetricks: &["corefonts", "physx", "win10"],
+        // Quiet: it installs without a click; it signs in when it first starts.
+        args: &["/quiet", "EAX_LAUNCH_CLIENT=0"],
+        files: &[],
     },
     Client {
         id: "ubisoft",
@@ -49,6 +59,10 @@ pub const CLIENTS: &[Client] = &[
         store: Some("ubisoft"),
         cloud: Some("uplay"),
         marks: &["uplay_install.state", "uplay_r1_loader64.dll", "uplay_r1_loader.dll", "uplay_r2_loader64.dll", "upc_r1_loader64.dll", "upc_r2_loader64.dll"],
+        winetricks: &["d3dcompiler_43", "corefonts"],
+        args: &["/S"],
+        // Its overlay off (it hooks the game), and closing it closes it.
+        files: &[("AppData/Local/Ubisoft Game Launcher/settings.yaml", "overlay:\n  enabled: false\n  forceunhookgame: false\n  fps_enabled: false\n  warning_enabled: false\nuser:\n  closebehavior: CloseBehavior_Close\n")],
     },
     Client {
         id: "rockstar",
@@ -58,6 +72,9 @@ pub const CLIENTS: &[Client] = &[
         store: None,
         cloud: None,
         marks: &["playgtav.exe", "playrdr2.exe", "playgtaiv.exe", "launcherpatcher.exe"],
+        winetricks: &["corefonts"],
+        args: &[],
+        files: &[],
     },
 ];
 
@@ -109,22 +126,66 @@ impl Client {
             let _ = fs::remove_file(&setup);
             return Err(format!("The {}'s installer couldn't be downloaded.", self.name));
         }
+        // A fresh prefix: one a failed install left behind holds its half-done state (the EA
+        // app's installer then fails again).
+        let _ = fs::remove_dir_all(self.prefix());
         fs::create_dir_all(self.prefix()).map_err(|e| e.to_string())?;
         let log = crate::store::log_file(&format!("client-{}", self.id));
         fs::create_dir_all(log.parent().unwrap()).map_err(|e| e.to_string())?;
         let out = fs::File::create(&log).map_err(|e| e.to_string())?;
-        let status = Command::new("umu-run")
-            .envs(self.umu("waitforexitandrun"))
-            .arg(&setup)
-            .stdin(Stdio::null())
-            .stdout(out.try_clone().map_err(|e| e.to_string())?)
-            .stderr(out)
-            .status()
-            .map_err(|e| format!("umu-run: {e}"))?;
+        let run = |args: &[&std::ffi::OsStr]| -> Result<std::process::ExitStatus, String> {
+            Command::new("umu-run")
+                .envs(self.umu("waitforexitandrun"))
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(out.try_clone().map_err(|e| e.to_string())?)
+                .stderr(out.try_clone().map_err(|e| e.to_string())?)
+                .status()
+                .map_err(|e| format!("umu-run: {e}"))
+        };
+        // Proton sets the prefix up first (Wine Mono, which the EA app installer's .NET step
+        // needs: run winetricks into a prefix Proton hasn't set up and that step fails with
+        // INST-14-1603).
+        run(&["wineboot".as_ref(), "-u".as_ref()])?;
+        if !self.winetricks.is_empty() {
+            let mut words: Vec<&std::ffi::OsStr> = vec!["winetricks".as_ref(), "-q".as_ref()];
+            words.extend(self.winetricks.iter().map(|w| std::ffi::OsStr::new(w)));
+            run(&words)?;
+        }
+        let user = crate::windows_saves::prefix_user(&self.prefix());
+        for (rel, text) in self.files {
+            let f = user.join(rel);
+            let _ = fs::create_dir_all(f.parent().unwrap());
+            let _ = fs::write(&f, text);
+        }
+        let mut words: Vec<&std::ffi::OsStr> = vec![setup.as_os_str()];
+        words.extend(self.args.iter().map(|w| std::ffi::OsStr::new(w)));
+        let status = run(&words)?;
+        self.settle();
         if self.installed() {
             Ok(())
         } else {
             Err(format!("The {} wasn't installed (its installer {}). What it printed is in {}.", self.name, if status.success() { "closed" } else { "failed" }, log.display()))
+        }
+    }
+}
+
+impl Client {
+    /// After its installer: the EA app now installs into a folder named after its version
+    /// (EA Desktop/<version>/EA Desktop); moved to where its shortcuts and Lobby expect it, as
+    /// Lutris's script does.
+    fn settle(&self) {
+        if self.id != "ea" || self.installed() {
+            return;
+        }
+        let top = self.prefix().join("drive_c/Program Files/Electronic Arts/EA Desktop");
+        let versioned = fs::read_dir(&top).into_iter().flatten().flatten().filter(|e| e.file_name() != "EA Desktop").map(|e| e.path().join("EA Desktop")).find(|d| d.join("EALauncher.exe").is_file() || d.join("EADesktop.exe").is_file());
+        if let Some(from) = versioned {
+            let to = top.join("EA Desktop");
+            let _ = fs::remove_dir_all(&to);
+            if let Err(e) = fs::rename(&from, &to) {
+                crate::log::line(&format!("EA app: couldn't move {} into place: {e}", from.display()));
+            }
         }
     }
 }

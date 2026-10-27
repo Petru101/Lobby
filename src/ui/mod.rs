@@ -2801,7 +2801,7 @@ impl Ui {
                 glib::spawn_future_local(async move {
                     let alert = adw::AlertDialog::new(
                         Some(&format!("{} needs the {}", game.name, client.name)),
-                        Some(&format!("It only starts with the {0}, which checks your copy. Lobby can install the {0} into a Wine setup of its own. Its installer opens: follow it, then sign in to your account in the {0}.", client.name)),
+                        Some(&format!("It only starts with the {0}, which checks your copy. Lobby can install the {0} into a Wine setup of its own (a few minutes). Then the game starts and the {0} asks you to sign in.", client.name)),
                     );
                     alert.add_responses(&[("cancel", "Not now"), ("install", &format!("Install the {}", client.name))]);
                     alert.set_response_appearance("install", adw::ResponseAppearance::Suggested);
@@ -2809,18 +2809,13 @@ impl Ui {
                     if alert.choose_future(Some(&u.window)).await != "install" {
                         return;
                     }
-                    u.toast(&format!("Installing the {}: follow its installer…", client.name));
+                    u.toast(&format!("Installing the {}: a few minutes…", client.name));
                     if let Err(e) = gio::spawn_blocking(move || client.install()).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
                         u.alert(&format!("The {} couldn't be installed", client.name), &e);
                         return;
                     }
-                    let alert = adw::AlertDialog::new(Some(&format!("Sign in to the {}", client.name)), Some(&format!("The {0} is installed. Sign in to your account in its window if it asks, then play {1}.", client.name, game.name)));
-                    alert.add_responses(&[("cancel", "Later"), ("play", &format!("Play {}", game.name))]);
-                    alert.set_response_appearance("play", adw::ResponseAppearance::Suggested);
-                    alert.set_default_response(Some("play"));
-                    if alert.choose_future(Some(&u.window)).await == "play" {
-                        u.play(&id);
-                    }
+                    u.toast(&format!("The {} is installed. Starting {}: sign in when it asks.", client.name, game.name));
+                    u.play(&id);
                 });
             }
             Plan::BattleNet { folder, launch } => {
