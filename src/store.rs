@@ -63,12 +63,27 @@ impl Library {
         // surely (a game found on a drive and the same game owned on GOG), the one played or
         // set up.
         let worth = |o: &Game| (o.played.is_some(), o.launch_options.is_some() || !o.protection.is_default() || o.chosen_cover.is_some());
+        // Each record's marks once, indexed, so a new game is only compared with the records
+        // sharing one (every game against every record took minutes on the window's thread).
+        let old_marks: Vec<Marks> = old.iter().map(|o| o.as_ref().map(marks).unwrap_or_default()).collect();
+        let mut index: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+        for (i, m) in old_marks.iter().enumerate() {
+            for mark in m.all() {
+                index.entry(mark).or_default().push(i);
+            }
+        }
         let mut pairs: Vec<(usize, usize, (bool, u8, (bool, bool)))> = Vec::new();
+        let mut matched_old = vec![false; old.len()];
         for (n, game) in games.iter().enumerate() {
-            for (i, o) in old.iter().enumerate() {
-                let Some(o) = o else { continue };
-                let s = same(o, game);
+            let m = marks(game);
+            let mut candidates: Vec<usize> = m.all().filter_map(|mark| index.get(mark)).flatten().copied().collect();
+            candidates.sort_unstable();
+            candidates.dedup();
+            for i in candidates {
+                let Some(o) = &old[i] else { continue };
+                let s = same(&old_marks[i], &m);
                 if s > 0 {
+                    matched_old[i] = true;
                     pairs.push((n, i, (o.kind == game.kind, s, worth(o))));
                 }
             }
@@ -96,9 +111,9 @@ impl Library {
                 game.added = now;
             }
         }
-        for mut o in old.into_iter().flatten() {
+        for (mut o, matched) in old.into_iter().zip(matched_old).filter_map(|(o, m)| Some((o?, m))) {
             // Now part of another game (a download, once what it installed is found).
-            if games.iter().any(|g| same(&o, g) > 0) {
+            if matched {
                 continue;
             }
             o.gone = true;
@@ -146,20 +161,44 @@ impl Library {
 /// 2 the same program, 1 the same folder, 0 not. Merging's `Name` ties don't count: they're
 /// numbered by where entries were in one scan, so another scan's same number is another game
 /// (saved records still have them from before they were stripped).
-fn same(old: &Game, new: &Game) -> u8 {
-    let keys = |g: &Game| -> Vec<Key> { g.entries.iter().flat_map(|e| e.keys.iter()).filter(|k| !matches!(k, Key::Name(_))).cloned().collect() };
-    let old_keys = keys(old);
-    if keys(new).iter().any(|k| old_keys.contains(k)) {
-        return 3;
+fn same(old: &Marks, new: &Marks) -> u8 {
+    let shares = |a: &[String], b: &[String]| a.iter().any(|x| b.contains(x));
+    if shares(&old.keys, &new.keys) {
+        3
+    } else if shares(&old.programs, &new.programs) {
+        2
+    } else {
+        u8::from(shares(&old.folders, &new.folders))
     }
-    // /var/home and /home alike.
-    let paths = |g: &Game, f: fn(&crate::library::Entry) -> Option<PathBuf>| -> Vec<PathBuf> { g.entries.iter().filter_map(f).map(|p| crate::library::norm(&p)).collect() };
-    let programs = paths(old, |e| e.program.clone());
-    if paths(new, |e| e.program.clone()).iter().any(|p| programs.contains(p)) {
-        return 2;
+}
+
+/// What identifies a game for matching: launchers' ids (not merging's per-scan `Name` ties),
+/// programs and folders, as text, each kind tagged ("k:", "p:", "f:"). Paths are written
+/// /home whether they say /var/home or not, without asking the disk (resolving every path was
+/// the minutes above).
+#[derive(Default)]
+struct Marks {
+    keys: Vec<String>,
+    programs: Vec<String>,
+    folders: Vec<String>,
+}
+
+impl Marks {
+    fn all(&self) -> impl Iterator<Item = &str> {
+        self.keys.iter().chain(&self.programs).chain(&self.folders).map(String::as_str)
     }
-    let folders = paths(old, |e| e.folder.clone());
-    u8::from(paths(new, |e| e.folder.clone()).iter().any(|p| folders.contains(p)))
+}
+
+fn marks(g: &Game) -> Marks {
+    let spell = |tag: &str, p: &PathBuf| {
+        let s = p.display().to_string();
+        format!("{tag}{}", s.strip_prefix("/var/home/").map_or(s.clone(), |rest| format!("/home/{rest}")))
+    };
+    Marks {
+        keys: g.entries.iter().flat_map(|e| e.keys.iter()).filter(|k| !matches!(k, Key::Name(_))).map(|k| format!("k:{k:?}")).collect(),
+        programs: g.entries.iter().filter_map(|e| e.program.as_ref()).map(|p| spell("p:", p)).collect(),
+        folders: g.entries.iter().filter_map(|e| e.folder.as_ref()).map(|p| spell("f:", p)).collect(),
+    }
 }
 
 /// Where a game's log goes when lobby starts it.

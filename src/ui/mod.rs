@@ -1016,7 +1016,7 @@ impl Ui {
             u.rescan_button.set_sensitive(true);
             match found {
                 Ok(Ok(games)) => {
-                    if let Err(e) = u.change_lib(|lib| lib.update(games)) {
+                    if let Err(e) = u.change_lib(|lib| crate::log::timed("scan: matching the saved library", || lib.update(games))) {
                         u.toast(&format!("Couldn't save the library: {e}"));
                     }
                     let games = u.lib.borrow().games.clone();
