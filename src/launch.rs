@@ -55,10 +55,9 @@ pub fn plan(game: &Game) -> Plan {
     if let Some(p) = store_plan(game) {
         return p;
     }
-    // Blizzard's games only start through Battle.net (a launcher that has its own Battle.net
-    // for it starts it there).
-    let own_battlenet = keys().any(|k| matches!(k, Key::Heroic(..) | Key::Lutris(_) | Key::Faugus(_) | Key::SteamShortcut(_)));
-    if let Some((folder, product)) = crate::battlenet::game_folder(game).filter(|_| !own_battlenet) {
+    // Blizzard's games only start through Battle.net: Lobby's own, whichever launcher's
+    // Battle.net installed them.
+    if let Some((folder, product)) = crate::battlenet::game_folder(game) {
         return Plan::BattleNet { folder, launch: product.launch };
     }
     // A game only its store's app lets start (EA, Ubisoft, Rockstar): in Lobby's own prefix of
@@ -70,30 +69,15 @@ pub fn plan(game: &Game) -> Plan {
     if let Some(p) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(desktop_plan) {
         return p;
     }
-    // Handed to another launcher only while it's installed: Lobby keeps working without them.
-    if let Some((runner, app)) = keys().find_map(|k| if let Key::Heroic(r, a) = k { Some((r, a)) } else { None }).filter(|_| launcher_installed("heroic", "com.heroicgameslauncher.hgl")) {
-        return run("Heroic", vec!["xdg-open".into(), format!("heroic://launch?appName={app}&runner={runner}")], None);
-    }
     // A game Lobby took over from Lutris, Faugus or a Steam shortcut: as Lobby recorded it.
     if let Some(t) = crate::taken::find(game) {
         return own("Lobby", t.command, t.cwd);
     }
-    // Lutris's, Faugus's and Steam's shortcuts' games are started by Lobby itself, as they set
-    // them up (so they can be protected, and those launchers can go); the launcher only when
-    // its settings can't be read.
+    // Lutris's, Faugus's, Heroic's (games it added by hand or from Amazon) and Steam's
+    // shortcuts' games are started by Lobby itself, as they set them up (so they can be
+    // protected, and those launchers can go). Never handed to them: Lobby needs only Steam.
     if let Some((_, from, command, cwd)) = launcher_command(game) {
         return own(&format!("Lobby, as {from} set it up"), command, cwd);
-    }
-    if let Some(id) = keys().find_map(|k| if let Key::Lutris(id) = k { Some(*id) } else { None }).filter(|_| launcher_installed("lutris", "net.lutris.Lutris")) {
-        return run("Lutris", vec!["lutris".into(), format!("lutris:rungameid/{id}")], None);
-    }
-    if let Some(id) = keys().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }).filter(|_| launcher_installed("faugus-launcher", "io.github.Faugus.faugus-launcher")) {
-        let native = program_on_path("faugus-launcher");
-        let command = match native {
-            Some(p) => vec![p.display().to_string(), "--game".into(), id],
-            None => vec!["flatpak".into(), "run".into(), "io.github.Faugus.faugus-launcher".into(), "--game".into(), id],
-        };
-        return run("Faugus", command, None);
     }
     if let Some(id) = keys().find_map(|k| if let Key::SteamShortcut(id) = k { Some(*id) } else { None }) {
         // Steam's run id for a non-Steam game: the shortcut's id in the top half.
@@ -108,6 +92,12 @@ pub fn plan(game: &Game) -> Plan {
         let program = e.program.as_ref().unwrap();
         let (program, args) = gamefix::binary::unreal_bootstrap(program).unwrap_or((program.clone(), String::new()));
         return umu_plan(&program, e.prefix.as_ref().unwrap(), &args, "umu-run, in the Wine prefix it was installed into");
+    }
+    // Another launcher's game Lobby can't start from its settings (a runner like DOSBox or an
+    // emulator, a Faugus game it hands to Steam, settings Lobby can't read): gamefix sets it up
+    // as Lobby's own, and Lobby installs what it needs to run first (`setup_need`).
+    if let Some(target) = game.entries.iter().filter(|e| matches!(e.source, Source::Lutris | Source::Faugus | Source::Heroic)).find_map(|e| e.folder.clone().filter(|f| f.is_dir()).or_else(|| e.program.clone().filter(|p| p.exists()))) {
+        return Plan::SetUp(target);
     }
     // A folder, or a game in one program (a loose .exe in Downloads).
     // The installed one when the game's download was found too.
@@ -149,12 +139,6 @@ pub fn hands_over(command: &[String]) -> Option<String> {
     None
 }
 
-/// Another launcher is installed: its program, or its flatpak (the user's or the system's).
-fn launcher_installed(program: &str, flatpak: &str) -> bool {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    program_on_path(program).is_some() || [home.join(".local/share/flatpak/app").join(flatpak), Path::new("/var/lib/flatpak/app").join(flatpak)].iter().any(|d| d.is_dir())
-}
-
 fn run(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
     Plan::Run { how: how.into(), command, cwd, protect: false }
 }
@@ -182,9 +166,106 @@ pub fn final_command(game: &Game, command: Vec<String>, protect: bool) -> Result
 /// The game's launch options and, when it's on, MangoHud: what Play and its shortcuts add to
 /// its command. An Err says why they can't be (another launcher starts it).
 pub fn add_extras(game: &Game, command: Vec<String>) -> Result<Vec<String>, String> {
+    let command = with_proton(command, game.proton.as_deref())?;
     let command = with_runtimes(command, &crate::anticheat::runtimes());
     let command = with_options(command, game.launch_options.as_deref())?;
     if game.frame_rate { with_frame_rate(command) } else { Ok(command) }
+}
+
+/// The Protons Steam has, Valve's and the ones in its compatibilitytools.d (GE-Proton ...): the
+/// choices for a game's Proton, by name.
+pub fn protons() -> Vec<(String, PathBuf)> {
+    let Some(steam) = gamefix::steam::Steam::find() else { return Vec::new() };
+    steam.tools().into_iter().filter_map(|t| steam.tool_dir(&t)).filter(|d| d.join("proton").is_file()).map(|d| (proton_name(&d), d)).collect()
+}
+
+/// A Proton's name as Steam shows it: its folder's, without GE's "-x86_64".
+pub fn proton_name(dir: &Path) -> String {
+    let name = dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
+    name.strip_suffix("-x86_64").map_or(name.clone(), String::from)
+}
+
+/// A `NAME=value` word's value in a command or an environment.
+fn var_in(words: &[String], name: &str) -> Option<String> {
+    words.iter().find_map(|w| w.strip_prefix(name)?.strip_prefix('=').map(String::from))
+}
+
+/// The game's command with the Proton picked on its page instead of its own (its
+/// PROTONPATH); commands that don't run through Proton are left as they are. An Err when the
+/// picked Proton was removed since.
+pub fn with_proton(mut command: Vec<String>, chosen: Option<&Path>) -> Result<Vec<String>, String> {
+    let Some(chosen) = chosen else { return Ok(command) };
+    if let Some(w) = command.iter_mut().find(|w| w.starts_with("PROTONPATH=")) {
+        if !chosen.join("proton").is_file() {
+            return Err(format!("The Proton picked for it, {}, isn't installed any more: pick another on its page.", proton_name(chosen)));
+        }
+        *w = format!("PROTONPATH={}", chosen.display());
+    }
+    Ok(command)
+}
+
+/// The Proton and Wine prefix the game runs with as it's set up (before any picked on its
+/// page): from Play's command, or for a store game Lobby installed, `lobby run`'s.
+pub fn proton_and_prefix(game: &Game, plan: &Plan) -> (Option<PathBuf>, Option<PathBuf>) {
+    let words = match plan {
+        Plan::Run { command, .. } if var_in(command, "PROTONPATH").is_some() => command.clone(),
+        _ => wine_command(game).map(|w| w.env).unwrap_or_default(),
+    };
+    let prefix = var_in(&words, "WINEPREFIX").or_else(|| var_in(&words, "STEAM_COMPAT_DATA_PATH")).map(PathBuf::from);
+    (var_in(&words, "PROTONPATH").map(PathBuf::from).filter(|p| p.is_absolute()), prefix)
+}
+
+/// Why the game's Proton can't be picked on its page, if it can't.
+pub fn proton_unsupported(game: &Game, plan: &Plan) -> Option<String> {
+    match plan {
+        Plan::Run { command, .. } if command.first().is_some_and(|w| w == "steam") => Some("Steam starts it: pick its Proton in Steam (the game's Properties, Compatibility).".into()),
+        Plan::BattleNet { .. } => Some("It runs in Battle.net's Wine setup, which every Blizzard game shares, with Battle.net's Proton.".into()),
+        Plan::NeedsClient { .. } => Some("It runs in its store app's Wine setup, which that store's games share, with the app's Proton.".into()),
+        Plan::Cannot(why) => Some(why.clone()),
+        Plan::SetUp(_) => None,
+        Plan::Run { .. } if crate::clients::needed(game).is_some() => Some("It runs in its store app's Wine setup, which that store's games share, with the app's Proton.".into()),
+        Plan::Run { command, .. } if proton_and_prefix(game, plan).0.is_none() && !command.iter().any(|w| w.ends_with("umu-run")) => Some("It doesn't run through Proton (a Linux game, or a program that runs it its own way).".into()),
+        Plan::Run { .. } => None,
+    }
+}
+
+/// Why the game's Proton can't be picked, other games sharing its Wine prefix included (a
+/// Proton changes the prefix for all of them).
+pub fn proton_locked(game: &Game, plan: &Plan, all: &[Game]) -> Option<String> {
+    if let Some(why) = proton_unsupported(game, plan) {
+        return Some(why);
+    }
+    let prefix = proton_and_prefix(game, plan).1?;
+    let real = fs::canonicalize(&prefix).unwrap_or(prefix);
+    let shared = crate::uninstall::prefix_shared_with(&real, game, all);
+    let names = match shared.as_slice() {
+        [] => return None,
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [a, b, rest @ ..] => format!("{a}, {b} and {} more", rest.len()),
+    };
+    Some(format!("Its Wine setup is shared with {names}: a Proton changes it for all of them, so it keeps the one it has."))
+}
+
+/// What starting the game with another Proton may do to its Wine prefix, when it's more than
+/// a newer build of the same Proton: Proton changes a prefix to its own version when it starts,
+/// and going back, or across to another kind, can break the game's settings or saves.
+pub fn proton_change_risk(prefix: Option<&Path>, to: &Path) -> Option<String> {
+    let made = proton_of(prefix?)?;
+    let family = |n: &str| if n.starts_with("GE-Proton") { "GE".to_string() } else if n.starts_with("Proton") { "Valve".to_string() } else { n.trim_end_matches(|c: char| c.is_ascii_digit() || c == '-' || c == '.' || c == ' ').to_string() };
+    // Experimental and Hotfix are Valve's newest.
+    let version = |n: &str| -> Vec<u32> {
+        if n.contains("Experimental") || n.contains("Hotfix") {
+            return vec![u32::MAX];
+        }
+        n.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
+    };
+    let (from, to_name) = (proton_name(&made), proton_name(to));
+    if made == to || family(&from) == family(&to_name) && version(&to_name) >= version(&from) {
+        return None;
+    }
+    let what = if family(&from) == family(&to_name) { "an older version" } else { "another kind of Proton" };
+    Some(format!("Its Wine setup was made with {from}, and {to_name} is {what}. Proton changes a Wine setup to its own version when it starts, so the game may lose its settings or not start; going back to {from} afterwards may not fix it."))
 }
 
 /// Why Lobby can't protect the game the way it starts, if it can't.
@@ -262,6 +343,10 @@ pub fn launcher_command(game: &Game) -> Option<(Key, &'static str, Vec<String>, 
     if let Some(id) = keys().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }) {
         return faugus_plan(&id).map(|(c, cwd)| (Key::Faugus(id), "Faugus", c, cwd));
     }
+    // Heroic's Epic and GOG installs are taken over as store installs (`stores::takeover`).
+    if let Some((runner, app)) = keys().find_map(|k| if let Key::Heroic(r, a) = k { Some((r.clone(), a.clone())) } else { None }).filter(|(r, _)| r == "sideload" || r == "nile") {
+        return heroic_plan(&runner, &app).map(|(c, cwd)| (Key::Heroic(runner, app), "Heroic", c, cwd));
+    }
     let id = keys().find_map(|k| if let Key::SteamShortcut(id) = k { Some(*id) } else { None })?;
     shortcut_plan(id).map(|(c, cwd)| (Key::SteamShortcut(id), "Steam", c, cwd))
 }
@@ -320,6 +405,17 @@ fn faugus_plan(id: &str) -> Option<(Vec<String>, Option<PathBuf>)> {
             Some((umu_command(&f.program, &f.prefix, &env, &args, chosen), f.program.parent().map(Path::to_path_buf)))
         }
     }
+}
+
+/// A game Heroic added by hand or installed from Amazon, as Heroic starts it: a Windows program
+/// with umu-run in its prefix and the Proton Heroic picked, a Linux one as it is; Heroic's
+/// variables and arguments added.
+fn heroic_plan(runner: &str, app: &str) -> Option<(Vec<String>, Option<PathBuf>)> {
+    let h = crate::sources::heroic::launch(runner, app)?;
+    if windows_program(&h.program) {
+        return Some((umu_command(&h.program, h.prefix.as_ref()?, &h.env, &h.args, h.proton), h.cwd));
+    }
+    Some(([vec!["env".to_string()], h.env.iter().map(|(k, v)| format!("{k}={v}")).collect(), vec![h.program.display().to_string()], h.args].concat(), h.cwd))
 }
 
 /// A non-Steam game's Steam shortcut, started as Steam would: a Windows program with umu-run in
@@ -744,6 +840,9 @@ pub enum Need {
     Java(u32),
     /// A program from Flathub that runs the game (a .love file's LÖVE ...).
     Flatpak { name: &'static str, app: &'static str },
+    /// GE-Proton, which gamefix runs Windows games with (none installed): into Steam's
+    /// compatibilitytools.d, where Steam lists it too.
+    GeProton,
 }
 
 impl Need {
@@ -752,6 +851,7 @@ impl Need {
         match self {
             Need::Java(major) => (format!("Java {major}"), gamefix::java::latest(*major).ok().map(|r| r.size_text())),
             Need::Flatpak { name, app } => (name.to_string(), gamefix::setup::flathub_size(app)),
+            Need::GeProton => ("GE-Proton".to_string(), Some("about 560 MB".to_string())),
         }
     }
 
@@ -759,6 +859,7 @@ impl Need {
         match self {
             Need::Java(major) => gamefix::java::install(*major).map(|_| ()),
             Need::Flatpak { app, .. } => gamefix::setup::install_flatpak(app),
+            Need::GeProton => gamefix::proton::fetch_ge(&gamefix::steam::Steam::find().ok_or("Steam isn't installed, or nobody has signed in to it yet.")?).map(|_| ()),
         }
     }
 }
@@ -769,6 +870,9 @@ pub fn setup_need(folder: &Path) -> Option<Need> {
     let report = gamefix::check::check(&game, &gamefix::system::System::load());
     if let Some(major) = gamefix::setup::missing_java(&game, &report) {
         return Some(Need::Java(major));
+    }
+    if gamefix::setup::missing_ge(&game, &report) {
+        return Some(Need::GeProton);
     }
     gamefix::setup::missing_runner(&game, &report).map(|r| Need::Flatpak { name: r.name, app: r.app })
 }
@@ -800,7 +904,7 @@ mod tests {
     use crate::library::Entry;
 
     fn game(entries: Vec<Entry>) -> Game {
-        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
+        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None }
     }
 
     fn with_key(source: Source, key: Key) -> Entry {
@@ -817,21 +921,43 @@ mod tests {
 
     #[test]
     fn launchers_by_their_ids() {
-        // Handed over only while the launcher is installed (not in the build's sandbox).
+        // Never handed to Heroic, Lutris or Faugus, installed or not.
         let heroic = game(vec![with_key(Source::Gog, Key::Heroic("gog".into(), "1207658750".into()))]);
-        if launcher_installed("heroic", "com.heroicgameslauncher.hgl") {
-            assert_eq!(plan(&heroic), run("Heroic", vec!["xdg-open".into(), "heroic://launch?appName=1207658750&runner=gog".into()], None));
-        } else {
-            assert!(matches!(plan(&heroic), Plan::Cannot(_)));
-        }
+        assert!(matches!(plan(&heroic), Plan::Cannot(_)));
         let lutris = game(vec![with_key(Source::SteamShortcut, Key::SteamShortcut(3847822183)), with_key(Source::Lutris, Key::Lutris(2))]);
-        if launcher_installed("lutris", "net.lutris.Lutris") {
-            assert_eq!(plan(&lutris), run("Lutris", vec!["lutris".into(), "lutris:rungameid/2".into()], None));
-        } else {
-            assert_eq!(plan(&lutris), run("Steam (non-Steam game)", vec!["steam".into(), "steam://rungameid/16526270436841881600".into()], None));
-        }
+        assert_eq!(plan(&lutris), run("Steam (non-Steam game)", vec!["steam".into(), "steam://rungameid/16526270436841881600".into()], None));
+        // One whose settings Lobby can't use: gamefix sets its folder up.
+        let mut dosbox = with_key(Source::Lutris, Key::Lutris(-7));
+        dosbox.folder = Some(std::env::temp_dir());
+        assert_eq!(plan(&game(vec![dosbox])), Plan::SetUp(std::env::temp_dir()));
         let shortcut = game(vec![with_key(Source::SteamShortcut, Key::SteamShortcut(3847822183))]);
         assert_eq!(plan(&shortcut), run("Steam (non-Steam game)", vec!["steam".into(), "steam://rungameid/16526270436841881600".into()], None));
+    }
+
+    #[test]
+    fn a_picked_proton_replaces_the_commands() {
+        let dir = std::env::temp_dir().join(format!("lobby-proton-{}", std::process::id()));
+        let (ge7, ge11) = (dir.join("GE-Proton11-7"), dir.join("GE-Proton11-11"));
+        for d in [&ge7, &ge11] {
+            fs::create_dir_all(d).unwrap();
+            fs::write(d.join("proton"), "").unwrap();
+        }
+        let command: Vec<String> = ["env", "WINEPREFIX=/p", &format!("PROTONPATH={}", ge7.display()), "umu-run", "g.exe"].map(String::from).to_vec();
+        assert_eq!(with_proton(command.clone(), Some(&ge11)).unwrap()[2], format!("PROTONPATH={}", ge11.display()));
+        assert_eq!(with_proton(command.clone(), None).unwrap(), command);
+        assert!(with_proton(command, Some(&dir.join("gone"))).is_err());
+        let linux: Vec<String> = vec!["/g/game.x86_64".into()];
+        assert_eq!(with_proton(linux.clone(), Some(&dir.join("gone"))).unwrap(), linux);
+        // A newer GE over GE is fine; back to an older one, or to Valve's, is warned about.
+        let prefix = dir.join("pfx");
+        fs::create_dir_all(prefix.join("drive_c")).unwrap();
+        fs::write(prefix.join("config_info"), format!("GE-Proton11-7\n{}/files/share/fonts/\n", ge7.display())).unwrap();
+        assert_eq!(proton_change_risk(Some(&prefix), &ge11), None);
+        assert!(proton_change_risk(Some(&prefix), Path::new("/s/Proton 8.0")).is_some_and(|r| r.contains("another kind")));
+        fs::write(prefix.join("config_info"), format!("GE-Proton11-11\n{}/files/share/fonts/\n", ge11.display())).unwrap();
+        assert!(proton_change_risk(Some(&prefix), &ge7).is_some_and(|r| r.contains("older")));
+        assert_eq!(proton_change_risk(None, &ge7), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

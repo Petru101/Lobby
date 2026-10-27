@@ -169,7 +169,7 @@ mod tests {
     }
 
     fn game(id: &str, entries: Vec<Entry>) -> Game {
-        Game { id: id.into(), name: id.into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
+        Game { id: id.into(), name: id.into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None }
     }
 
     #[test]

@@ -395,6 +395,29 @@ pub fn find(game: &Game) -> Saves {
 
 /// Copies what's missing or older in the prefix, keeping the files it replaces. Returns how
 /// many it copied and replaced.
+/// A Lutris, Faugus or Heroic game gamefix just set up in a Wine prefix of its own (`entry`,
+/// its app-menu entry): its saves from the prefix that launcher ran it in come over (only files
+/// missing there or older), the new prefix made first. How many were copied.
+pub fn from_launcher(game: &Game, entry: &Path) -> Result<usize, String> {
+    let Some(old) = game.entries.iter().filter(|e| matches!(e.source, Source::Lutris | Source::Faugus | Source::Heroic)).find_map(|e| e.prefix.clone()).filter(|p| p.join("drive_c").is_dir()) else { return Ok(0) };
+    let Some((words, _)) = crate::launch::desktop_exec(&fs::read_to_string(entry).map_err(|e| e.to_string())?) else { return Ok(0) };
+    let Some(umu) = words.iter().position(|w| w.ends_with("umu-run")) else { return Ok(0) };
+    let env = if words[0] == "env" { &words[1..umu] } else { &[][..] };
+    let Some(new) = crate::stores::saves::prefix_of(env) else { return Ok(0) };
+    let index = index();
+    let Some(paths) = paths_for(game, &index) else { return Ok(0) };
+    crate::stores::saves::make_prefix(env, &words[umu])?;
+    // Proton's prefixes keep Wine's in pfx/.
+    let new = if new.join("pfx/drive_c").is_dir() { new.join("pfx") } else { new };
+    if fs::canonicalize(&new).ok() == fs::canonicalize(&old).ok() {
+        return Ok(0);
+    }
+    let found = look(paths, &prefix_user(&old), &prefix_user(&new));
+    let (copied, _) = bring_over(&game.id, &found)?;
+    crate::log::line(&format!("{}: {copied} save files from {} into its new prefix", game.name, old.display()));
+    Ok(copied)
+}
+
 pub fn bring_over(game_id: &str, found: &Found) -> Result<(usize, usize), String> {
     let backup = crate::store::dir().join("save-backups").join(game_id).join(crate::store::now().to_string());
     let (mut copied, mut replaced) = (0, 0);
@@ -498,7 +521,7 @@ Some Game:
         assert_eq!(found.files, 2);
         assert_eq!(found.copies.len(), 1);
         assert_eq!(found.copies[0].to, user.join("Documents/StarCraft II/Accounts/1/2-S2/a.SC2Bank"));
-        let mut game = crate::library::Game { id: "t".into(), name: "T".into(), kind: crate::library::Kind::Game, entries: vec![], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false };
+        let mut game = crate::library::Game { id: "t".into(), name: "T".into(), kind: crate::library::Kind::Game, entries: vec![], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None };
         game.id = format!("test-{}", std::process::id());
         let (copied, replaced) = bring_over(&game.id, &found).unwrap();
         assert_eq!((copied, replaced), (1, 0));

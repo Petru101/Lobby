@@ -260,7 +260,7 @@ mod tests {
         let mut e = Entry::new(source, "G");
         e.folder = Some(dir.to_path_buf());
         e.program = Some(dir.join("Game.exe"));
-        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
+        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None }
     }
 
     #[test]

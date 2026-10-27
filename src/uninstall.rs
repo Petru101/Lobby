@@ -50,9 +50,11 @@ pub fn how(game: &Game) -> How {
     if let Some(p) = game.entries.iter().filter_map(|e| e.prefix.clone()).chain(prefix(game)).find(|p| p.join("gamefix-install.txt").is_file()) {
         return How::Folder(p);
     }
-    // Found on a drive (set up by gamefix or not): its own folder, when that's plainly the
-    // one game's.
-    if game.unknown_to_launchers() {
+    // Found on a drive (set up by gamefix or not), or put there by Lutris, Faugus or Heroic
+    // (Lobby starts those itself and never hands them back): its own folder, when that's
+    // plainly the one game's.
+    let launchers = game.entries.iter().any(|e| matches!(e.source, crate::library::Source::Heroic | crate::library::Source::Lutris | crate::library::Source::Faugus));
+    if game.unknown_to_launchers() || launchers {
         if let Some(folder) = game.folder().map(Path::to_path_buf) {
             return match found_folder(game, &folder) {
                 Ok(()) => How::Found(folder),
@@ -67,11 +69,10 @@ pub fn how(game: &Game) -> How {
             }
         }
     }
-    let launcher = game.entries.iter().find(|e| matches!(e.source, crate::library::Source::Heroic | crate::library::Source::Lutris | crate::library::Source::Faugus)).map(|e| e.source.label());
-    How::Not(match launcher {
-        Some(l) => format!("{l} installed it: uninstall it there."),
-        None if game.entries.iter().any(|e| e.source == crate::library::Source::AppMenu) => "An app-menu entry Lobby didn't make starts it, so Lobby can't tell what's the game's: delete its files and that entry yourself.".into(),
-        None => "Lobby can't tell which files are the game's: delete them yourself.".into(),
+    How::Not(if game.entries.iter().any(|e| e.source == crate::library::Source::AppMenu) && !launchers {
+        "An app-menu entry Lobby didn't make starts it, so Lobby can't tell what's the game's: delete its files and that entry yourself.".into()
+    } else {
+        "Lobby can't tell which files are the game's: delete them yourself.".into()
     })
 }
 
@@ -241,6 +242,11 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
         }
         How::Not(why) => return Err(why.clone()),
     };
+    match crate::log::timed("uninstall: backing up its saves", || crate::backups::take(game, "before uninstalling")) {
+        Ok(Some(b)) => done.push(format!("✓ Backed up its saves ({} files) in {}.", b.files, b.dir.display())),
+        Ok(None) => {}
+        Err(e) => done.push(format!("Its saves weren't backed up: {e}.")),
+    }
 
     // The prefix goes only when nothing else uses it, and once its saves are safe in the cloud
     // (when the store keeps them).

@@ -93,12 +93,13 @@ pub fn entries() -> Vec<Entry> {
         .collect()
 }
 
-/// Takes over every game that Lobby starts from Lutris's, Faugus's or a Steam shortcut's
-/// settings (not one a gamefix entry, a store install or Steam itself starts): records how,
-/// and copies its cover and icon. Returns the names taken over.
+/// Takes over every game that Lobby starts from Lutris's, Faugus's, Heroic's or a Steam
+/// shortcut's settings (not one a gamefix entry, a store install or Steam itself starts):
+/// records how, and copies its cover and icon. Heroic's Epic and GOG installs become Lobby's
+/// store installs (`stores::takeover`). Returns the names taken over.
 pub fn take_over(games: &[Game]) -> Vec<String> {
+    let mut taken = heroic_installs();
     let mut list = load();
-    let mut taken = Vec::new();
     let mut changed = false;
     for game in games.iter().filter(|g| g.kind == Kind::Game && !g.gone) {
         if let Some(t) = list.iter_mut().find(|t| game.entries.iter().any(|e| e.keys.contains(&t.key))) {
@@ -141,12 +142,33 @@ pub fn take_over(games: &[Game]) -> Vec<String> {
     taken
 }
 
+/// Heroic's Epic and GOG installs Lobby hasn't taken over yet, taken over.
+fn heroic_installs() -> Vec<String> {
+    let Some(home) = crate::sources::Home::find() else { return Vec::new() };
+    if crate::stores::takeover::heroic_games(&home).is_empty() {
+        return Vec::new();
+    }
+    match crate::stores::takeover::take_over(&home) {
+        Ok(done) => {
+            for l in &done {
+                crate::log::line(&format!("taken over from Heroic: {l}"));
+            }
+            done
+        }
+        Err(e) => {
+            crate::log::line(&format!("taking Heroic's games over: {e}"));
+            Vec::new()
+        }
+    }
+}
+
 /// The launcher's own entry for the game: the one with its id from that launcher (gamefix's
 /// record of a Steam shortcut has the shortcut's id too, but not the program), else any with it.
 fn launcher_entry<'a>(game: &'a Game, key: &Key, from: &str) -> Option<&'a Entry> {
     let source = match from {
         "Lutris" => Source::Lutris,
         "Faugus" => Source::Faugus,
+        "Heroic" => Source::Heroic,
         _ => Source::SteamShortcut,
     };
     let with_key = || game.entries.iter().filter(|e| e.keys.contains(key));

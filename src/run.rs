@@ -21,6 +21,10 @@ pub fn run(game: &Game) -> Result<(), String> {
             env.push(("STORE".into(), if store == Store::Epic { "egs".into() } else { "gog".into() }));
         }
     }
+    // The Proton picked on its page.
+    if let (Some(chosen), Some((_, v))) = (&game.proton, env.iter_mut().find(|(k, _)| k == "PROTONPATH")) {
+        *v = crate::launch::with_proton(vec![format!("PROTONPATH={v}")], Some(chosen))?[0].trim_start_matches("PROTONPATH=").to_string();
+    }
     let env_words: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let cloud = wine.umu.is_some() && saves::supported(store, &id);
     if cloud {
@@ -64,6 +68,7 @@ pub fn run(game: &Game) -> Result<(), String> {
     let start = crate::store::now();
     let status = sandboxed.command.stdin(Stdio::null()).status().map_err(|e| format!("{}: {e}", words[0]))?;
     crate::playtime::session(&game.id, start, crate::store::now());
+    crate::backups::after_playing(&game.id);
     println!("lobby: {} quit ({status}).", game.name);
 
     if cloud {

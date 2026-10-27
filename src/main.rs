@@ -2,6 +2,7 @@
 //! put it there, and a way to start each one.
 
 mod artwork;
+mod backups;
 mod battlenet;
 mod clients;
 mod drives;
@@ -66,7 +67,11 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
                                how lobby protects a game it starts; change it
        lobby search            search every drive for games outside the folders lobby looks in
-       lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (Heroic can go)";
+       lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (each scan does)
+       lobby proton <game> [<name> | default] [--anyway]  the Proton it starts with; pick another
+                               of Steam's (default: the one it was set up with)
+       lobby backups <game> [now | restore [<n>]]  its save backups (newest is 1); back up now;
+                               put one back (the saves there now are backed up first)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -92,6 +97,7 @@ fn main() -> ExitCode {
         (Some("move"), [game, into]) => move_game(game, into),
         (Some("stop"), words) if !words.is_empty() => stop_game(&words.join(" ")),
         (Some(what @ ("hide" | "unhide" | "favourite" | "unfavourite")), words) if !words.is_empty() => mark(what, &words.join(" ")),
+        (Some("proton"), [game, pick @ ..]) if pick.len() <= 1 => proton(game, pick.first().copied(), args.iter().any(|a| a == "--anyway")),
         (Some("frame-rate"), [game, on @ ..]) if on.len() <= 1 => frame_rate(game, on.first().copied()),
         (Some("anticheat"), []) => list_online_warnings(),
         (Some("leftovers"), []) => list_leftovers(),
@@ -113,6 +119,7 @@ fn main() -> ExitCode {
             }
         }
         (Some("uninstall"), words) if !words.is_empty() => uninstall_game(&words.join(" "), args.iter().any(|a| a == "--keep-prefix")),
+        (Some("backups"), [game, what @ ..]) if what.len() <= 2 => save_backups(game, what),
         (Some("saves"), [game, way @ ..]) if way.len() <= 1 => sync_saves(game, way.first().copied().unwrap_or("down")),
         // The question `lobby run` asks when saves changed both here and in the cloud (to see it).
         (Some("ask-saves"), words) => {
@@ -252,6 +259,54 @@ fn frame_rate(query: &str, on: Option<&str>) -> Result<(), String> {
     if on.is_some() { lib.save() } else { Ok(()) }
 }
 
+/// Shows the game's Proton and the choices, or picks one ("default": the one it was set up
+/// with). A pick that may break its Wine setup needs --anyway.
+fn proton(query: &str, pick: Option<&str>, anyway: bool) -> Result<(), String> {
+    let mut lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    let plan = launch::plan(&game);
+    let (own, prefix) = launch::proton_and_prefix(&game, &plan);
+    let choices = launch::protons();
+    let Some(pick) = pick else {
+        if let Some(why) = launch::proton_locked(&game, &plan, &lib.games) {
+            println!("{}: {why}", game.name);
+            return Ok(());
+        }
+        let own = own.as_deref().map_or_else(|| "the one gamefix picks when it sets it up".to_string(), launch::proton_name);
+        println!("{}: {}", game.name, game.proton.as_deref().map_or_else(|| format!("{own} (as it's set up)"), |p| format!("{} (picked; set up with {own})", launch::proton_name(p))));
+        for (name, _) in &choices {
+            println!("  {name}");
+        }
+        return Ok(());
+    };
+    if let Some(why) = launch::proton_locked(&game, &plan, &lib.games) {
+        return Err(format!("{}: {why}", game.name));
+    }
+    let chosen = match pick {
+        "default" => None,
+        _ => {
+            let low = pick.to_lowercase();
+            let exact = choices.iter().find(|(n, _)| n.to_lowercase() == low);
+            let like: Vec<_> = choices.iter().filter(|(n, _)| n.to_lowercase().contains(&low)).collect();
+            Some(exact.or(match like.as_slice() { [one] => Some(*one), _ => None }).ok_or(format!("No single Proton named like {pick}: lobby proton {query} lists them."))?.1.clone())
+        }
+    };
+    if let Some(risk) = chosen.as_deref().and_then(|to| launch::proton_change_risk(prefix.as_deref(), to)).filter(|_| !anyway) {
+        return Err(format!("{risk} Add --anyway to pick it all the same."));
+    }
+    match backups::take(&game, "before changing its Proton") {
+        Ok(Some(b)) => println!("Backed up its saves ({} files) first.", b.files),
+        Ok(None) => {}
+        Err(e) => println!("Its saves weren't backed up: {e}."),
+    }
+    if let Some(g) = lib.get_mut(&game.id) {
+        g.proton = chosen.clone();
+    }
+    lib.save()?;
+    println!("{}: {}", game.name, chosen.as_deref().map_or_else(|| "back to the Proton it was set up with".to_string(), |p| format!("starts with {}", launch::proton_name(p))));
+    Ok(())
+}
+
 fn launch_options(query: &str, text: &str, set: bool) -> Result<(), String> {
     let mut lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?.clone();
@@ -322,7 +377,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     // A shortcut naming a game the library lost (deleted, say) still starts it, at Standard.
     let game = Library::load().unwrap_or_default().games.into_iter().find(|g| g.id == id).unwrap_or_else(|| {
         eprintln!("lobby: no game \"{id}\" in the library: starting it with Standard protection.");
-        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
+        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None }
     });
     // The launch options and frame rate, for Play and the shortcuts alike (Play leaves them to
     // this). Not Battle.net's: its options are set in Battle.net. A shortcut still starts when
@@ -382,6 +437,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     // Timed while it runs: Battle.net's own lifetime isn't a game's.
     if status.is_ok() && !battle_net {
         playtime::session(id, start, store::now());
+        backups::after_playing(id);
         // Ended before anything of it showed: a failed start, with the likely reason.
         let failed = matches!(status, Ok((_, false))) && ran < starts::WITHIN;
         let why = failed.then(|| starts::why(command, &std::fs::read_to_string(&log).unwrap_or_default())).flatten();
@@ -508,12 +564,18 @@ fn play(query: &str) -> Result<(), String> {
             return lib.save();
         }
         launch::Plan::SetUp(folder) => {
-            println!("No launcher knows {}, so gamefix sets it up first (once):", game.name);
+            println!("gamefix sets {} up first (once):", game.name);
+            ask_need(&game.name, &folder)?;
             let (lines, entry) = launch::set_up(&folder, Some(&game.name))?;
             for l in &lines {
                 println!("  {l}");
             }
             let entry = entry.ok_or(format!("{} couldn't be set up, so it can't be started.", game.name))?;
+            match windows_saves::from_launcher(&game, &entry) {
+                Ok(0) => {}
+                Ok(n) => println!("Brought {n} save files over from where it ran before."),
+                Err(e) => eprintln!("lobby: its saves couldn't be brought over: {e}"),
+            }
             let (command, cwd) = launch::desktop_exec(&std::fs::read_to_string(&entry).map_err(|e| e.to_string())?).ok_or("gamefix's entry has no command")?;
             // Started through that entry from now on.
             if let Some(g) = lib.get_mut(&game.id) {
@@ -566,21 +628,7 @@ fn install(query: &str) -> Result<(), String> {
     }
     println!("Installing {}…", game.name);
     let placed = install::place(&game, &progress_printer())?;
-    // What it needs to run (Java, a runner from Flathub): asked on the terminal.
-    if let Some(need) = launch::setup_need(&placed.target) {
-        let (what, size) = need.describe();
-        let size = size.map(|s| format!(" ({s} to download)")).unwrap_or_default();
-        print!("{} needs {what}, which isn't installed. Install it{size} for you only? [y/N] ", game.name);
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        let mut answer = String::new();
-        let yes = std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes");
-        if yes {
-            println!("Installing {what}…");
-            need.install()?;
-        } else {
-            println!();
-        }
-    }
+    ask_need(&game.name, &placed.target)?;
     let done = install::set_up(placed);
     for l in &done.lines {
         println!("  {l}");
@@ -615,6 +663,9 @@ fn how(query: &str) -> Result<(), String> {
     match launch::plan(game) {
         launch::Plan::Run { how, command, cwd, protect } => {
             println!("{} starts with {how}:\n  {}", game.name, command.join(" "));
+            if let Some(p) = &game.proton {
+                println!("  with {} instead of its own Proton (picked on its page)", launch::proton_name(p));
+            }
             match protect {
                 true => println!("  protected: {}", sandbox::summary(game)),
                 false => println!("  not protected: {}", launch::protection_unsupported(&launch::plan(game)).unwrap_or_default()),
@@ -822,6 +873,64 @@ fn search_drives() -> Result<(), String> {
         println!("  Steam library: {}", l.display());
     }
     Ok(())
+}
+
+/// What a game needs to run before gamefix sets it up (Java, a runner from Flathub): asked on
+/// the terminal, installed on yes.
+fn ask_need(name: &str, target: &std::path::Path) -> Result<(), String> {
+    let Some(need) = launch::setup_need(target) else { return Ok(()) };
+    let (what, size) = need.describe();
+    let size = size.map(|s| format!(" ({s} to download)")).unwrap_or_default();
+    print!("{name} needs {what}, which isn't installed. Install it{size} for you only? [y/N] ");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let mut answer = String::new();
+    let yes = std::io::IsTerminal::is_terminal(&std::io::stdin()) && std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes");
+    if yes {
+        println!("Installing {what}…");
+        need.install()?;
+    } else {
+        println!();
+    }
+    Ok(())
+}
+
+fn save_backups(query: &str, what: &[&str]) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?;
+    let list = backups::list(&game.id);
+    match what {
+        [] => {
+            if list.is_empty() {
+                println!("{}: no save backups yet.", game.name);
+            }
+            for (i, b) in list.iter().enumerate() {
+                println!("{:>3}  {}  {} file{}, {}  ({})", i + 1, backups::time_text(b.when), b.files, if b.files == 1 { "" } else { "s" }, windows_saves::size_text(b.bytes), b.why);
+                for f in &b.folders {
+                    println!("       {}", f.from.display());
+                }
+            }
+            Ok(())
+        }
+        ["now"] => match backups::take(game, "backed up by hand")? {
+            Some(b) => {
+                println!("Backed up {} files of {}'s saves in {}.", b.files, game.name, b.dir.display());
+                Ok(())
+            }
+            None if list.is_empty() => Err(format!("{}: no saves found here to back up.", game.name)),
+            None => {
+                println!("{}'s saves haven't changed since the newest backup.", game.name);
+                Ok(())
+            }
+        },
+        ["restore", n @ ..] => {
+            let n: usize = n.first().map_or(Ok(1), |n| n.parse()).map_err(|_| "restore takes a backup's number (1 is the newest)")?;
+            let b = list.get(n.wrapping_sub(1)).ok_or(format!("{} has no backup {n}.", game.name))?;
+            let count = backups::restore(game, b)?;
+            println!("Put back {count} files of {}'s saves from backup {n}.", game.name);
+            Ok(())
+        }
+        _ => Err(USAGE.to_string()),
+    }
 }
 
 fn take_over_heroic() -> Result<(), String> {

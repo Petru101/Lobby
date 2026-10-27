@@ -669,8 +669,8 @@ fn build(app: &adw::Application) {
 /// shows that game as just installed, LOBBY_SNAPSHOT_ACCOUNTS=1 the accounts,
 /// LOBBY_SNAPSHOT_SIGNIN=epic|gog a store's sign-in page, LOBBY_SNAPSHOT_UNINSTALL=<game id>
 /// the question before uninstalling it, LOBBY_SNAPSHOT_FREE=1 the free games,
-/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page, LOBBY_SNAPSHOT_SCROLL=protection|saves
-/// scrolls a game's page to its Protection or Saves),
+/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page, LOBBY_SNAPSHOT_SCROLL=proton|protection|saves
+/// scrolls a game's page to its Proton, Protection or Saves),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
     let Some(file) = std::env::var_os("LOBBY_SNAPSHOT").map(std::path::PathBuf::from) else { return };
@@ -1856,6 +1856,7 @@ impl Ui {
     /// manifest's index is a few MB).
     fn fill_save_folders(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup) {
         let (u, group, g) = (self.clone(), group.clone(), game.clone());
+        let (g_id, g_game) = (game.id.clone(), game.clone());
         glib::spawn_future_local(async move {
             let found = gio::spawn_blocking(move || crate::save_folders::find(&g)).await.unwrap_or_default();
             for f in found {
@@ -1874,7 +1875,91 @@ impl Ui {
                 group.add(&row);
                 group.set_visible(true);
             }
+            if group.is_visible() || !crate::backups::list(&g_id).is_empty() {
+                u.backups_row(&g_game, &group);
+                group.set_visible(true);
+            }
         });
+    }
+
+    /// Save backups on a game's page: how many and the newest, Back up now, and Restore with
+    /// the list (the saves there now are backed up first).
+    fn backups_row(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup) {
+        let row = adw::ActionRow::builder().title("Backups").use_markup(false).build();
+        row.add_css_class("property");
+        let restore = gtk::MenuButton::builder().label("Restore").valign(gtk::Align::Center).build();
+        let now = gtk::Button::builder().label("Back up now").valign(gtk::Align::Center).build();
+        row.add_suffix(&now);
+        row.add_suffix(&restore);
+        group.add(&row);
+        // The row's text and the Restore list, from what's saved.
+        let refresh: Rc<dyn Fn()> = {
+            let (u, row, restore, game) = (self.clone(), row.clone(), restore.clone(), game.clone());
+            Rc::new(move || {
+                let list = crate::backups::list(&game.id);
+                row.set_subtitle(&match list.first() {
+                    None => "None yet. Lobby backs the saves up each time you finish playing, and before uninstalling.".to_string(),
+                    Some(b) => format!("{} kept, the newest from {}. Lobby backs the saves up each time you finish playing, and before uninstalling.", list.len(), crate::backups::time_text(b.when)),
+                });
+                restore.set_sensitive(!list.is_empty());
+                let rows = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build();
+                rows.add_css_class("boxed-list");
+                let popover = gtk::Popover::builder().child(&gtk::ScrolledWindow::builder().child(&rows).propagate_natural_height(true).max_content_height(400).hscrollbar_policy(gtk::PolicyType::Never).build()).build();
+                for b in list {
+                    let item = adw::ActionRow::builder().title(crate::backups::time_text(b.when)).subtitle(format!("{} file{}, {} · {}", b.files, if b.files == 1 { "" } else { "s" }, crate::windows_saves::size_text(b.bytes), b.why)).activatable(true).use_markup(false).build();
+                    let (u, game, popover) = (u.clone(), game.clone(), popover.clone());
+                    item.connect_activated(move |_| {
+                        popover.popdown();
+                        u.confirm_restore(&game, b.clone());
+                    });
+                    rows.append(&item);
+                }
+                restore.set_popover(Some(&popover));
+            })
+        };
+        refresh();
+        let (u, game, again) = (self.clone(), game.clone(), refresh.clone());
+        now.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let (u, g, again, button) = (u.clone(), game.clone(), again.clone(), button.clone());
+            glib::spawn_future_local(async move {
+                let name = g.name.clone();
+                let taken = gio::spawn_blocking(move || crate::backups::take(&g, "backed up by hand")).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+                match taken {
+                    Ok(Some(b)) => u.toast(&format!("Backed up {} files of {name}'s saves.", b.files)),
+                    Ok(None) => u.toast("Nothing changed since the newest backup."),
+                    Err(e) => u.alert(&format!("{name}'s saves weren't backed up"), &e),
+                }
+                button.set_sensitive(true);
+                again();
+            });
+        });
+    }
+
+    fn confirm_restore(self: &Rc<Self>, game: &Game, backup: crate::backups::Backup) {
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Put back the saves from {}?", crate::backups::time_text(backup.when))),
+            Some(&format!("{} files go back where they were, replacing the copies there now. The saves there now are backed up first, so this can be undone the same way.", backup.files)),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("restore", "Put back");
+        dialog.set_response_appearance("restore", adw::ResponseAppearance::Suggested);
+        dialog.set_close_response("cancel");
+        let (u, game) = (self.clone(), game.clone());
+        dialog.connect_response(None, move |_, response| {
+            if response != "restore" {
+                return;
+            }
+            let (u, g, b) = (u.clone(), game.clone(), backup.clone());
+            glib::spawn_future_local(async move {
+                let name = g.name.clone();
+                match gio::spawn_blocking(move || crate::backups::restore(&g, &b)).await.unwrap_or_else(|_| Err("It stopped with an error.".into())) {
+                    Ok(n) => u.toast(&format!("Put back {n} files of {name}'s saves.")),
+                    Err(e) => u.alert(&format!("{name}'s saves weren't put back"), &e),
+                }
+            });
+        });
+        dialog.present(Some(&self.window));
     }
 
     fn fill_windows_saves(self: &Rc<Self>, game: &Game, group: &adw::PreferencesGroup) {
@@ -2663,33 +2748,6 @@ impl Ui {
                 }
             });
         }
-        // Games Heroic installed, which lobby can make its own so Heroic can be removed.
-        let heroic = crate::sources::Home::find().map(|h| crate::stores::takeover::heroic_games(&h)).unwrap_or_default();
-        if !heroic.is_empty() {
-            let group = adw::PreferencesGroup::builder()
-                .title("Games installed by Heroic")
-                .description("Lobby can take them over: it updates them, syncs their cloud saves and starts them itself, in the same Wine prefixes with the same Proton, so their settings and saves stay. Heroic can be removed afterwards.")
-                .build();
-            let row = adw::ActionRow::builder().title(format!("{} games", heroic.len())).subtitle(heroic.join(", ")).subtitle_lines(3).build();
-            let button = gtk::Button::builder().label("Take over").valign(gtk::Align::Center).build();
-            button.add_css_class("suggested-action");
-            row.add_suffix(&button);
-            group.add(&row);
-            page.add(&group);
-            let (u, d) = (self.clone(), dialog.clone());
-            button.connect_clicked(move |_| {
-                d.close();
-                let u = u.clone();
-                glib::spawn_future_local(async move {
-                    let result = gio::spawn_blocking(|| crate::sources::Home::find().ok_or("no home folder".to_string()).and_then(|h| crate::stores::takeover::take_over(&h))).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
-                    match result {
-                        Ok(done) => u.alert(&format!("Lobby took over {} games from Heroic", done.len()), &done.iter().map(|l| format!("✓ {l}")).collect::<Vec<_>>().join("\n")),
-                        Err(e) => u.alert("Couldn't take over Heroic's games", &e),
-                    }
-                    u.rescan();
-                });
-            });
-        }
         dialog.present(Some(&self.window));
     }
 
@@ -2883,8 +2941,19 @@ impl Ui {
                         }
                     }
                     u.toast(&format!("Setting up {} with gamefix (only the first time)…", game.name));
-                    let name = game.name.clone();
-                    let result = gio::spawn_blocking(move || launch::set_up(&folder, Some(&name))).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+                    let (name, g) = (game.name.clone(), game.clone());
+                    let result = gio::spawn_blocking(move || -> Result<(Vec<String>, Option<std::path::PathBuf>), String> {
+                        let done = launch::set_up(&folder, Some(&name))?;
+                        // A launcher's game in a Wine prefix of its own now: its saves come too.
+                        if let Some(entry) = &done.1 {
+                            if let Err(e) = crate::windows_saves::from_launcher(&g, entry) {
+                                crate::log::line(&format!("{}: saves not brought over: {e}", g.name));
+                            }
+                        }
+                        Ok(done)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
                     match result {
                         Ok((lines, Some(entry))) => {
                             let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::final_command(&game, command, true).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))));
@@ -3067,8 +3136,10 @@ impl Ui {
         }
         content.append(&info);
         let protection = self.protection_group(&game, &plan);
+        let proton = self.proton_group(&game, &plan);
         if game.kind == Kind::Game {
             content.append(&self.frame_rate_group(&game, &plan));
+            content.append(&proton);
             content.append(&self.options_group(&game, &plan));
             content.append(&protection);
         }
@@ -3094,9 +3165,10 @@ impl Ui {
         view.add_top_bar(&adw::HeaderBar::new());
         let scrolled = gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build();
         view.set_content(Some(&scrolled));
-        // A checking run's snapshot of the page further down (LOBBY_SNAPSHOT_SCROLL=protection|saves).
+        // A checking run's snapshot of the page further down (LOBBY_SNAPSHOT_SCROLL=proton|protection|saves).
         if let Some(target) = std::env::var("LOBBY_SNAPSHOT_SCROLL").ok().and_then(|s| match s.as_str() {
             "protection" => Some(protection.clone().upcast::<gtk::Widget>()),
+            "proton" => Some(proton.clone().upcast::<gtk::Widget>()),
             "saves" => Some(save_folders.clone().upcast::<gtk::Widget>()),
             "files" => Some(files.clone().upcast::<gtk::Widget>()),
             _ => None,
@@ -3165,6 +3237,96 @@ impl Ui {
     }
 
     /// Launch options on a game's page: what's added to its command when Lobby starts it.
+    /// The Proton a game starts with: as it was set up, or one of Steam's picked here. A pick
+    /// that may break its Wine setup is asked about first; its saves are backed up before.
+    fn proton_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
+        let locked = launch::proton_locked(game, plan, &self.lib.borrow().games);
+        let (own, prefix) = launch::proton_and_prefix(game, plan);
+        let help = locked.clone().unwrap_or_else(|| "Any Proton Steam has, its own and GE-Proton's. Used from Play and from its app-menu and desktop shortcuts.".into());
+        let group = adw::PreferencesGroup::builder().title("Proton").description(&help).build();
+        if locked.is_some() {
+            return group;
+        }
+        let mut choices: Vec<Option<std::path::PathBuf>> = vec![None];
+        choices.extend(launch::protons().into_iter().map(|(_, d)| Some(d)));
+        // Picked, then removed: still listed, so the page says so.
+        let missing = game.proton.clone().filter(|p| !choices.contains(&Some(p.clone())));
+        if missing.is_some() {
+            choices.push(missing.clone());
+        }
+        let own_name = own.as_deref().map_or_else(|| "the one gamefix picks".to_string(), launch::proton_name);
+        let names: Vec<String> = choices
+            .iter()
+            .map(|c| match c {
+                None => "As it was set up".to_string(),
+                Some(d) if Some(d) == missing.as_ref() => format!("{} (not installed any more)", launch::proton_name(d)),
+                Some(d) => launch::proton_name(d),
+            })
+            .collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let selected = choices.iter().position(|c| *c == game.proton).unwrap_or(0) as u32;
+        let combo = adw::ComboRow::builder().title("Starts with").model(&gtk::StringList::new(&names)).selected(selected).subtitle(format!("It was set up with {own_name}.")).build();
+        if missing.is_some() {
+            combo.set_subtitle("Pick another: Play won't start it with a Proton that's gone.");
+        }
+        group.add(&combo);
+        let (last, reverting) = (Rc::new(Cell::new(selected)), Rc::new(Cell::new(false)));
+        let (u, game) = (self.clone(), game.clone());
+        combo.connect_selected_notify(move |combo| {
+            let i = combo.selected();
+            if reverting.get() || i == last.get() {
+                return;
+            }
+            let Some(to) = choices.get(i as usize).cloned() else { return };
+            let apply = {
+                let (u, game, last) = (u.clone(), game.clone(), last.clone());
+                move |to: Option<std::path::PathBuf>| {
+                    last.set(i);
+                    let saved = u.change_lib(|lib| {
+                        if let Some(g) = lib.get_mut(&game.id) {
+                            g.proton = to.clone();
+                        }
+                    });
+                    if let Err(e) = saved {
+                        u.toast(&format!("Couldn't save the library: {e}"));
+                        return;
+                    }
+                    u.toast(&match &to {
+                        None => format!("{} starts with the Proton it was set up with.", game.name),
+                        Some(d) => format!("{} starts with {} from now on.", game.name, launch::proton_name(d)),
+                    });
+                    let g = game.clone();
+                    gio::spawn_blocking(move || {
+                        if let Err(e) = crate::backups::take(&g, "before changing its Proton") {
+                            crate::log::line(&format!("saves not backed up: {}: {e}", g.name));
+                        }
+                    });
+                }
+            };
+            let Some(risk) = to.as_deref().and_then(|t| launch::proton_change_risk(prefix.as_deref(), t)) else {
+                apply(to);
+                return;
+            };
+            let dialog = adw::AlertDialog::new(Some(&format!("Start {} with {}?", game.name, to.as_deref().map(launch::proton_name).unwrap_or_default())), Some(&format!("{risk} Lobby backs up its saves first.")));
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("change", "Change");
+            dialog.set_response_appearance("change", adw::ResponseAppearance::Destructive);
+            dialog.set_close_response("cancel");
+            let (combo, last, reverting) = (combo.clone(), last.clone(), reverting.clone());
+            dialog.connect_response(None, move |_, response| {
+                if response == "change" {
+                    apply(to.clone());
+                } else {
+                    reverting.set(true);
+                    combo.set_selected(last.get());
+                    reverting.set(false);
+                }
+            });
+            dialog.present(Some(&u.window));
+        });
+        group
+    }
+
     fn options_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
         let unsupported = launch::options_unsupported(plan);
         let help = unsupported.clone().unwrap_or_else(|| "Added after the game's program, like -dx11 -windowed. Variables go before %command%: PROTON_LOG=1 %command% -dx11. Used from Play, and from its app-menu and desktop shortcuts.".into());

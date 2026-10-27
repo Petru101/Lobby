@@ -89,6 +89,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
                 let mut e = Entry::new(Source::Heroic, title);
                 e.cover = nile_titles.art(app).map(|u| cover(&heroic, u));
                 e.folder = Some(PathBuf::from(path));
+                e.program = fuel(Path::new(path)).map(|f| f.0);
                 entries.push(with_prefix(e, "nile", app));
             }
         }
@@ -134,6 +135,63 @@ pub fn games(home: &Home) -> Vec<Entry> {
         }
     }
     entries
+}
+
+/// An Amazon game's own record of how it starts (fuel.json in its folder, which nile reads):
+/// the program, its arguments and the folder it runs in.
+fn fuel(folder: &Path) -> Option<(PathBuf, Vec<String>, PathBuf)> {
+    let v = json(&folder.join("fuel.json"))?;
+    let main = v.get("Main")?;
+    let program = folder.join(str_of(main, "Command")?.replace('\\', "/"));
+    let args = main.get("Args").and_then(|a| a.as_array()).into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
+    let cwd = str_of(main, "WorkingSubdirOverride").filter(|d| !d.is_empty()).map_or_else(|| program.parent().unwrap_or(folder).to_path_buf(), |d| folder.join(d.replace('\\', "/")));
+    Some((program, args, cwd))
+}
+
+/// How Heroic starts a game it added by hand (sideloaded) or installed from Amazon: the
+/// program and its arguments, the folder it runs in, and for a Windows game the prefix and the
+/// Proton Heroic picked for it (its own settings, else Heroic's defaults), with the variables
+/// set for it.
+pub struct Launch {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub prefix: Option<PathBuf>,
+    pub proton: Option<PathBuf>,
+    pub env: Vec<(String, String)>,
+}
+
+pub fn launch(runner: &str, app: &str) -> Option<Launch> {
+    let home = Home::find()?;
+    home.app_dirs("com.heroicgameslauncher.hgl", "config/heroic", ".config/heroic").into_iter().find_map(|heroic| {
+        let (program, mut args, cwd) = match runner {
+            "sideload" => {
+                let list = json(&heroic.join("sideload_apps/library.json"))?.get("games")?.as_array()?.clone();
+                let g = list.into_iter().find(|g| str_of(g, "app_name") == Some(app))?;
+                let program = PathBuf::from(str_of(g.get("install")?, "executable")?);
+                let cwd = program.parent().map(Path::to_path_buf);
+                (program, Vec::new(), cwd)
+            }
+            "nile" => {
+                let list = json(&heroic.join("nile_config/nile/installed.json"))?.as_array()?.clone();
+                let path = list.iter().find(|g| str_of(g, "id") == Some(app)).and_then(|g| str_of(g, "path"))?.to_string();
+                let (program, args, cwd) = fuel(Path::new(&path))?;
+                (program, args, Some(cwd))
+            }
+            _ => return None,
+        };
+        if !program.is_file() {
+            return None;
+        }
+        let game = json(&heroic.join("GamesConfig").join(format!("{app}.json"))).and_then(|c| c.get(app).cloned()).unwrap_or_default();
+        let defaults = json(&heroic.join("config.json")).and_then(|c| c.get("defaultSettings").cloned()).unwrap_or_default();
+        let setting = |key: &str| [&game, &defaults].into_iter().find_map(|s| s.get(key).filter(|v| !v.is_null()).cloned());
+        let prefix = setting("winePrefix").and_then(|p| p.as_str().filter(|p| !p.is_empty()).map(PathBuf::from));
+        let proton = setting("wineVersion").filter(|w| str_of(w, "type") == Some("proton")).and_then(|w| Path::new(str_of(&w, "bin")?).parent().map(Path::to_path_buf));
+        let env = game.get("enviromentOptions").and_then(|e| e.as_array()).into_iter().flatten().filter_map(|o| Some((str_of(o, "key")?.to_string(), str_of(o, "value").unwrap_or_default().to_string()))).filter(|(k, _)| !k.is_empty()).collect();
+        args.extend(crate::launch::shell_words(str_of(&game, "launcherArgs").unwrap_or_default()));
+        Some(Launch { program, args, cwd, prefix, proton, env })
+    })
 }
 
 /// The store a Heroic runner installs from, as `Key::Store` names it.

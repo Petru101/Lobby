@@ -5,7 +5,7 @@ pub(crate) mod downloads;
 pub mod faugus;
 pub mod folders;
 mod gamefix;
-mod heroic;
+pub mod heroic;
 mod itch;
 pub mod lutris;
 mod menu;

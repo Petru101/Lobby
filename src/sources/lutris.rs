@@ -148,11 +148,13 @@ pub fn games(home: &Home) -> Vec<Entry> {
             let get = |k: &str| block.iter().find(|(key, _)| key == k).map(|(_, v)| PathBuf::from(v));
             e.prefix = get("prefix");
             // A relative program is in the game's folder (Lutris installs into the prefix).
-            e.program = get("exe").map(|exe| match (&directory, exe.is_absolute()) {
+            // Runners other than Wine name the game's file otherwise (DOSBox's main_file, an
+            // emulator's rom or iso) and ScummVM its folder (path).
+            e.program = ["exe", "main_file", "rom", "iso"].into_iter().find_map(get).map(|exe| match (&directory, exe.is_absolute()) {
                 (Some(d), false) => d.join(exe),
                 _ => exe,
             });
-            e.folder = get("working_dir").or(directory).filter(|d| d != Path::new("/"));
+            e.folder = get("working_dir").or(get("path")).or(directory).filter(|d| d != Path::new("/"));
             entries.push(e);
         }
     }
