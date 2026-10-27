@@ -327,6 +327,13 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     // this). Not Battle.net's: its options are set in Battle.net. A shortcut still starts when
     // they can't apply.
     let battle_net = command.iter().any(|w| w.contains("Battle.net.exe"));
+    // Proton's anti-cheat runtimes, the first time a Proton game starts without them (the
+    // window fetches them in the background too).
+    if command.iter().any(|w| w.ends_with("umu-run")) {
+        if let Err(e) = anticheat::fetch_runtimes() {
+            eprintln!("lobby: {e}");
+        }
+    }
     let command = match launch::add_extras(&game, command.to_vec()) {
         Ok(c) if !battle_net => c,
         Ok(_) => command.to_vec(),

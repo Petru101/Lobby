@@ -50,7 +50,11 @@ pub fn run(game: &Game) -> Result<(), String> {
     let words: Vec<String> = wine.umu.iter().cloned().chain(program).collect();
     // Show frame rate: MangoHud's Vulkan layer (Proton draws with Vulkan).
     let frame_rate = game.frame_rate.then(|| ("MANGOHUD".to_string(), "1".to_string()));
-    // Proton's anti-cheat runtimes, as Steam passes them (`anticheat::runtimes`).
+    // Proton's anti-cheat runtimes, as Steam passes them (`anticheat::runtimes`), downloaded the
+    // first time.
+    if let Err(e) = crate::anticheat::fetch_runtimes() {
+        eprintln!("lobby: {e}");
+    }
     let runtimes = crate::anticheat::runtimes().into_iter().filter(|(var, _)| !env.iter().any(|(k, _)| k == var)).map(|(var, dir)| (var.to_string(), dir.display().to_string())).collect::<Vec<_>>();
     let env: Vec<(String, String)> = env.into_iter().chain(runtimes).chain(extra_env).chain(frame_rate).chain(options.vars).collect();
     // In the game's sandbox: the store's sign-in and its saves' sync stay out here.

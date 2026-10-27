@@ -43,22 +43,98 @@ pub fn in_path(path: &str) -> Option<&'static str> {
 }
 
 /// Proton's builds of Easy Anti-Cheat and BattlEye for Linux, which Proton's Wine loads from
-/// the folders `PROTON_EAC_RUNTIME` and `PROTON_BATTLEYE_RUNTIME` name. Steam sets them when its
-/// free tools "Proton EasyAntiCheat Runtime" / "Proton BattlEye Runtime" are installed; Lutris
-/// downloads its own copies. Lobby passes whichever is here (Steam's first) to every game it
-/// runs with Proton, as Steam does: without them a game whose anti-cheat works on Linux
-/// doesn't start.
+/// the folders `PROTON_EAC_RUNTIME` and `PROTON_BATTLEYE_RUNTIME` name (Steam sets them for its
+/// own copies, Lutris and Heroic for theirs): without them a game whose anti-cheat works on
+/// Linux doesn't start. Lobby keeps its own copies, pinned by version and checksum like its
+/// store tools, in ~/.local/share/lobby/tools, and uses only those. They're published on
+/// Lutris's build server's GitHub releases (the same files as Steam's runtime tools).
+struct Runtime {
+    var: &'static str,
+    name: &'static str,
+    version: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    /// The folder in the archive, and what's inside it.
+    top: &'static str,
+    inside: &'static str,
+}
+
+const RUNTIMES: &[Runtime] = &[
+    Runtime {
+        var: "PROTON_EAC_RUNTIME",
+        name: "eac_runtime",
+        version: "20240114",
+        url: "https://github.com/lutris/buildbot/releases/download/2022.06.23/eac_runtime-20240114.tar.xz",
+        sha256: "8c711a3dd0906fdedd2fdcdedc7b33e09eff5aa22fe2b2dffcc046f02e194957",
+        top: "eac_runtime",
+        inside: "v2",
+    },
+    Runtime {
+        var: "PROTON_BATTLEYE_RUNTIME",
+        name: "battleye_runtime",
+        version: "2024-05-21",
+        url: "https://github.com/lutris/buildbot/releases/download/2024-05-21/battleeye_runtime.tar.xz",
+        sha256: "229eaedf3bc16d5bf548bc2aed94bc48c44e2038337eedacbd17c6c7244cd212",
+        top: "battleeye_runtime",
+        inside: "v1",
+    },
+];
+
+impl Runtime {
+    fn dir(&self) -> PathBuf {
+        crate::store::dir().join("tools").join(format!("{}-{}", self.name, self.version))
+    }
+
+    fn here(&self) -> bool {
+        self.dir().join(self.inside).is_dir()
+    }
+
+    /// Downloads, checks and unpacks it into its folder.
+    fn fetch(&self) -> Result<(), String> {
+        let dir = self.dir();
+        let tools = dir.parent().unwrap_or(Path::new("/")).to_path_buf();
+        fs::create_dir_all(&tools).map_err(|e| e.to_string())?;
+        let failed = |why: String| format!("Couldn't download Proton's {} runtime: {why}", self.name);
+        let part = tools.join(format!(".{}-{}.tar.xz", self.name, std::process::id()));
+        let out = std::process::Command::new("curl").args(["-sSLf", "--max-time", "120", "-o"]).arg(&part).arg(self.url).stdin(std::process::Stdio::null()).output().map_err(|e| failed(e.to_string()))?;
+        let data = fs::read(&part).unwrap_or_default();
+        if !out.status.success() || crate::sha256_hex(&data) != self.sha256 {
+            let _ = fs::remove_file(&part);
+            return Err(failed(if out.status.success() { "it isn't the build Lobby expects (its checksum differs)".into() } else { String::from_utf8_lossy(&out.stderr).trim().to_string() }));
+        }
+        let unpack = tools.join(format!(".{}-{}", self.name, std::process::id()));
+        let _ = fs::remove_dir_all(&unpack);
+        fs::create_dir_all(&unpack).map_err(|e| failed(e.to_string()))?;
+        let ok = std::process::Command::new("tar").arg("-xJf").arg(&part).arg("-C").arg(&unpack).stdin(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        let _ = fs::remove_file(&part);
+        let got = unpack.join(self.top);
+        if !ok || !got.join(self.inside).is_dir() {
+            let _ = fs::remove_dir_all(&unpack);
+            return Err(failed("it didn't unpack".into()));
+        }
+        // Another Lobby (the window, a game starting) may have just put it there.
+        if self.here() {
+            let _ = fs::remove_dir_all(&unpack);
+            return Ok(());
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let moved = fs::rename(&got, &dir).map_err(|e| failed(e.to_string()));
+        let _ = fs::remove_dir_all(&unpack);
+        moved?;
+        crate::log::line(&format!("anti-cheat runtime: {}", dir.display()));
+        Ok(())
+    }
+}
+
+/// The anti-cheat runtimes Lobby has, as the variables Proton reads.
 pub fn runtimes() -> Vec<(&'static str, PathBuf)> {
-    let Some(home) = crate::sources::Home::find() else { return Vec::new() };
-    let steam: Vec<PathBuf> = crate::sources::steam::roots(&home).iter().flat_map(|r| crate::sources::steam::libraries(r)).map(|l| l.join("steamapps/common")).collect();
-    let lutris = [home.join(".local/share/lutris/runtime"), home.join(".var/app/net.lutris.Lutris/data/lutris/runtime")];
-    let find = |steam_name: &str, lutris_name: &str, inside: &str| {
-        steam.iter().map(|c| c.join(steam_name)).chain(lutris.iter().map(|l| l.join(lutris_name))).find(|d| d.join(inside).is_dir())
-    };
-    [("PROTON_EAC_RUNTIME", find("Proton EasyAntiCheat Runtime", "eac_runtime", "v2")), ("PROTON_BATTLEYE_RUNTIME", find("Proton BattlEye Runtime", "battleye_runtime", "v1"))]
-        .into_iter()
-        .filter_map(|(var, dir)| Some((var, dir?)))
-        .collect()
+    RUNTIMES.iter().filter(|r| r.here()).map(|r| (r.var, r.dir())).collect()
+}
+
+/// Downloads the runtimes Lobby doesn't have yet (27 KB and 9 MB). Errors say which failed.
+pub fn fetch_runtimes() -> Result<(), String> {
+    let errors: Vec<String> = RUNTIMES.iter().filter(|r| !r.here()).filter_map(|r| r.fetch().err()).collect();
+    if errors.is_empty() { Ok(()) } else { Err(errors.join(" ")) }
 }
 
 const DEPTH: usize = 5;
@@ -221,6 +297,15 @@ fn sentences(listed: Option<(&str, &[String])>, shipped: Option<&str>, online_on
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Downloads both runtimes (network): `cargo test -- --ignored`, with XDG_DATA_HOME set to
+    /// a scratch folder.
+    #[test]
+    #[ignore]
+    fn runtimes_download() {
+        fetch_runtimes().unwrap();
+        assert_eq!(runtimes().len(), 2);
+    }
 
     #[test]
     fn names_and_sentences() {

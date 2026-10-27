@@ -646,6 +646,12 @@ fn build(app: &adw::Application) {
         ui.claim_unclaimed();
     }
     if std::env::var_os("LOBBY_SNAPSHOT").is_none() {
+        // Proton's anti-cheat runtimes, once (27 KB and 9 MB).
+        gio::spawn_blocking(|| {
+            if let Err(e) = crate::anticheat::fetch_runtimes() {
+                crate::log::line(&e);
+            }
+        });
         // The daily look for new free games, unless it was turned off.
         glib::spawn_future_local(async {
             if let Ok(Err(e)) = gio::spawn_blocking(crate::free::keep_daily_check).await {
