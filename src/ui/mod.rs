@@ -2086,7 +2086,22 @@ impl Ui {
     /// What's free to keep now and next, each with whether the account has it and a way to
     /// claim it: Epic's in lobby's window (the user places the order), the rest in the browser.
     fn free_games(self: &Rc<Self>) {
-        let flow = gtk::FlowBox::builder().valign(gtk::Align::Start).homogeneous(true).min_children_per_line(2).max_children_per_line(6).column_spacing(12).row_spacing(18).selection_mode(gtk::SelectionMode::None).build();
+        // Three groups: free now and not yours yet, free now and already in your library,
+        // free soon. Each shows only with games in it.
+        let group = |title: &str| {
+            let flow = gtk::FlowBox::builder().valign(gtk::Align::Start).homogeneous(true).min_children_per_line(2).max_children_per_line(6).column_spacing(12).row_spacing(18).selection_mode(gtk::SelectionMode::None).build();
+            let heading = gtk::Label::builder().label(title).xalign(0.0).build();
+            heading.add_css_class("title-4");
+            let section = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).visible(false).build();
+            section.append(&heading);
+            section.append(&flow);
+            (section, flow)
+        };
+        let (claimable, flow) = group("Free now");
+        let (yours, yours_flow) = group("Free now, already in your library");
+        let (coming, coming_flow) = group("Coming next");
+        let nothing = gtk::Label::builder().label("Nothing new to claim right now: every game free today is already in your library.").xalign(0.0).wrap(true).visible(false).build();
+        nothing.add_css_class("dim-label");
         let status = adw::StatusPage::builder().title("Looking for free games…").build();
         status.set_child(Some(&adw::Spinner::builder().width_request(32).height_request(32).build()));
         let stack = gtk::Stack::new();
@@ -2096,7 +2111,10 @@ impl Ui {
         let settings = adw::PreferencesGroup::new();
         settings.add(&daily);
         page.append(&settings);
-        page.append(&flow);
+        page.append(&nothing);
+        page.append(&claimable);
+        page.append(&yours);
+        page.append(&coming);
         let u = self.clone();
         daily.connect_active_notify(move |row| {
             let on = row.is_active();
@@ -2137,8 +2155,15 @@ impl Ui {
                 if !owned && g.from.is_none() && signed_in && g.store == crate::stores::Store::Epic.name() {
                     to_claim.push(g.clone());
                 }
-                flow.append(&u.free_card(g, owned, &items.items, signed_in, &dialog));
+                let (section, into) = match (g.from.is_some(), owned) {
+                    (true, _) => (&coming, &coming_flow),
+                    (false, true) => (&yours, &yours_flow),
+                    (false, false) => (&claimable, &flow),
+                };
+                section.set_visible(true);
+                into.append(&u.free_card(g, owned, signed_in, &dialog));
             }
+            nothing.set_visible(!claimable.is_visible() && yours.is_visible());
             if !to_claim.is_empty() {
                 claim_all.set_label(&format!("Claim all on Epic ({})", to_claim.len()));
                 claim_all.set_visible(true);
@@ -2200,7 +2225,7 @@ impl Ui {
         });
     }
 
-    fn free_card(self: &Rc<Self>, g: &crate::free::FreeGame, owned: bool, items_owned: &[String], signed_in: bool, dialog: &adw::Dialog) -> gtk::FlowBoxChild {
+    fn free_card(self: &Rc<Self>, g: &crate::free::FreeGame, owned: bool, signed_in: bool, dialog: &adw::Dialog) -> gtk::FlowBoxChild {
         use crate::free::Claim;
         let overlay = gtk::Overlay::builder().width_request(120).height_request(180).overflow(gtk::Overflow::Hidden).halign(gtk::Align::Center).build();
         overlay.add_css_class("cover");
@@ -2221,26 +2246,10 @@ impl Ui {
         body.append(&title);
         body.append(&when);
         let epic = matches!(g.claim, Claim::EpicCheckout { .. } | Claim::EpicPage(_));
-        if owned {
-            let have = gtk::Label::builder().label("In your library").xalign(0.0).build();
-            have.add_css_class("success");
-            have.add_css_class("caption");
-            body.append(&have);
-        }
-        // Owned by its game, not this offer's own item: Epic may still add it (another
-        // edition), so it can be claimed anyway.
-        let anyway = owned && signed_in && g.from.is_none() && matches!(g.claim, Claim::EpicCheckout { .. }) && !g.items.is_empty() && !g.items.iter().all(|i| items_owned.contains(i));
-        if anyway {
-            let button = gtk::Button::builder().label("Claim anyway").halign(gtk::Align::Start).build();
-            button.add_css_class("flat");
-            button.add_css_class("caption");
-            body.append(&button);
-            let (u, d, game) = (self.clone(), dialog.clone(), g.clone());
-            button.connect_clicked(move |_| {
-                d.close();
-                u.claim(vec![game.clone()]);
-            });
-        } else if !owned && g.from.is_none() {
+        // Owned or coming games' group says it all: only games to claim get a button.
+        // Epic's giveaway can be another store item of a game the account already has (Sker
+        // Ritual, Home): its checkout still adds it, but it's the same game, so it isn't offered.
+        if !owned && g.from.is_none() {
             let label = if epic && signed_in { "Claim" } else if epic { "Sign in to Epic to claim" } else { "Open in browser" };
             let button = gtk::Button::builder().label(label).margin_top(4).sensitive(!epic || signed_in).build();
             button.add_css_class("pill");
