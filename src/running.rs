@@ -193,3 +193,27 @@ fn holder(pid: i32) -> Option<String> {
     let name = fs::read_to_string(format!("/proc/{tracer}/comm")).ok()?;
     Some(name.trim().to_string())
 }
+
+/// Libraries a program loads once it draws: a GPU driver (Ferret's games list uses the same),
+/// or a display connection (SDL, X11, Wayland, Wine's display drivers: old games and Java2D
+/// draw without the GPU).
+const DRAWS: &[&str] = &["libGLX_", "libEGL_", "libvulkan_", "libgallium", "_dri.so", "libnvidia-glcore", "libSDL2", "libSDL3", "libSDL-1.2", "libX11.so", "libxcb.so", "libwayland-client", "winex11.drv", "winewayland.drv"];
+
+/// Programs that run around a game and aren't it: Proton's runtime (pressure-vessel checks the
+/// graphics stack itself), umu's Python, the sandbox, Wine's own programs.
+fn helper(p: &Process) -> bool {
+    let first = p.args.first().map(|a| a.to_lowercase()).unwrap_or_default();
+    let exe = fs::read_link(format!("/proc/{}/exe", p.pid)).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    ["pressure-vessel", "steam-runtime", "steamrt", "/umu", "bwrap", "xdg-dbus-proxy", "wineserver", "reaper", "/lobby"].iter().any(|h| exe.contains(h) || first.contains(h))
+        || first.replace('\\', "/").contains("/windows/")
+        || first.contains("c:/windows/")
+}
+
+/// Whether anything under `root` (a game's start) has shown itself: loaded a GPU driver or
+/// connected to the display.
+pub fn shows_window(root: i32) -> bool {
+    let procs = processes();
+    procs.iter().filter(|p| p.pid == root || descends(&procs, p.pid, root)).filter(|p| !helper(p)).any(|p| {
+        fs::read_to_string(format!("/proc/{}/maps", p.pid)).is_ok_and(|maps| maps.lines().any(|l| DRAWS.iter().any(|d| l.contains(d))))
+    })
+}

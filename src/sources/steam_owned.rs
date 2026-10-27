@@ -38,7 +38,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
         }
         let apps: BTreeSet<u32> = pairs.iter().map(|(_, a)| *a).collect();
         let played = played(&root);
-        for (appid, name) in app_games(&fs::read(root.join("appcache/appinfo.vdf")).unwrap_or_default(), &apps) {
+        for (appid, name, online_only) in app_games(&fs::read(root.join("appcache/appinfo.vdf")).unwrap_or_default(), &apps) {
             if entries.iter().any(|e| e.keys.contains(&Key::SteamApp(appid))) {
                 continue;
             }
@@ -47,6 +47,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
             e.keys.push(Key::SteamApp(appid));
             e.cover = Some(library_art(&root, appid));
             e.since = bought.get(&appid).copied();
+            e.online_only = online_only;
             (e.last_played, e.playtime) = played.get(&appid).copied().unwrap_or_default();
             entries.push(e);
         }
@@ -333,7 +334,21 @@ fn package_apps(b: &[u8], wanted: &BTreeSet<u32>) -> Vec<(u32, u32)> {
 }
 
 /// Name of each wanted app that's a game, from appinfo.vdf (formats 27-29).
-fn app_games(b: &[u8], wanted: &BTreeSet<u32>) -> Vec<(u32, String)> {
+/// Steam's store categories: 2 Single-player; 1 Multi-player, 20 MMO, 36 Online PvP, 38 Online
+/// Co-op (Ferret's helper/src/steam.rs reads them the same way).
+const SINGLE_PLAYER: &str = "category_2";
+const MMO: &str = "category_20";
+const MULTIPLAYER: &[&str] = &["category_1", "category_20", "category_36", "category_38"];
+
+/// Played only with other people: an MMO, or multiplayer and not single-player.
+fn online_only(common: Option<&Kv>) -> bool {
+    let Some(Kv::Map(cats)) = common.and_then(|c| c.get("category")) else { return false };
+    let has = |k: &str| cats.iter().any(|(c, _)| c.eq_ignore_ascii_case(k));
+    has(MMO) || (MULTIPLAYER.iter().any(|m| has(m)) && !has(SINGLE_PLAYER))
+}
+
+/// The games among `wanted`: app id, name, and whether it's online only.
+fn app_games(b: &[u8], wanted: &BTreeSet<u32>) -> Vec<(u32, String, bool)> {
     let mut r = Reader { b, i: 0 };
     let Some(magic) = r.u32() else { return Vec::new() };
     if !(0x0756_4427..=0x0756_4429).contains(&magic) || r.u32().is_none() {
@@ -360,7 +375,7 @@ fn app_games(b: &[u8], wanted: &BTreeSet<u32>) -> Vec<(u32, String)> {
                 let field = |k: &str| common.and_then(|c| c.get(k)).and_then(Kv::str);
                 if field("type").is_some_and(|t| t.eq_ignore_ascii_case("game")) {
                     if let Some(name) = field("name") {
-                        games.push((appid, name.to_string()));
+                        games.push((appid, name.to_string(), online_only(common)));
                     }
                 }
             }
@@ -454,7 +469,7 @@ mod tests {
         for t in table {
             a.extend(format!("{t}\0").bytes());
         }
-        assert_eq!(app_games(&a, &BTreeSet::from([10, 80])), vec![(10, "Counter-Strike".to_string())]);
+        assert_eq!(app_games(&a, &BTreeSet::from([10, 80])), vec![(10, "Counter-Strike".to_string(), false)]);
 
         // A Steam update that changes the files must never crash a scan: cut short anywhere,
         // any byte changed, or the license cache scrambled another way, they read as less or

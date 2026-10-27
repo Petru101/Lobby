@@ -31,7 +31,7 @@ fn mtime(path: &Path) -> u64 {
 /// The folder to measure: the installed game's own, unless it's a folder of many things (the
 /// home folder or above, a drive's top, a folder Lobby looks in, one named like games or
 /// downloads), whose size wouldn't be the game's.
-fn folder(game: &Game, wide: &[PathBuf]) -> Option<PathBuf> {
+pub(crate) fn folder(game: &Game, wide: &[PathBuf]) -> Option<PathBuf> {
     if game.kind != Kind::Game || game.gone {
         return None;
     }
@@ -43,7 +43,7 @@ fn folder(game: &Game, wide: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// The folders Lobby looks in: never one game's.
-fn wide() -> Vec<PathBuf> {
+pub(crate) fn wide() -> Vec<PathBuf> {
     crate::sources::Home::find().map(|h| crate::sources::folders::roots(&h).iter().map(|r| crate::library::norm(r)).collect()).unwrap_or_default()
 }
 

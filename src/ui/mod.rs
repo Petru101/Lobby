@@ -311,6 +311,11 @@ struct Ui {
     /// Downloads page's banner offering to clean them up.
     leftovers: RefCell<Vec<crate::leftovers::Leftover>>,
     leftover_banner: adw::Banner,
+    /// What may keep each game's online play from working here (`anticheat::warnings`, after
+    /// each scan), for its page.
+    online_warnings: RefCell<HashMap<String, Vec<String>>>,
+    /// The newest failed start told (a toast for each newer one).
+    failures_seen: Cell<u64>,
     /// A game just installed from a download: its download is offered for deleting once the
     /// scan after the install knows it.
     offer_leftover: RefCell<Option<String>>,
@@ -449,7 +454,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -722,7 +727,7 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         // clean-up list need them (LOBBY_SNAPSHOT_CLEANUP=1 opens the list).
         if std::env::var_os("LOBBY_SNAPSHOT_DETAILS").is_some() || std::env::var_os("LOBBY_SNAPSHOT_CLEANUP").is_some() {
             for _ in 0..150 {
-                if !u.leftovers.borrow().is_empty() {
+                if !u.leftovers.borrow().is_empty() && !u.online_warnings.borrow().is_empty() {
                     break;
                 }
                 glib::timeout_future(std::time::Duration::from_millis(200)).await;
@@ -1140,6 +1145,24 @@ impl Ui {
                 u.running.replace(found);
                 u.show_running();
             }
+            // Starts that ended without showing anything since the last look (`lobby sandbox`
+            // writes them down; one failing within 2 s is never seen running).
+            let since = u.failures_seen.get();
+            let new = gio::spawn_blocking(move || crate::starts::all().into_iter().filter(|(_, f)| f.when > since).collect::<Vec<_>>()).await.unwrap_or_default();
+            if let Some(latest) = new.iter().map(|(_, f)| f.when).max() {
+                u.failures_seen.set(latest);
+            }
+            {
+                for (id, f) in new {
+                    let name = u.game(&id).map(|g| g.name).unwrap_or(id.clone());
+                    let toast = adw::Toast::builder().title(format!("{name} closed {} without showing anything", crate::starts::after(f.seconds))).button_label("Why?").timeout(10).build();
+                    let u2 = u.clone();
+                    toast.connect_button_clicked(move |_| {
+                        u2.details(&id);
+                    });
+                    u.toasts.add_toast(toast);
+                }
+            }
         });
     }
 
@@ -1301,8 +1324,11 @@ impl Ui {
         let games = self.lib.borrow().games.clone();
         let u = self.clone();
         glib::spawn_future_local(async move {
+            let all = games.clone();
             let found = gio::spawn_blocking(move || crate::log::timed("leftovers", || crate::leftovers::find(&games))).await.unwrap_or_default();
             u.leftovers.replace(found);
+            let warnings = gio::spawn_blocking(move || crate::log::timed("anti-cheat", || crate::anticheat::warnings(&all))).await.unwrap_or_default();
+            u.online_warnings.replace(warnings);
             u.show_leftover_banner();
             let Some(id) = u.offer_leftover.take() else { return };
             let mine: Vec<_> = u.leftovers.borrow().iter().filter(|l| l.id == id).cloned().collect();
@@ -2978,13 +3004,25 @@ impl Ui {
         top.append(&text);
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(24).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
         content.append(&top);
-        for warning in crate::drives::warnings(&game, &crate::drives::mounts()) {
+        let online = self.online_warnings.borrow().get(&game.id).cloned().unwrap_or_default();
+        let failed = crate::starts::failed(&game.id).map(|f| {
+            let when = glib::DateTime::from_unix_local(f.when as i64).ok().and_then(|d| d.format("%-d %b, %H:%M").ok()).map(|d| d.to_string()).unwrap_or_default();
+            format!("Its last start, {when}, ended {} without showing anything. {}", crate::starts::after(f.seconds), f.why.unwrap_or_else(|| "Its log may say why.".into()))
+        });
+        for (warning, log) in crate::drives::warnings(&game, &crate::drives::mounts()).into_iter().map(|w| (w, false)).chain(online.into_iter().map(|w| (w, false))).chain(failed.map(|w| (w, true))) {
             let icon = gtk::Image::builder().icon_name("dialog-warning-symbolic").valign(gtk::Align::Start).build();
             let text = gtk::Label::builder().label(&warning).wrap(true).xalign(0.0).hexpand(true).build();
             let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).build();
             row.add_css_class("drive-warning");
             row.append(&icon);
             row.append(&text);
+            // A failed start: what the game printed.
+            if log {
+                let button = gtk::Button::builder().label("Show log").valign(gtk::Align::Center).build();
+                let (file, w) = (store::log_file(&game.id), self.window.clone());
+                button.connect_clicked(move |_| gtk::FileLauncher::new(Some(&gio::File::for_path(&file))).launch(Some(&w), gio::Cancellable::NONE, |_| {}));
+                row.append(&button);
+            }
             content.append(&row);
         }
         content.append(&info);

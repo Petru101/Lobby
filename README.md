@@ -33,6 +33,8 @@ used daily on one computer (Bazzite, KDE Plasma, NVIDIA), and isn't packaged yet
   played, play time (Lobby's own and what Steam, Heroic, Lutris and Faugus counted), size or
   date added; Continue playing; favourites and hidden games; demos out of sight; each game's
   save folder; Stop for a game that hangs; Show frame rate (MangoHud's overlay) per game.
+- **Says when online play won't work** (anti-cheat Linux can't run, online-only games), and
+  when a game closes without showing anything, with the likely reason from its log.
 - **Cleans up downloads:** the archives, installers and repacks of games already installed,
   with where to get each again (itch.io, MyAbandonware), deleted when you say so.
 - **Works with a controller:** move with the D-pad or stick, A to open, B to go back, Start

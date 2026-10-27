@@ -134,6 +134,10 @@ pub struct Entry {
     /// A demo or prologue, as its store says (else its name does: `Game::demo`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub demo: bool,
+    /// Played only with other people, as its store says (Steam: multiplayer and not
+    /// single-player, or an MMO).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub online_only: bool,
 }
 
 impl Entry {
@@ -143,7 +147,7 @@ impl Entry {
     }
 
     pub fn new(source: Source, name: impl Into<String>) -> Entry {
-        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), update: None, cover: None, icon: None, note: None, annotation: false, last_played: None, playtime: None, size: None, since: None, demo: false }
+        Entry { source, name: name.into(), kind: Kind::Game, folder: None, program: None, prefix: None, keys: Vec::new(), update: None, cover: None, icon: None, note: None, annotation: false, last_played: None, playtime: None, size: None, since: None, demo: false, online_only: false }
     }
 }
 

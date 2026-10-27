@@ -6,6 +6,7 @@ mod battlenet;
 mod drives;
 mod free;
 mod install;
+mod anticheat;
 mod launch;
 mod leftovers;
 mod library;
@@ -21,6 +22,7 @@ mod sizes;
 mod sources;
 mod steam_move;
 mod search;
+mod starts;
 mod store;
 mod taken;
 mod uninstall;
@@ -54,6 +56,7 @@ const USAGE: &str = "usage: lobby                   open the window
                                (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
        lobby hide|unhide|favourite|unfavourite <game>  out of sight or back; starred or not
        lobby frame-rate <game> [on|off]  MangoHud's overlay (frame rate ...) when Play starts it
+       lobby anticheat         games whose online play may not work here (anti-cheat, online only)
        lobby leftovers [--delete <game>]  downloads whose game is installed (with sizes and where to
                                get them again); --delete removes that game's (to the Trash when
                                its drive has one)
@@ -89,6 +92,7 @@ fn main() -> ExitCode {
         (Some("stop"), words) if !words.is_empty() => stop_game(&words.join(" ")),
         (Some(what @ ("hide" | "unhide" | "favourite" | "unfavourite")), words) if !words.is_empty() => mark(what, &words.join(" ")),
         (Some("frame-rate"), [game, on @ ..]) if on.len() <= 1 => frame_rate(game, on.first().copied()),
+        (Some("anticheat"), []) => list_online_warnings(),
         (Some("leftovers"), []) => list_leftovers(),
         (Some("leftovers"), ["--delete", game @ ..]) if !game.is_empty() => delete_leftovers(&game.join(" ")),
         // The options as typed, -- words too (`rest` leaves those out).
@@ -189,6 +193,21 @@ fn mark(what: &str, query: &str) -> Result<(), String> {
     }
     println!("{}: {}", g.name, if g.hidden { "hidden" } else if g.favourite { "a favourite" } else { "shown" });
     lib.save()
+}
+
+/// Every game with something that may keep its online play from working here.
+fn list_online_warnings() -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let mut found: Vec<(String, Vec<String>)> = anticheat::warnings(&lib.games).into_iter().filter_map(|(id, w)| Some((lib.games.iter().find(|g| g.id == id)?.name.clone(), w))).collect();
+    found.sort();
+    for (name, lines) in &found {
+        println!("{name}:");
+        for l in lines {
+            println!("  {l}");
+        }
+    }
+    println!("{} games", found.len());
+    Ok(())
 }
 
 /// The downloads whose game is installed: what deleting them would free.
@@ -318,11 +337,53 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     };
     let command = &command[..];
     let start = store::now();
-    let status = sandbox::command(&game, &[], command, None).and_then(|mut s| s.command.stdin(std::process::Stdio::null()).status().map_err(|e| format!("bwrap: {e}")));
+    // Its output goes to its log, unless it already does (Play's): from a shortcut it would
+    // go to the journal, and the log is where a failed start's reason is read.
+    let log = store::log_file(id);
+    let to_log = !same_file_as_stdout(&log);
+    let status = sandbox::command(&game, &[], command, None).and_then(|mut s| {
+        s.command.stdin(std::process::Stdio::null());
+        if to_log {
+            let _ = std::fs::create_dir_all(log.parent().unwrap_or(std::path::Path::new("/")));
+            if let Ok(out) = std::fs::File::create(&log) {
+                if let Ok(err) = out.try_clone() {
+                    s.command.stdout(out).stderr(err);
+                }
+            }
+        }
+        let mut child = s.command.spawn().map_err(|e| format!("bwrap: {e}"))?;
+        // Whether anything of it shows (a GPU driver or display connection loaded), looked at
+        // every second until something does.
+        let pid = child.id() as i32;
+        let shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (watching, seen) = (std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)), shown.clone());
+        let w = watching.clone();
+        std::thread::spawn(move || {
+            while w.load(std::sync::atomic::Ordering::SeqCst) && !seen.load(std::sync::atomic::Ordering::SeqCst) {
+                if running::shows_window(pid) {
+                    seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        });
+        let status = child.wait().map_err(|e| format!("bwrap: {e}"));
+        watching.store(false, std::sync::atomic::Ordering::SeqCst);
+        status.map(|st| (st, shown.load(std::sync::atomic::Ordering::SeqCst)))
+    });
+    let ran = store::now().saturating_sub(start);
     // Timed while it runs: Battle.net's own lifetime isn't a game's.
     if status.is_ok() && !battle_net {
         playtime::session(id, start, store::now());
+        // Ended before anything of it showed: a failed start, with the likely reason.
+        let failed = matches!(status, Ok((_, false))) && ran < starts::WITHIN;
+        let why = failed.then(|| starts::why(command, &std::fs::read_to_string(&log).unwrap_or_default())).flatten();
+        starts::record(id, failed.then(|| starts::Failed { when: store::now(), seconds: ran, why: why.clone() }));
+        if failed && !window_open() {
+            let body = format!("It closed {} without showing anything. {}", starts::after(ran), why.unwrap_or_else(|| "Its page in Lobby has its log.".into()));
+            let _ = std::process::Command::new("notify-send").args(["-a", "Lobby", "-i", "dialog-warning", &format!("{} didn't start", game.name), &body]).stdin(std::process::Stdio::null()).status();
+        }
     }
+    let status = status.map(|(st, _)| st);
     match status {
         Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
         Err(e) => {
@@ -330,6 +391,22 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Whether this program's output already goes to `file` (Play sends a game's there).
+fn same_file_as_stdout(file: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(out), Ok(f)) = (std::fs::metadata("/proc/self/fd/1"), std::fs::metadata(file)) else { return false };
+    out.dev() == f.dev() && out.ino() == f.ino()
+}
+
+/// Lobby's window is open (a `lobby` with no command): it says a failed start itself.
+fn window_open() -> bool {
+    std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|e| {
+        let args = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
+        let words: Vec<&[u8]> = args.split(|&b| b == 0).filter(|w| !w.is_empty()).collect();
+        words.len() == 1 && words[0].ends_with(b"/lobby")
+    })
 }
 
 /// Saves found in Windows user folders: every game's (no game named), or one game's, brought
@@ -542,6 +619,12 @@ fn how(query: &str) -> Result<(), String> {
     }
     for warning in drives::warnings(game, &drives::mounts()) {
         println!("\nWarning: {warning}");
+    }
+    for warning in anticheat::warnings(std::slice::from_ref(game)).remove(&game.id).unwrap_or_default() {
+        println!("\nOnline play: {warning}");
+    }
+    if let Some(f) = starts::failed(&game.id) {
+        println!("\nLast start failed: it ended {} without showing anything. {}\n  log: {}", starts::after(f.seconds), f.why.unwrap_or_default(), store::log_file(&game.id).display());
     }
     if game.kind != Kind::Game {
         return Ok(());
