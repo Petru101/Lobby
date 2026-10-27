@@ -145,11 +145,18 @@ pub fn sync_shortcut(game: &Game) -> Result<bool, String> {
     let current: Option<Vec<String>> = text.lines().find_map(|l| l.strip_prefix("wrapper\t")).map(|w| w.split('\t').map(String::from).collect());
     let entry = text.lines().filter_map(|l| l.strip_prefix("created\t")).filter(|p| p.ends_with(".desktop")).find_map(|p| crate::launch::desktop_exec(&fs::read_to_string(p).ok()?));
     let Some((words, _)) = entry else { return Ok(changed) };
-    let wanted = (level(game) != Level::Off && crate::launch::hands_over(&words).is_none()).then(|| wrapper(game));
+    let wanted = (shortcut_wrapped(game) && crate::launch::hands_over(&words).is_none()).then(|| wrapper(game));
     if current == wanted {
         return Ok(changed);
     }
     gamefix::setup::set_wrapper(&record, wanted.as_deref()).map(|()| true)
+}
+
+/// Whether the game's shortcuts start it through `lobby sandbox`: unless it's Off, and then too
+/// where only programs AppArmor names may make sandboxes (Proton's too): Lobby's profile is
+/// what lets them.
+fn shortcut_wrapped(game: &Game) -> bool {
+    level(game) != Level::Off || crate::apparmor::restricted()
 }
 
 fn wrapper(game: &Game) -> Vec<String> {
@@ -174,7 +181,7 @@ fn sync_entry(game: &Game, file: &Path) -> Result<bool, String> {
     if !(file.starts_with(&home) || real(file).starts_with(real(&home))) || fs::metadata(file).is_ok_and(|m| m.permissions().readonly()) {
         return Ok(false);
     }
-    let rewritten = entry_text(&text, (level(game) != Level::Off).then(|| wrapper(game)).as_deref());
+    let rewritten = entry_text(&text, shortcut_wrapped(game).then(|| wrapper(game)).as_deref());
     if rewritten == text {
         return Ok(false);
     }
@@ -247,8 +254,15 @@ impl Drop for Sandboxed {
 /// The game's command (`env` words and all) in its sandbox. `env` is what the caller adds to
 /// the command's environment (the paths in both are what the game gets to use).
 pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Option<&Path>) -> Result<Sandboxed, String> {
+    // umu-run by its path: Lobby's own (in its folder in the home) is then there, read-only,
+    // in an isolated home too.
+    let words: Vec<String> = words.iter().map(|w| if w == "umu-run" { crate::launch::program_on_path(w).map_or(w.clone(), |p| real(&p).display().to_string()) } else { w.clone() }).collect();
+    let words = &words[..];
     let (program, args) = words.split_first().ok_or("empty command")?;
     let level = level(game);
+    if (level != Level::Off || words.iter().any(|w| w.ends_with("umu-run"))) && crate::apparmor::blocked_here() {
+        return Err(format!("{} Allow Lobby first: press Play in Lobby's window, or run `lobby allow-sandbox`.", crate::apparmor::WHY));
+    }
     if level == Level::Off {
         let mut c = Command::new(program);
         c.args(args).envs(env.iter().cloned());
@@ -266,7 +280,7 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
         }
         return Ok(Sandboxed { command: c, proxy: None });
     }
-    let bwrap = crate::launch::program_on_path("bwrap").ok_or("Protecting the game needs bubblewrap (bwrap), which isn't installed.")?;
+    let (bwrap, overlays) = bwrap().ok_or("Protecting the game needs bubblewrap (bwrap), which isn't installed: install your system's bubblewrap package.")?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|r| r.is_dir());
     let proxy = runtime.as_deref().and_then(start_proxy);
     let private = (level == Level::Isolated).then(|| private_home(&game.id)).transpose()?;
@@ -278,11 +292,14 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
         devices: devices(),
         sockets: runtime.as_deref().map(sockets).unwrap_or_default(),
         x11: x11_socket(),
+        xauth: xauth(),
         bus: proxy.as_ref().map(|(_, s)| s.clone()),
+        steam: steam_roots(&home),
         present: present(&home),
         home,
         runtime,
         private,
+        overlays,
     };
     let mut c = Command::new(bwrap);
     c.args(args_for(&spec)).args(wineserver_args()).arg("--").arg(program).args(args).envs(env.iter().cloned());
@@ -290,6 +307,49 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
         c.current_dir(dir);
     }
     Ok(Sandboxed { command: c, proxy })
+}
+
+/// The bubblewrap to run, and whether it has throwaway layers: the system's when it does
+/// (0.10, 2024, and later), else pressure-vessel's newer one in umu's or Steam's runtime (it runs
+/// on the host; Ubuntu 24.04 has 0.9), else the system's anyway, with Proton's folders writable.
+/// Where AppArmor restricts sandboxes, Lobby's copy of the system's: Ubuntu's profile for
+/// /usr/bin/bwrap keeps what runs in it from making sandboxes of its own (Proton's), Lobby's
+/// profile (`apparmor`) doesn't, and covers what Lobby runs from anywhere but /usr/bin/bwrap.
+fn bwrap() -> Option<(PathBuf, bool)> {
+    let system = crate::launch::program_on_path("bwrap").map(|b| if crate::apparmor::restricted() { own_copy(&b).unwrap_or(b) } else { b });
+    if let Some(b) = system.as_ref().filter(|b| has_overlays(b)) {
+        return Some((b.clone(), true));
+    }
+    let home = real(&PathBuf::from(std::env::var_os("HOME").unwrap_or_default()));
+    let tool = Path::new("pressure-vessel/libexec/steam-runtime-tools-0/srt-bwrap");
+    let umu = fs::read_dir(home.join(".local/share/umu")).into_iter().flatten().flatten().map(|e| e.path().join(tool));
+    let steam = steam_roots(&home).into_iter().flat_map(|r| fs::read_dir(home.join(r).join("steamapps/common")).into_iter().flatten().flatten()).filter(|e| e.file_name().to_string_lossy().starts_with("SteamLinuxRuntime")).map(|e| e.path().join(tool));
+    if let Some(b) = umu.chain(steam).find(|b| b.is_file() && has_overlays(b)) {
+        return Some((b, true));
+    }
+    system.map(|b| (b, false))
+}
+
+/// A copy of the system's bubblewrap in Lobby's folder, made again when that one changes.
+fn own_copy(bwrap: &Path) -> Option<PathBuf> {
+    let copy = crate::store::dir().join("tools/bwrap");
+    let same = |a: &fs::Metadata, b: &fs::Metadata| a.len() == b.len() && a.modified().ok() == b.modified().ok();
+    let source = fs::metadata(bwrap).ok()?;
+    if !fs::metadata(&copy).is_ok_and(|c| same(&c, &source)) {
+        let part = copy.with_extension("part");
+        fs::create_dir_all(copy.parent()?).ok()?;
+        fs::copy(bwrap, &part).ok()?;
+        fs::File::options().write(true).open(&part).ok()?.set_modified(source.modified().ok()?).ok()?;
+        fs::rename(&part, &copy).ok()?;
+    }
+    Some(copy)
+}
+
+/// Whether a bubblewrap is 0.10 or later ("bubblewrap 0.13.0").
+fn has_overlays(bwrap: &Path) -> bool {
+    let out = Command::new(bwrap).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let v: Vec<u32> = out.trim().rsplit(' ').next().unwrap_or_default().split('.').filter_map(|n| n.parse().ok()).collect();
+    v.len() >= 2 && (v[0], v[1]) >= (0, 10)
 }
 
 /// A game a Flatpak app runs (Ruffle, DOSBox ...): Flatpak's sandbox, told to give it the game's
@@ -340,6 +400,8 @@ struct Spec {
     runtime: Option<PathBuf>,
     /// The isolated game's own home.
     private: Option<PathBuf>,
+    /// Whether this bubblewrap has throwaway layers (`--tmp-overlay`, 0.10 and later).
+    overlays: bool,
     /// Writable: the game's folders, prefix, the folders shared with it.
     game: Vec<PathBuf>,
     /// Read-only: other paths the command names (Java, a config file gamefix wrote ...).
@@ -348,7 +410,10 @@ struct Spec {
     /// Display, sound and Discord sockets under the runtime folder: (the socket, where it goes).
     sockets: Vec<(PathBuf, PathBuf)>,
     x11: Option<PathBuf>,
+    xauth: Option<PathBuf>,
     bus: Option<PathBuf>,
+    /// Steam's folders in the home (relative to it), `steam_roots`.
+    steam: Vec<PathBuf>,
     /// Which of the home's files and folders this exists (relative to the home).
     present: Vec<(PathBuf, bool)>,
 }
@@ -384,12 +449,16 @@ const LOCKED: &[&str] = &[
     ".xprofile", ".xinitrc", ".xsession", ".xsessionrc", ".pam_environment", ".config/environment.d",
     ".config/autostart", ".config/autostart-scripts", ".config/plasma-workspace", ".config/systemd", ".local/share/systemd", ".local/share/dbus-1",
     ".config/kglobalshortcutsrc", ".config/khotkeysrc", ".config/kwinrc", ".local/share/kwin", ".local/share/plasma", ".local/share/kservices5", ".local/share/kservices6",
+    // GNOME's (Shell extensions; dconf holds custom shortcuts' commands and which extensions
+    // run), Cinnamon's and Xfce's (xfconf: its shortcuts).
+    ".local/share/gnome-shell", ".config/dconf", ".local/share/cinnamon", ".config/cinnamon", ".config/xfce4/xfconf",
     ".config/mimeapps.list", ".local/share/applications", ".local/share/mime", ".local/share/flatpak", ".var/app", ".local/bin", ".local/lib", ".cargo/bin",
     ".local/share/lobby", ".local/share/gamefix", ".config/gamefix", ".wine",
 ];
 
-/// Folders under the home the umu/Proton tools live in: a throwaway writable layer over them.
-const TOOLS: &[&str] = &[".local/share/umu", ".local/share/Steam/compatibilitytools.d"];
+/// Folders under the home the umu/Proton tools live in: a throwaway writable layer over them
+/// (and over each Steam folder's compatibilitytools.d and Proton builds).
+const TOOLS: &[&str] = &[".local/share/umu"];
 
 /// Read-only in an isolated home, for looks (fonts, cursors) and MangoHud.
 const LOOKS: &[&str] = &[".local/share/fonts", ".fonts", ".config/fontconfig", ".icons", ".local/share/icons", ".config/MangoHud"];
@@ -399,10 +468,30 @@ fn secret_name(name: &str) -> bool {
     ["token", "credential", "secret", "password", "wallet"].iter().any(|w| n.contains(w))
 }
 
+/// Steam's folders in the home, relative to it, each once, the one ~/.steam/root names (where
+/// Steam last ran) first: its own (~/.local/share/Steam, also where umu puts GE-Proton), the
+/// Debian and Ubuntu package's (~/.steam/debian-installation, which ~/.steam/steam links to),
+/// Flatpak Steam's.
+fn steam_roots(home: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for rel in [".steam/root", ".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
+        let path = real(&home.join(rel));
+        let Ok(rel) = path.strip_prefix(home) else { continue };
+        // compatibilitytools.d alone: umu's GE-Proton where Steam's folder is elsewhere (Ubuntu's).
+        if ["steamapps", "linux64", "compatibilitytools.d"].iter().any(|d| path.join(d).is_dir()) && !out.iter().any(|o| o == rel) {
+            out.push(rel.to_path_buf());
+        }
+    }
+    out
+}
+
 /// What of HIDDEN, LOCKED, TOOLS, LOOKS, Steam and the secret-named files exists in the home.
 fn present(home: &Path) -> Vec<(PathBuf, bool)> {
     let mut names: Vec<PathBuf> = HIDDEN.iter().chain(LOCKED).chain(TOOLS).chain(LOOKS).map(PathBuf::from).collect();
-    names.extend([".local/share/Steam", ".local/share/Steam/linux32", ".local/share/Steam/linux64"].map(PathBuf::from));
+    let steam = steam_roots(home);
+    for root in &steam {
+        names.extend(["", "linux32", "linux64", "compatibilitytools.d"].map(|d| root.join(d)));
+    }
     for dir in ["", ".config", ".local/share"] {
         for entry in fs::read_dir(home.join(dir)).into_iter().flatten().flatten() {
             if secret_name(&entry.file_name().to_string_lossy()) {
@@ -411,9 +500,11 @@ fn present(home: &Path) -> Vec<(PathBuf, bool)> {
         }
     }
     // Proton builds in Steam's libraries in the home.
-    for entry in fs::read_dir(home.join(".local/share/Steam/steamapps/common")).into_iter().flatten().flatten() {
-        if entry.file_name().to_string_lossy().starts_with("Proton") {
-            names.push(Path::new(".local/share/Steam/steamapps/common").join(entry.file_name()));
+    for common in steam.iter().map(|r| r.join("steamapps/common")) {
+        for entry in fs::read_dir(home.join(&common)).into_iter().flatten().flatten() {
+            if entry.file_name().to_string_lossy().starts_with("Proton") {
+                names.push(common.join(entry.file_name()));
+            }
         }
     }
     names.into_iter().filter_map(|n| fs::symlink_metadata(home.join(&n)).ok().filter(|m| !m.is_symlink()).map(|m| (n, m.is_dir()))).collect()
@@ -479,24 +570,32 @@ fn args_for(s: &Spec) -> Vec<String> {
                     false => push(&["--ro-bind", "/dev/null", &p(&at_home(rel))]),
                 }
             }
-            if has(".local/share/Steam") == Some(true) {
-                push(&["--tmpfs", &p(&at_home(Path::new(".local/share/Steam")))]);
+            for root in s.steam.iter().filter(|r| has(&r.to_string_lossy()) == Some(true)) {
+                push(&["--tmpfs", &p(&at_home(root))]);
             }
         }
     }
     // Steam's client libraries, where Proton's steam.exe looks (~/.steam/sdk*: links into
     // Steam's folder, which an isolated home doesn't have).
+    // Standard binds each Steam's at its own path, Isolated the first Steam's at ~/.steam/sdk*.
     for bits in ["32", "64"] {
-        let lib = at_home(Path::new(&format!(".local/share/Steam/linux{bits}")));
-        if has(&format!(".local/share/Steam/linux{bits}")) == Some(true) {
-            let to = if s.level == Level::Isolated { at_home(Path::new(&format!(".steam/sdk{bits}"))) } else { lib.clone() };
-            push(&["--ro-bind", &p(&lib), &p(&to)]);
+        let libs = s.steam.iter().map(|r| r.join(format!("linux{bits}"))).filter(|l| has(&l.to_string_lossy()) == Some(true));
+        for lib in libs.take(if s.level == Level::Isolated { 1 } else { usize::MAX }) {
+            let to = if s.level == Level::Isolated { at_home(Path::new(&format!(".steam/sdk{bits}"))) } else { at_home(&lib) };
+            push(&["--ro-bind", &p(&at_home(&lib)), &p(&to)]);
         }
     }
     // umu's runtime and Proton: usable, unchanged.
-    for (rel, _) in s.present.iter().filter(|(n, dir)| *dir && (TOOLS.iter().any(|t| Path::new(t) == n) || n.starts_with(".local/share/Steam/steamapps/common"))) {
+    let proton = |n: &Path| s.steam.iter().any(|r| n == r.join("compatibilitytools.d") || n.starts_with(r.join("steamapps/common")));
+    for (rel, _) in s.present.iter().filter(|(n, dir)| *dir && (TOOLS.iter().any(|t| Path::new(t) == n) || proton(n))) {
         let path = p(&at_home(rel));
-        push(&["--overlay-src", &path, "--tmp-overlay", &path]);
+        match s.overlays {
+            true => push(&["--overlay-src", &path, "--tmp-overlay", &path]),
+            false => push(&["--bind", &path, &path]),
+        }
+    }
+    if let Some(auth) = &s.xauth {
+        push(&["--ro-bind", &p(auth), &p(auth)]);
     }
     for r in s.reads.iter().filter(|r| s.level == Level::Isolated && !s.game.iter().any(|g| r.starts_with(g))) {
         push(&["--ro-bind", &p(r), &p(r)]);
@@ -598,7 +697,7 @@ fn named_paths(env: &[(String, String)], words: &[String]) -> Vec<PathBuf> {
 /// Whether the sandbox hides the place a path is in (so it's bound back): the home, drives.
 fn hidden_area(path: &Path, home: &Path) -> bool {
     let tops = masks(home);
-    (path.starts_with(home) || tops.iter().any(|t| path.starts_with(t))) && !path.starts_with(home.join(".local/share/Steam")) && !path.starts_with(home.join(".local/share/umu"))
+    (path.starts_with(home) || tops.iter().any(|t| path.starts_with(t))) && !steam_roots(home).iter().any(|r| path.starts_with(home.join(r))) && !path.starts_with(home.join(".local/share/umu"))
 }
 
 /// The GPU (and NVIDIA's), controllers, Wine's ntsync.
@@ -620,11 +719,14 @@ fn sockets(runtime: &Path) -> Vec<(PathBuf, PathBuf)> {
     let mut names: Vec<String> = ["WAYLAND_DISPLAY", "GAMESCOPE_WAYLAND_DISPLAY"].iter().filter_map(|v| std::env::var(v).ok()).filter(|n| !n.contains('/')).collect();
     names.extend(["pipewire-0", "pulse/native"].map(String::from));
     names.extend((0..10).map(|i| format!("discord-ipc-{i}")));
-    let mut out: Vec<(PathBuf, PathBuf)> = names.iter().map(|n| runtime.join(n)).filter(|p| p.exists()).map(|p| (real(&p), p)).collect();
-    if let Some(auth) = std::env::var_os("XAUTHORITY").map(PathBuf::from).filter(|a| a.starts_with(runtime) && a.exists()) {
-        out.push((auth.clone(), auth));
-    }
-    out
+    names.iter().map(|n| runtime.join(n)).filter(|p| p.exists()).map(|p| (real(&p), p)).collect()
+}
+
+/// The X server's key ($XAUTHORITY), wherever the login screen put it: the runtime folder
+/// (GNOME's and KDE's Xwayland), /tmp, or the home (LightDM: Mint, Xubuntu), which an isolated
+/// game doesn't have.
+fn xauth() -> Option<PathBuf> {
+    std::env::var_os("XAUTHORITY").map(PathBuf::from).filter(|a| a.is_absolute() && a.is_file())
 }
 
 /// The X server's socket for $DISPLAY.
@@ -698,7 +800,10 @@ mod tests {
             devices: vec!["/dev/dri".into()],
             sockets: vec![("/run/user/1000/wayland-0".into(), "/run/user/1000/wayland-0".into())],
             x11: None,
+            xauth: Some("/home/p/.Xauthority".into()),
             bus: Some("/run/user/1000/lobby/bus-1".into()),
+            overlays: true,
+            steam: vec![".local/share/Steam".into()],
             present: vec![(".ssh".into(), true), (".bashrc".into(), false), (".local/share/umu".into(), true), (".local/share/Steam".into(), true), (".local/share/Steam/linux64".into(), true), ("invent-kde-token".into(), false), (".local/share/gamefix".into(), true)],
         }
     }
@@ -736,6 +841,35 @@ mod tests {
         let home = a.windows(3).position(|w| w[2] == "/home/p" && w[0] == "--bind").unwrap();
         let prefix = a.windows(3).position(|w| w[1] == "/home/p/.local/share/gamefix/prefixes/g").unwrap();
         assert!(home < prefix);
+        // The X server's key in the real home (LightDM's) is there in its own.
+        let xauth = a.windows(3).position(|w| w == ["--ro-bind", "/home/p/.Xauthority", "/home/p/.Xauthority"]).unwrap();
+        assert!(home < xauth);
+    }
+
+    #[test]
+    fn finds_debian_and_flatpak_steam() {
+        let home = std::env::temp_dir().join(format!("lobby-steam-roots-{}", std::process::id()));
+        let deb = home.join(".steam/debian-installation");
+        let flat = home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam");
+        for d in [deb.join("steamapps"), deb.join("linux64"), flat.join("steamapps/common/Proton 9.0"), flat.join("compatibilitytools.d")] {
+            fs::create_dir_all(d).unwrap();
+        }
+        std::os::unix::fs::symlink(&deb, home.join(".steam/steam")).unwrap();
+        std::os::unix::fs::symlink(&deb, home.join(".steam/root")).unwrap();
+        let roots = steam_roots(&home);
+        assert_eq!(roots, [PathBuf::from(".steam/debian-installation"), PathBuf::from(".var/app/com.valvesoftware.Steam/.local/share/Steam")]);
+        let present = present(&home);
+        let mut s = spec(Level::Standard);
+        (s.home, s.steam, s.present) = (home.clone(), roots, present);
+        let a = args_for(&s);
+        let at = |rel: &str| home.join(rel).display().to_string();
+        assert!(a.windows(2).any(|w| w == ["--tmpfs".to_string(), at(".steam/debian-installation")]));
+        assert!(a.windows(3).any(|w| w == ["--ro-bind".to_string(), at(".steam/debian-installation/linux64"), at(".steam/debian-installation/linux64")]));
+        let proton = at(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Proton 9.0");
+        assert!(a.windows(4).any(|w| w == ["--overlay-src".to_string(), proton.clone(), "--tmp-overlay".into(), proton.clone()]));
+        assert!(a.iter().any(|w| *w == at(".var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d")));
+        assert!(!hidden_area(&flat.join("compatibilitytools.d/GE-Proton10-1/proton"), &home));
+        fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

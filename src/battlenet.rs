@@ -76,10 +76,9 @@ pub fn newest_proton(prefix: &Path) -> String {
     if let Some(p) = crate::launch::proton_of(prefix) {
         return p.display().to_string();
     }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let mut ge: Vec<PathBuf> = [".local/share/Steam/compatibilitytools.d", ".steam/root/compatibilitytools.d"]
+    let mut ge: Vec<PathBuf> = crate::launch::compat_tool_dirs()
         .iter()
-        .flat_map(|d| fs::read_dir(home.join(d)).into_iter().flatten().flatten())
+        .flat_map(|d| fs::read_dir(d).into_iter().flatten().flatten())
         .map(|e| e.path())
         .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("GE-Proton")) && p.join("proton").is_file())
         .collect();

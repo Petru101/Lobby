@@ -10,12 +10,14 @@ mod free;
 mod import;
 mod install;
 mod anticheat;
+mod apparmor;
 mod launch;
 mod leftovers;
 mod library;
 mod log;
 mod moving;
 mod places;
+mod programs;
 mod run;
 mod running;
 mod playtime;
@@ -67,6 +69,9 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby move <game> <folder>  move a game there (another drive, say); its records follow
        lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
                                how lobby protects a game it starts; change it
+       lobby check             what Lobby needs that this computer lacks, and how to install it
+       lobby allow-sandbox     on Ubuntu: let lobby make the sandboxes Proton and protection need
+                               (an AppArmor profile; sudo asks for your password)
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (each scan does)
        lobby import [--dry]    move imported games' Wine setups into Lobby's folders (a link left
@@ -78,6 +83,7 @@ const USAGE: &str = "usage: lobby                   open the window
                                put one back (the saves there now are backed up first)";
 
 fn main() -> ExitCode {
+    stores::tools::provide();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let json = args.iter().any(|a| a == "--json");
     let rest: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with("--")).map(String::as_str).collect();
@@ -111,6 +117,8 @@ fn main() -> ExitCode {
         // The options as typed, -- words too (`rest` leaves those out).
         (Some("launch-options"), [_, ..]) => launch_options(&args[1], &args[2..].join(" "), args.len() > 2),
         (Some("protection"), [game, level @ ..]) if level.len() <= 1 => protection(game, level.first().copied(), &args),
+        (Some("check"), []) => check_system(),
+        (Some("allow-sandbox"), []) => apparmor::allow(true).map(|()| println!("Lobby may start games now: its AppArmor profile is in /etc/apparmor.d/lobby.")),
         // How Play runs a game protected: `lobby sandbox <id> -- <command>`.
         (Some("sandbox"), _) if args.get(2).is_some_and(|a| a == "--") && args.len() > 3 => return in_sandbox(&args[1], &args[3..]),
         (Some("windows-saves"), words) => windows_saves(&words.join(" "), args.iter().any(|a| a == "--copy")),
@@ -551,7 +559,33 @@ fn scan() -> Result<Library, String> {
     Ok(lib)
 }
 
+/// What Lobby needs that this computer lacks (Steam, programs, Ubuntu's permission), with how to
+/// install it.
+fn check_system() -> Result<(), String> {
+    let missing = programs::missing();
+    let steam = programs::steam_missing();
+    if let Some(how) = &steam {
+        println!("✗ Steam isn't installed. Lobby needs it: Steam's games, and the Protons Windows games run with.\n  Install it: {how}");
+    }
+    if apparmor::blocked() {
+        println!("✗ {}\n  Allow Lobby: lobby allow-sandbox", apparmor::WHY);
+    }
+    for p in &missing {
+        println!("{} {} isn't installed: it {}.", if p.essential { "✗" } else { "-" }, p.name, p.what);
+    }
+    if !missing.is_empty() {
+        println!("  Install {}: {}", if missing.len() == 1 { "it" } else { "them" }, programs::install_command(&missing));
+    }
+    if missing.is_empty() && steam.is_none() && !apparmor::blocked() {
+        println!("✓ Everything Lobby uses is here.");
+    }
+    Ok(())
+}
+
 fn play(query: &str) -> Result<(), String> {
+    if apparmor::blocked() {
+        return Err(format!("{} Allow Lobby first: run `lobby allow-sandbox` (sudo asks for your password), or press Play in Lobby's window.", apparmor::WHY));
+    }
     let mut lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?.clone();
     let plan = match launch::plan(&game) {

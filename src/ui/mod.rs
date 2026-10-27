@@ -361,6 +361,8 @@ struct Ui {
     /// page, first, so it doesn't vanish from where it was installed, until it's opened or
     /// another page is picked.
     just_installed: RefCell<Option<(String, Option<gtk::Widget>)>>,
+    /// Asked this time whether Lobby may allow itself sandboxes (Ubuntu's AppArmor: `apparmor`).
+    asked_apparmor: Cell<bool>,
 }
 
 fn build(app: &adw::Application) {
@@ -437,7 +439,7 @@ fn build(app: &adw::Application) {
 
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();
     let loading = adw::StatusPage::builder().title("Looking for your games").description("Steam, Heroic, Lutris, Faugus, your app menu, and the games folders on every drive.").build();
-    let spinner = adw::Spinner::builder().width_request(48).height_request(48).halign(gtk::Align::Center).build();
+    let spinner = gtk::Spinner::builder().spinning(true).width_request(48).height_request(48).halign(gtk::Align::Center).build();
     loading.set_child(Some(&spinner));
     let empty = adw::StatusPage::builder().icon_name("edit-find-symbolic").title("No games here").description("Try another filter, or a different search.").build();
     stack.add_named(&loading, Some("loading"));
@@ -449,12 +451,22 @@ fn build(app: &adw::Application) {
     toolbar.add_top_bar(&filters);
     let leftover_banner = adw::Banner::builder().button_label("Clean up…").revealed(false).build();
     toolbar.add_top_bar(&leftover_banner);
+    // What most games need that this computer lacks (`programs`): Steam, curl, 7-Zip ...
+    let missing = crate::programs::missing().into_iter().filter(|p| p.essential).collect::<Vec<_>>();
+    let steam = crate::programs::steam_missing();
+    let mut names: Vec<&str> = steam.iter().map(|_| "Steam").chain(missing.iter().map(|p| p.name)).collect();
+    let missing_banner = adw::Banner::builder().button_label("How to fix…").revealed(!names.is_empty()).build();
+    if let Some(last) = names.pop() {
+        let list = if names.is_empty() { last.to_string() } else { format!("{} and {last}", names.join(", ")) };
+        missing_banner.set_title(&format!("Games may not start: {list} {} installed", if names.is_empty() { "isn't" } else { "aren't" }));
+    }
+    toolbar.add_top_bar(&missing_banner);
     toolbar.set_content(Some(&stack));
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), asked_apparmor: Cell::new(false) });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -562,6 +574,8 @@ fn build(app: &adw::Application) {
     rescan_button.connect_clicked(move |_| u.rescan());
     let u = ui.clone();
     ui.leftover_banner.connect_button_clicked(move |_| u.clean_up());
+    let u = ui.clone();
+    missing_banner.connect_button_clicked(move |_| u.explain_missing(&missing, steam.as_deref()));
     // Which games are running, while the window is open (reading /proc: a few ms).
     let u = Rc::downgrade(&ui);
     glib::timeout_add_seconds_local(2, move || {
@@ -1348,6 +1362,31 @@ impl Ui {
         });
     }
 
+    /// What the missing programs are for, and the command installing them (to copy).
+    fn explain_missing(&self, missing: &[&crate::programs::Program], steam: Option<&str>) {
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(how) = steam {
+            lines.push(format!("Steam: Lobby needs it for Steam's games and the Protons Windows games run with. Install {how}."));
+        }
+        lines.extend(missing.iter().map(|p| format!("{}: it {}.", p.name, p.what)));
+        let command = (!missing.is_empty()).then(|| crate::programs::install_command(missing));
+        if let Some(c) = &command {
+            lines.push(format!("Install {} in a terminal:\n{c}", if missing.len() == 1 { "it" } else { "them" }));
+        }
+        let dialog = adw::AlertDialog::new(Some("Missing on this computer"), Some(&lines.join("\n\n")));
+        dialog.add_response("ok", "OK");
+        if command.is_some() {
+            dialog.add_response("copy", "Copy command");
+        }
+        let window = self.window.clone();
+        dialog.connect_response(None, move |_, response| {
+            if let (Some(c), "copy") = (&command, response) {
+                window.clipboard().set_text(c);
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
     fn show_leftover_banner(&self) {
         let found = self.leftovers.borrow();
         let bytes: u64 = found.iter().map(|l| l.bytes).sum();
@@ -2040,7 +2079,7 @@ impl Ui {
             return;
         };
         let looking = adw::ActionRow::builder().title("Looking for DLC you own…").build();
-        looking.add_suffix(&adw::Spinner::new());
+        looking.add_suffix(&gtk::Spinner::builder().spinning(true).build());
         group.add(&looking);
         let (u, group, info, dialog, id) = (self.clone(), group.clone(), info.clone(), dialog.clone(), game.id.clone());
         glib::spawn_future_local(async move {
@@ -2292,7 +2331,7 @@ impl Ui {
     fn search_drives(self: &Rc<Self>) {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         let status = adw::StatusPage::builder().title("Searching your drives…").description("Looked through 0 folders").build();
-        status.set_child(Some(&adw::Spinner::builder().width_request(32).height_request(32).build()));
+        status.set_child(Some(&gtk::Spinner::builder().spinning(true).width_request(32).height_request(32).build()));
         let stack = gtk::Stack::new();
         stack.add_named(&status, Some("searching"));
         let list = adw::PreferencesGroup::new();
@@ -2412,7 +2451,7 @@ impl Ui {
         let nothing = gtk::Label::builder().label("Nothing new to claim right now: every game free today is already in your library.").xalign(0.0).wrap(true).visible(false).build();
         nothing.add_css_class("dim-label");
         let status = adw::StatusPage::builder().title("Looking for free games…").build();
-        status.set_child(Some(&adw::Spinner::builder().width_request(32).height_request(32).build()));
+        status.set_child(Some(&gtk::Spinner::builder().spinning(true).width_request(32).height_request(32).build()));
         let stack = gtk::Stack::new();
         stack.add_named(&status, Some("looking"));
         let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
@@ -2835,6 +2874,24 @@ impl Ui {
             *self.lib.borrow_mut() = saved;
         }
         let Some(game) = self.game(id) else { return };
+        if !self.asked_apparmor.get() && crate::apparmor::blocked() {
+            self.asked_apparmor.set(true);
+            let (u, id) = (self.clone(), id.to_string());
+            glib::spawn_future_local(async move {
+                let alert = adw::AlertDialog::new(Some("Allow Lobby to start games?"), Some(&format!("{} Lobby can add itself to the programs Ubuntu knows (a file in /etc/apparmor.d); you'll be asked for your password once.", crate::apparmor::WHY)));
+                alert.add_responses(&[("cancel", "Not now"), ("allow", "Allow Lobby")]);
+                alert.set_response_appearance("allow", adw::ResponseAppearance::Suggested);
+                alert.set_default_response(Some("allow"));
+                if alert.choose_future(Some(&u.window)).await == "allow" {
+                    if let Err(e) = gio::spawn_blocking(|| crate::apparmor::allow(false)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                        u.alert("Lobby isn't allowed yet", &e);
+                        return;
+                    }
+                }
+                u.play(&id);
+            });
+            return;
+        }
         if self.is_just_installed(id) {
             self.forget_installed();
             self.refilter();
@@ -3532,7 +3589,7 @@ impl Ui {
 
         let flow = gtk::FlowBox::builder().valign(gtk::Align::Start).homogeneous(true).min_children_per_line(2).max_children_per_line(8).column_spacing(12).row_spacing(12).selection_mode(gtk::SelectionMode::None).activate_on_single_click(true).margin_top(12).margin_bottom(12).margin_start(12).margin_end(12).build();
         let stack = gtk::Stack::new();
-        let spinner = adw::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
+        let spinner = gtk::Spinner::builder().spinning(true).width_request(32).height_request(32).halign(gtk::Align::Center).valign(gtk::Align::Center).build();
         stack.add_named(&spinner, Some("searching"));
         stack.add_named(&gtk::ScrolledWindow::builder().child(&flow).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build(), Some("results"));
         stack.add_named(&adw::StatusPage::builder().icon_name("edit-find-symbolic").title("No covers found").description("Try another name, or pick an image file.").build(), Some("none"));

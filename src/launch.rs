@@ -283,6 +283,13 @@ fn windows_program(p: &Path) -> bool {
     p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))
 }
 
+/// Steam's compatibilitytools.d folders (GE-Proton ...): where Steam last ran (~/.steam/root),
+/// its own folder, Flatpak Steam's.
+pub fn compat_tool_dirs() -> Vec<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    [".steam/root", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"].iter().map(|d| home.join(d).join("compatibilitytools.d")).collect()
+}
+
 pub fn program_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
@@ -400,7 +407,8 @@ fn faugus_plan(id: &str) -> Option<(Vec<String>, Option<PathBuf>)> {
         runner => {
             let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
             let chosen = Some(PathBuf::from(runner)).filter(|p| p.is_absolute()).or_else(|| {
-                [".local/share/Steam/compatibilitytools.d", ".var/app/io.github.Faugus.faugus-launcher/data/Steam/compatibilitytools.d", ".steam/root/compatibilitytools.d"].iter().map(|d| home.join(d).join(runner)).find(|p| p.join("proton").is_file())
+                let faugus = home.join(".var/app/io.github.Faugus.faugus-launcher/data/Steam/compatibilitytools.d");
+                compat_tool_dirs().into_iter().chain([faugus]).map(|d| d.join(runner)).find(|p| p.join("proton").is_file())
             });
             Some((umu_command(&f.program, &f.prefix, &env, &args, chosen), f.program.parent().map(Path::to_path_buf)))
         }

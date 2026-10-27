@@ -6,7 +6,8 @@ into a Wine prefix: Lobby finds them all and shows them in one window, and start
 meant for people coming from Windows, with games scattered over several drives.
 
 Lobby is a game launcher for Linux (GTK 4 and libadwaita), written in Rust. It's early: it's
-used daily on one computer (Bazzite, KDE Plasma, NVIDIA), and isn't packaged yet.
+used daily on one computer (Bazzite, KDE Plasma, NVIDIA), tested on Ubuntu 24.04 and 26.04,
+Fedora 44 and Arch, and isn't packaged yet.
 
 ## What it does
 
@@ -45,7 +46,14 @@ used daily on one computer (Bazzite, KDE Plasma, NVIDIA), and isn't packaged yet
 
 ## Building
 
-You need Rust, and GTK 4.18, libadwaita 1.8 and WebKitGTK 6.0 with their development files.
+You need Rust (from [rustup](https://rustup.rs)), and GTK 4.14, libadwaita 1.5 and WebKitGTK
+6.0 or newer with their development files:
+
+- Ubuntu 24.04 and later, Mint 22, Pop!_OS, Debian 13: `sudo apt install build-essential
+  pkg-config libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev`
+- Fedora: `sudo dnf install gcc pkgconf-pkg-config gtk4-devel libadwaita-devel webkitgtk6.0-devel`
+- Arch: `sudo pacman -S base-devel gtk4 libadwaita webkitgtk-6.0`
+
 gamefix is fetched from GitHub by Cargo.
 
 ```sh
@@ -53,8 +61,13 @@ cargo build --release
 ./target/release/lobby
 ```
 
-To play, it uses umu-launcher (Windows games), bubblewrap and xdg-dbus-proxy (protection),
-7-Zip and unrar (unpacking downloads), and curl.
+To play, it needs Steam (its own package, Ubuntu's `steam-installer`, or Steam from Flathub),
+curl, 7-Zip, bubblewrap, and Python 3 for umu-launcher, which runs Windows games (Lobby
+downloads its own copy when the system has none). unrar, Flatpak and MangoHud are used when
+there. `lobby check` lists what's missing and the command that installs it. On Ubuntu (23.10
+and later) Lobby asks once for your password to add itself to the programs AppArmor lets
+make sandboxes, which Proton needs for every Windows game (`lobby allow-sandbox` does it from
+a terminal).
 
 ## Commands
 
