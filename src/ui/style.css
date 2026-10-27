@@ -45,6 +45,25 @@ flowboxchild.game-card {
   min-height: 48px;
 }
 
+/* The card a controller or the keyboard is on: plain to see from the couch. */
+flowboxchild.game-card:focus-visible,
+window.using-pad flowboxchild.game-card:focus {
+  outline: 3px solid @accent_color;
+  /* Inside the card's padding: Continue playing's scrolling row would clip it outside. */
+  outline-offset: -3px;
+}
+
+/* Everything else a controller is on, like libadwaita's own focus ring, which GTK hides a few
+   seconds after the last key. */
+window.using-pad button:focus,
+window.using-pad row:focus,
+window.using-pad checkbutton:focus,
+window.using-pad switch:focus,
+window.using-pad text:focus {
+  outline: 2px solid alpha(@accent_color, 0.5);
+  outline-offset: -2px;
+}
+
 flowboxchild:hover .play-button,
 flowboxchild:focus-within .play-button {
   opacity: 1;

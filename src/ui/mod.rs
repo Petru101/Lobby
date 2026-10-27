@@ -2,6 +2,7 @@
 //! click shows where the game is and how it starts, Play starts it.
 
 mod covers;
+mod pad;
 
 use crate::battlenet;
 use crate::launch::{self, Plan};
@@ -306,6 +307,13 @@ struct Ui {
     lib: RefCell<Library>,
     page: Cell<Page>,
     origin: Cell<Origin>,
+    /// The page buttons (Installed, Library, Downloads), for a controller's shoulder buttons.
+    pages: RefCell<Vec<gtk::ToggleButton>>,
+    /// A controller's way back: the card a page was opened from, focused again when it closes.
+    pad_return: RefCell<glib::WeakRef<gtk::Widget>>,
+    /// A page is closing (it animates): a move made meanwhile waits for it to be gone.
+    pad_closing: Cell<bool>,
+    pad_pending: Cell<Option<pad::Action>>,
     /// The source buttons: only sources with games on the page show.
     origins: RefCell<Vec<(Origin, gtk::ToggleButton)>>,
     sort: Cell<Sort>,
@@ -432,7 +440,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -455,6 +463,7 @@ fn build(app: &adw::Application) {
             }
         });
         pages.append(&button);
+        ui.pages.borrow_mut().push(button);
     }
     let mut group: Option<gtk::ToggleButton> = None;
     for (origin, name, label, tip) in Origin::ALL {
@@ -588,6 +597,35 @@ fn build(app: &adw::Application) {
     window.present();
     snapshot_for_checking(&ui);
     UI.with(|u| *u.borrow_mut() = Some(ui.clone()));
+    // The mouse moving (a few pixels: GTK also reports motion when the window changes under a
+    // still pointer) ends a controller's outline.
+    let motion = gtk::EventControllerMotion::new();
+    let (w, last) = (window.clone(), Cell::new(None::<(f64, f64)>));
+    motion.connect_motion(move |_, x, y| {
+        if let Some((lx, ly)) = last.replace(Some((x, y))) {
+            if w.has_css_class("using-pad") && ((x - lx).abs() > 4.0 || (y - ly).abs() > 4.0) {
+                w.remove_css_class("using-pad");
+            }
+        }
+    });
+    window.add_controller(motion);
+    // Controllers, read by a thread of their own; acted on here. Scrolling sends a step every
+    // few milliseconds: only one waits at a time, or a busy window falls behind and a button
+    // pressed after scrolling comes seconds late.
+    static SCROLL_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    pad::watch(|action| {
+        if matches!(action, pad::Action::Scroll(_)) && SCROLL_WAITING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        glib::MainContext::default().invoke(move || {
+            if matches!(action, pad::Action::Scroll(_)) {
+                SCROLL_WAITING.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            if let Some(ui) = UI.with(|u| u.borrow().clone()) {
+                ui.pad(action);
+            }
+        });
+    });
     if CLAIM_PENDING.with(|p| p.replace(false)) {
         ui.claim_unclaimed();
     }
@@ -712,7 +750,16 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
             u.choose_cover(id, &details);
         }
         let slow = picker.is_some() || std::env::var_os("LOBBY_SNAPSHOT_FREE").is_some();
-        glib::timeout_future(std::time::Duration::from_secs(if searching { 100 } else if slow { 20 } else { 5 })).await;
+        // LOBBY_SNAPSHOT_PAD=<seconds>: time for a test to drive the window with a controller.
+        let pad_wait = std::env::var("LOBBY_SNAPSHOT_PAD").ok().and_then(|s| s.parse::<u64>().ok());
+        if pad_wait.is_some() {
+            eprintln!("pad: ready");
+        }
+        glib::timeout_future(std::time::Duration::from_secs(pad_wait.unwrap_or(if searching { 100 } else if slow { 20 } else { 5 }))).await;
+        if pad_wait.is_some() {
+            let f = gtk::prelude::GtkWindowExt::focus(&u.window);
+            eprintln!("pad: at the snapshot, focus {:?}, focus visible {}", f.map(|f| (pad::describe(&f), f.state_flags())), u.window.gets_focus_visible());
+        }
         let (w, h) = (u.window.width(), u.window.height());
         let paintable = gtk::WidgetPaintable::new(Some(&u.window));
         let snapshot = gtk::Snapshot::new();
@@ -749,6 +796,219 @@ impl Ui {
             }
         }
         self.flow.invalidate_sort();
+    }
+
+    /// What a controller does (`pad`): only while this is the active window.
+    fn pad(self: &Rc<Self>, action: pad::Action) {
+        use pad::Action;
+        let debug = std::env::var_os("LOBBY_DEBUG_PAD").is_some();
+        if !self.window.is_active() {
+            if debug {
+                eprintln!("pad: {action:?} ignored: the window isn't active");
+            }
+            return;
+        }
+        if debug && !matches!(action, Action::Scroll(_)) {
+            eprintln!("pad: {:.2} got {action:?}", glib::monotonic_time() as f64 / 1e6);
+        }
+        if self.pad_closing.get() {
+            if matches!(action, pad::Action::Move(_)) {
+                self.pad_pending.set(Some(action));
+            }
+            return;
+        }
+        self.window.set_focus_visible(true);
+        // GTK hides the focus a few seconds after a key: with a controller it stays outlined
+        // until the mouse moves (style.css, .using-pad).
+        self.window.add_css_class("using-pad");
+        // What's on top: an open popover, else the open dialog, else the window.
+        let base: gtk::Widget = self.window.visible_dialog().map(|d| d.upcast()).unwrap_or_else(|| self.window.clone().upcast());
+        let popover = pad::open_popover(&base);
+        let root: gtk::Widget = popover.clone().map(|p| p.upcast()).unwrap_or_else(|| base.clone());
+        let focus = gtk::prelude::GtkWindowExt::focus(&self.window).filter(|f| f.is_mapped() && (f == &root || f.is_ancestor(&root)));
+        let card = focus.as_ref().and_then(|f| if f.is::<gtk::FlowBoxChild>() { Some(f.clone()) } else { f.ancestor(gtk::FlowBoxChild::static_type()) });
+        match action {
+            Action::Move(dir) => {
+                let next = match &focus {
+                    Some(f) => pad::spatial(&root, f, dir),
+                    None => pad::first(&root),
+                };
+                if let Some(n) = next {
+                    n.grab_focus();
+                }
+            }
+            Action::Accept => match &focus {
+                Some(f) => {
+                    let before = self.window.visible_dialog();
+                    f.activate();
+                    // A page opened (a game's, a question): its main button, as a controller
+                    // starts anywhere.
+                    let after = self.window.visible_dialog();
+                    if let Some(d) = after.filter(|a| before.as_ref() != Some(a)) {
+                        self.pad_return.replace(card.as_ref().map(|c| c.downgrade()).unwrap_or_default());
+                        glib::idle_add_local_once(move || {
+                            pad::first(d.upcast_ref()).inspect(|w| {
+                                w.grab_focus();
+                            });
+                        });
+                    }
+                }
+                None => {
+                    pad::first(&root).inspect(|w| {
+                        w.grab_focus();
+                    });
+                }
+            },
+            Action::Back => {
+                if let Some(p) = &popover {
+                    p.popdown();
+                } else if let Some(d) = self.window.visible_dialog() {
+                    self.pad_closing.set(true);
+                    let u = self.clone();
+                    d.connect_closed(move |_| {
+                        let u = u.clone();
+                        glib::idle_add_local_once(move || {
+                            u.pad_closing.set(false);
+                            // Back where it was opened from (a card), if that's still there.
+                            let back = u.pad_return.replace(Default::default()).upgrade().filter(|w| w.is_mapped());
+                            if let Some(w) = back.filter(|_| u.window.visible_dialog().is_none()) {
+                                w.grab_focus();
+                            }
+                            if let Some(a) = u.pad_pending.take() {
+                                u.pad(a);
+                            }
+                        });
+                    });
+                    if !d.close() {
+                        self.pad_closing.set(false);
+                    }
+                } else if !self.search.text().is_empty() {
+                    self.search.set_text("");
+                }
+            }
+            Action::Menu => {
+                if let Some(menu) = card.as_ref().and_then(|c| {
+                    let mut child = c.first_child();
+                    while let Some(w) = child {
+                        if let Ok(p) = w.clone().downcast::<gtk::Popover>() {
+                            return Some(p);
+                        }
+                        child = w.next_sibling();
+                    }
+                    None
+                }) {
+                    menu.set_pointing_to(None);
+                    menu.popup();
+                    let m = menu.clone();
+                    glib::idle_add_local_once(move || {
+                        pad::first(m.upcast_ref()).inspect(|w| {
+                            w.grab_focus();
+                        });
+                    });
+                }
+            }
+            Action::Play => {
+                // The card's Play (or Install), else the page's main button.
+                let within = card.clone().unwrap_or_else(|| base.clone());
+                let mut buttons = Vec::new();
+                // In the page's order (the first is Play at its top), shown ones only.
+                let mut todo = vec![within];
+                while let Some(w) = todo.pop() {
+                    if let Ok(b) = w.clone().downcast::<gtk::Button>() {
+                        if b.is_mapped() && b.is_sensitive() && (b.has_css_class("play-button") || (card.is_none() && b.has_css_class("suggested-action"))) {
+                            buttons.push(b);
+                        }
+                    }
+                    let mut child = w.last_child();
+                    while let Some(c) = child {
+                        if !c.is::<gtk::Popover>() {
+                            todo.push(c.clone());
+                        }
+                        child = c.prev_sibling();
+                    }
+                }
+                if let Some(b) = buttons.first() {
+                    // LOBBY_PAD_DRY: tests say what Start would press, and start nothing.
+                    if std::env::var_os("LOBBY_PAD_DRY").is_some() {
+                        eprintln!("pad: Start would press {}", pad::describe(b.upcast_ref()));
+                    } else {
+                        b.emit_clicked();
+                    }
+                }
+            }
+            Action::Page(step) if popover.is_none() && self.window.visible_dialog().is_none() => {
+                let pages = self.pages.borrow().clone();
+                let at = pages.iter().position(|b| b.is_active()).unwrap_or(0) as i32;
+                if let Some(b) = pages.get((at + step).clamp(0, pages.len() as i32 - 1) as usize) {
+                    b.set_active(true);
+                    self.pad_to_first_card();
+                }
+            }
+            Action::Source(step) if popover.is_none() && self.window.visible_dialog().is_none() => {
+                let shown: Vec<gtk::ToggleButton> = self.origins.borrow().iter().map(|(_, b)| b.clone()).filter(|b| b.is_visible()).collect();
+                let at = shown.iter().position(|b| b.is_active()).unwrap_or(0) as i32;
+                if let Some(b) = shown.get((at + step).clamp(0, shown.len() as i32 - 1) as usize) {
+                    b.set_active(true);
+                    self.pad_to_first_card();
+                }
+            }
+            Action::Page(_) | Action::Source(_) => {}
+            Action::Scroll(v) => {
+                // The nearest scrolled area around the focus that scrolls up and down, else the
+                // first one on top.
+                let mut at = focus.clone();
+                let mut area = None;
+                while let Some(w) = at {
+                    if let Some(s) = w.downcast_ref::<gtk::ScrolledWindow>().filter(|s| s.vadjustment().upper() > s.vadjustment().page_size()) {
+                        area = Some(s.clone());
+                        break;
+                    }
+                    at = w.parent();
+                }
+                let area = area.or_else(|| {
+                    let mut todo = vec![root.clone()];
+                    while let Some(w) = todo.pop() {
+                        if let Some(s) = w.downcast_ref::<gtk::ScrolledWindow>().filter(|s| s.is_mapped() && s.vadjustment().upper() > s.vadjustment().page_size()) {
+                            return Some(s.clone());
+                        }
+                        let mut child = w.last_child();
+                        while let Some(c) = child {
+                            todo.push(c.clone());
+                            child = c.prev_sibling();
+                        }
+                    }
+                    None
+                });
+                if let Some(a) = area {
+                    let adj = a.vadjustment();
+                    adj.set_value(adj.value() + v * 24.0);
+                    if debug {
+                        eprintln!("pad: scrolled to {:.0} of {:.0}", adj.value(), adj.upper() - adj.page_size());
+                    }
+                }
+            }
+        }
+        if debug && !matches!(action, Action::Scroll(_)) {
+            let w = self.window.clone();
+            // After what it started has settled (a dialog closing animates).
+            glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
+                let f = gtk::prelude::GtkWindowExt::focus(&w).map(|f| pad::describe(&f)).unwrap_or_else(|| "nothing".into());
+                eprintln!("pad: {:.2} {action:?} -> {f}", glib::monotonic_time() as f64 / 1e6);
+            });
+        }
+    }
+
+    /// After a page or source changes: the first card it shows, once the cards are in place
+    /// (tried for up to a second).
+    fn pad_to_first_card(self: &Rc<Self>) {
+        let u = self.clone();
+        let tries = Cell::new(0);
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            let window: gtk::Widget = u.window.clone().upcast();
+            let landed = pad::first(&window).is_some_and(|w| w.is::<gtk::FlowBoxChild>() && w.grab_focus());
+            tries.set(tries.get() + 1);
+            if landed || tries.get() >= 20 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+        });
     }
 
     fn refilter(&self) {
@@ -803,6 +1063,11 @@ impl Ui {
 
     /// One card per game, rebuilt from the library.
     fn fill(self: &Rc<Self>) {
+        // The card with focus (a controller's or the keyboard's) is rebuilt too: focus goes to
+        // its new self after, or a rescan in the background would lose the place.
+        let focused = gtk::prelude::GtkWindowExt::focus(&self.window)
+            .and_then(|f| if f.is::<gtk::FlowBoxChild>() { Some(f) } else { f.ancestor(gtk::FlowBoxChild::static_type()) })
+            .map(|c| (c.widget_name().to_string(), c.parent().is_some_and(|p| &p == self.recent.upcast_ref::<gtk::Widget>())));
         self.flow.remove_all();
         self.recent.remove_all();
         self.bars.borrow_mut().clear();
@@ -816,6 +1081,19 @@ impl Ui {
         drop(lib);
         self.fill_recent();
         self.refilter();
+        if let Some((id, recent)) = focused {
+            let flow = if recent { self.recent.clone() } else { self.flow.clone() };
+            glib::idle_add_local_once(move || {
+                let mut child = flow.first_child();
+                while let Some(c) = child {
+                    if c.widget_name() == id && c.is_mapped() {
+                        c.grab_focus();
+                        break;
+                    }
+                    child = c.next_sibling();
+                }
+            });
+        }
         // The new cards say at once whether their game is running.
         self.running.borrow_mut().clear();
         self.look_for_running();
