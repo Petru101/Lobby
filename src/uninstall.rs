@@ -56,7 +56,7 @@ pub fn how(game: &Game) -> How {
         if let Some(folder) = game.folder().map(Path::to_path_buf) {
             return match found_folder(game, &folder) {
                 Ok(()) => How::Found(folder),
-                Err(why) => How::Not(why),
+                Err(what) => How::Not(format!("Lobby found it on your drive in {}, {what}, so Uninstall can't tell what's the game's: delete its files yourself.", folder.display())),
             };
         }
         // A game in one file at the top of a folder lobby looks in (Downloads/MageBattle.exe).
@@ -75,11 +75,12 @@ pub fn how(game: &Game) -> How {
     })
 }
 
-/// Whether a found game's folder is safe to delete as that game's: its program is in it, and
-/// it isn't a drive's top, the home folder or one above it, a folder lobby looks in (Downloads,
-/// Games ...), nor one holding another game of the library.
-fn found_folder(game: &Game, folder: &Path) -> Result<(), String> {
-    let refuse = |what: &str| Err(format!("Lobby found it on your drive in {}, {what}, so Uninstall can't tell what's the game's: delete its files yourself.", folder.display()));
+/// Whether a folder is plainly the game's own (safe to delete or move as that game's): its
+/// program is in it, and it isn't a drive's top, the home folder or one above it, a folder
+/// lobby looks in (Downloads, Games ...), nor one holding another game of the library. Err:
+/// what it is instead ("the top of a drive").
+pub(crate) fn found_folder(game: &Game, folder: &Path) -> Result<(), String> {
+    let refuse = |what: &str| Err(what.to_string());
     let dir = real(folder);
     if !dir.is_dir() {
         return refuse("which isn't there");

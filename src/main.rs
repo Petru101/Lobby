@@ -9,6 +9,7 @@ mod install;
 mod launch;
 mod library;
 mod log;
+mod moving;
 mod places;
 mod run;
 mod running;
@@ -52,6 +53,7 @@ const USAGE: &str = "usage: lobby                   open the window
                                (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
        lobby hide|unhide|favourite|unfavourite <game>  out of sight or back; starred or not
        lobby running           the games running now; lobby stop <game> ends one
+       lobby move <game> <folder>  move a game there (another drive, say); its records follow
        lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
                                how lobby protects a game it starts; change it
        lobby search            search every drive for games outside the folders lobby looks in
@@ -78,6 +80,7 @@ fn main() -> ExitCode {
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("search"), []) => search_drives(),
         (Some("running"), []) => running_games(),
+        (Some("move"), [game, into]) => move_game(game, into),
         (Some("stop"), words) if !words.is_empty() => stop_game(&words.join(" ")),
         (Some(what @ ("hide" | "unhide" | "favourite" | "unfavourite")), words) if !words.is_empty() => mark(what, &words.join(" ")),
         // The options as typed, -- words too (`rest` leaves those out).
@@ -120,6 +123,26 @@ fn main() -> ExitCode {
 }
 
 /// Shows a game's launch options, or sets them (empty clears).
+/// Moves a game into another folder (on another drive, say), its records following.
+fn move_game(query: &str, into: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    let shown = std::cell::Cell::new(-1);
+    let done = moving::move_game(&game, std::path::Path::new(into), &|p| {
+        let pct = (p * 100.0) as i32 / 5 * 5;
+        if pct != shown.get() {
+            shown.set(pct);
+            println!("  {pct}%");
+        }
+    })?;
+    for line in done {
+        println!("  {line}");
+    }
+    scan()?;
+    println!("{} is in {} now.", game.name, into);
+    Ok(())
+}
+
 /// The games running now and what holds each.
 fn running_games() -> Result<(), String> {
     let lib = Library::load().map_or_else(scan, Ok)?;
@@ -454,6 +477,10 @@ fn how(query: &str) -> Result<(), String> {
     }
     if game.kind != Kind::Game {
         return Ok(());
+    }
+    match moving::plan(game) {
+        Ok(p) => println!("Move: {} {} can go to another folder or drive", if p.prefix { "its Windows setup (Wine prefix) holding it," } else { "its folder," }, p.from.display()),
+        Err(why) => println!("Move: {why}"),
     }
     for f in save_folders::find(game) {
         println!("{}: {}", f.what, f.path.display());

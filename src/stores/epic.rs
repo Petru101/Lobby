@@ -14,6 +14,11 @@ pub fn config() -> PathBuf {
     config_dir("legendary")
 }
 
+/// legendary with Lobby's config, for others (`moving`).
+pub fn legendary_command() -> Result<Command, String> {
+    legendary()
+}
+
 fn legendary() -> Result<Command, String> {
     let mut command = Command::new(tools::LEGENDARY.path()?);
     command.env("LEGENDARY_CONFIG_PATH", config());

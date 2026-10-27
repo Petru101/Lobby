@@ -421,7 +421,7 @@ fn run_with_progress(mut command: Command, progress: &dyn Fn(f64)) -> Result<(),
 }
 
 /// A tool's output, or the last line it wrote about what went wrong.
-fn output(mut command: Command) -> Result<String, String> {
+pub(crate) fn output(mut command: Command) -> Result<String, String> {
     let out = command.stdin(Stdio::null()).env("NO_COLOR", "1").output().map_err(|e| e.to_string())?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());

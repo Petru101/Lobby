@@ -415,6 +415,7 @@ pub fn bring_over(game_id: &str, found: &Found) -> Result<(usize, usize), String
 
 pub fn size_text(bytes: u64) -> String {
     match bytes {
+        b if b >= 1 << 40 => format!("{:.1} TB", b as f64 / (1u64 << 40) as f64),
         b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
         b if b >= 1 << 20 => format!("{:.0} MB", b as f64 / (1u64 << 20) as f64),
         b => format!("{} KB", b.div_ceil(1024)),

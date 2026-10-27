@@ -152,7 +152,8 @@ fn same(old: &Game, new: &Game) -> u8 {
     if keys(new).iter().any(|k| old_keys.contains(k)) {
         return 3;
     }
-    let paths = |g: &Game, f: fn(&crate::library::Entry) -> Option<PathBuf>| -> Vec<PathBuf> { g.entries.iter().filter_map(f).collect() };
+    // /var/home and /home alike.
+    let paths = |g: &Game, f: fn(&crate::library::Entry) -> Option<PathBuf>| -> Vec<PathBuf> { g.entries.iter().filter_map(f).map(|p| crate::library::norm(&p)).collect() };
     let programs = paths(old, |e| e.program.clone());
     if paths(new, |e| e.program.clone()).iter().any(|p| programs.contains(p)) {
         return 2;

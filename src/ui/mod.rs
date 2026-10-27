@@ -654,6 +654,11 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if std::env::var_os("LOBBY_SNAPSHOT_ACCOUNTS").is_some() {
             u.accounts();
         }
+        // LOBBY_SNAPSHOT_MOVE=<id>: where Move… offers to put it.
+        if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_MOVE") {
+            u.move_game(&id);
+            glib::timeout_future(std::time::Duration::from_secs(3)).await;
+        }
         // The page itself as WebKit draws it (<file>.page.png): some pages don't show in the
         // window's snapshot.
         if let Some(store) = std::env::var("LOBBY_SNAPSHOT_SIGNIN").ok().and_then(|s| Store::from_id(&s)) {
@@ -1154,6 +1159,103 @@ impl Ui {
                 }
                 Err(e) => u.alert(&format!("{} couldn't be installed", game.name), &e),
             }
+        });
+    }
+
+    /// Where the game's files are, with Move… when Lobby can move them (else why not).
+    fn files_group(self: &Rc<Self>, game: &Game, page: &Rc<RefCell<Option<adw::Dialog>>>) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::new();
+        let row = adw::ActionRow::builder().title("Files").use_markup(false).build();
+        match crate::moving::plan(game) {
+            Ok(plan) => {
+                row.set_subtitle(&format!("{}{}", plan.from.display(), if plan.prefix { " (its Windows setup, with the game in it)" } else { "" }));
+                let button = gtk::Button::builder().label("Move…").valign(gtk::Align::Center).tooltip_text("Move it to another folder or drive").build();
+                let (u, id, page) = (self.clone(), game.id.clone(), page.clone());
+                button.connect_clicked(move |_| {
+                    if let Some(d) = page.borrow().as_ref() {
+                        d.close();
+                    }
+                    u.move_game(&id);
+                });
+                row.add_suffix(&button);
+            }
+            Err(why) => row.set_subtitle(&why),
+        }
+        group.add(&row);
+        group
+    }
+
+    /// Asks where to (each drive's games folder with its free room, or any folder), confirms,
+    /// then moves it with a bar on its card.
+    fn move_game(self: &Rc<Self>, id: &str) {
+        let Some(game) = self.game(id) else { return };
+        let Ok(plan) = crate::moving::plan(&game) else { return };
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let from = plan.from.clone();
+            let (choices, (_, bytes)) = gio::spawn_blocking(move || (move_choices(&from), crate::moving::measure(&from))).await.unwrap_or_default();
+            let windows = if plan.prefix { " It lives in its Windows setup (Wine prefix), which Proton needs on a Linux-format drive, so Windows-format ones are greyed out." } else { "" };
+            let group = adw::PreferencesGroup::builder().description(format!("{} takes {}. It goes into a folder of its own name in the folder you pick.{windows}", game.name, crate::windows_saves::size_text(bytes))).build();
+            let page = adw::PreferencesPage::new();
+            page.add(&group);
+            let view = adw::ToolbarView::new();
+            view.add_top_bar(&adw::HeaderBar::new());
+            view.set_content(Some(&page));
+            let dialog = adw::Dialog::builder().title(format!("Move {}", game.name)).content_width(560).content_height(460).child(&view).build();
+            for (title, folder, free, windows) in choices {
+                let row = adw::ActionRow::builder().title(&title).subtitle(format!("{} · {} free{}", folder.display(), crate::windows_saves::size_text(free), if windows { " · Windows format" } else { "" })).activatable(true).use_markup(false).build();
+                row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                let tight = free < bytes + bytes / 50 + (100 << 20) && !plan.from.starts_with(&folder);
+                row.set_sensitive(!tight && !(windows && plan.prefix));
+                let (u, d, id) = (u.clone(), dialog.clone(), game.id.clone());
+                row.connect_activated(move |_| {
+                    d.close();
+                    u.move_to(&id, folder.clone(), bytes);
+                });
+                group.add(&row);
+            }
+            let other = adw::ActionRow::builder().title("Choose a folder…").activatable(true).build();
+            other.add_suffix(&gtk::Image::from_icon_name("folder-open-symbolic"));
+            let (u2, d, id) = (u.clone(), dialog.clone(), game.id.clone());
+            other.connect_activated(move |_| {
+                let (u, d, id) = (u2.clone(), d.clone(), id.clone());
+                glib::spawn_future_local(async move {
+                    if let Some(into) = gtk::FileDialog::builder().title("Move it into").modal(true).build().select_folder_future(Some(&u.window)).await.ok().and_then(|f| f.path()) {
+                        d.close();
+                        u.move_to(&id, into, bytes);
+                    }
+                });
+            });
+            group.add(&other);
+            dialog.present(Some(&u.window));
+        });
+    }
+
+    /// Confirms moving the game into `into`, then moves it with a bar on its card.
+    fn move_to(self: &Rc<Self>, id: &str, into: std::path::PathBuf, bytes: u64) {
+        let Some(game) = self.game(id) else { return };
+        let plan = match crate::moving::plan(&game) {
+            Ok(p) => p,
+            Err(e) => return self.alert(&format!("{} can't be moved", game.name), &e),
+        };
+        let Some(to) = crate::moving::target(&plan, &into) else { return };
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let dev = |p: &Path| std::fs::metadata(p).ok().map(|m| std::os::unix::fs::MetadataExt::dev(&m));
+            let how = if dev(&plan.from) == dev(&into) { "It's the same drive, so it's quick.".to_string() } else { format!("Its files ({}) are copied there and checked; then the old copy in {} is deleted. It can't be played until that's done.", crate::windows_saves::size_text(bytes), plan.from.display()) };
+            let alert = adw::AlertDialog::new(Some(&format!("Move {} to {}?", game.name, to.display())), Some(&how));
+            alert.add_responses(&[("cancel", "Cancel"), ("move", "Move")]);
+            alert.set_response_appearance("move", adw::ResponseAppearance::Suggested);
+            if alert.choose_future(Some(&u.window)).await != "move" {
+                return;
+            }
+            let g = game.clone();
+            let moved = u.with_progress(&game.id, "Moving…", move |p| crate::moving::move_game(&g, &into, p)).await.unwrap_or_else(|| Err("it stopped with an error".into()));
+            match moved {
+                Ok(_) => u.toast(&format!("{} is in {} now.", game.name, to.display())),
+                Err(e) => u.alert(&format!("{} wasn't moved", game.name), &e),
+            }
+            u.rescan();
         });
     }
 
@@ -2422,6 +2524,7 @@ impl Ui {
         }
         let dlc = adw::PreferencesGroup::builder().title("DLC").build();
         content.append(&dlc);
+        let files = self.files_group(&game, &dialog_slot);
         let save_folders = adw::PreferencesGroup::builder().title("Saves").visible(false).build();
         content.append(&save_folders);
         if game.kind == Kind::Game && !game.gone {
@@ -2433,6 +2536,7 @@ impl Ui {
             self.fill_windows_saves(&game, &saves);
         }
         if game.kind == Kind::Game {
+            content.append(&files);
             content.append(&self.uninstall_group(&game, &dialog_slot));
         }
 
@@ -2444,6 +2548,7 @@ impl Ui {
         if let Some(target) = std::env::var("LOBBY_SNAPSHOT_SCROLL").ok().and_then(|s| match s.as_str() {
             "protection" => Some(protection.clone().upcast::<gtk::Widget>()),
             "saves" => Some(save_folders.clone().upcast::<gtk::Widget>()),
+            "files" => Some(files.clone().upcast::<gtk::Widget>()),
             _ => None,
         }) {
             let (scrolled, content) = (scrolled.clone(), content.clone());
@@ -3106,4 +3211,37 @@ fn find_type<T: IsA<gtk::Widget>>(w: &gtk::Widget) -> Option<T> {
         child = c.next_sibling();
     }
     None
+}
+
+/// Where a game can go: each drive's games folder (its Games, else its top), and Lobby's games
+/// folder at home; with the free room there and whether it's a Windows-format drive.
+fn move_choices(from: &Path) -> Vec<(String, std::path::PathBuf, u64, bool)> {
+    let user = std::env::var("USER").unwrap_or_default();
+    let mounts = crate::drives::mounts();
+    let mut out = Vec::new();
+    let windows = |f: &Path| crate::drives::mount_of(f, &mounts).is_some_and(|m| m.windows_format());
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    if let Some(free) = crate::moving::free_space(&home.join("Games")).filter(|_| home.join("Games").is_dir()) {
+        out.push(("Games in your home folder".to_string(), home.join("Games"), free, windows(&home.join("Games"))));
+    }
+    let mut drives: Vec<&crate::drives::Mount> = mounts.iter().filter(|m| m.point.parent() == Some(Path::new(&format!("/run/media/{user}")))).collect();
+    drives.sort_by_key(|m| m.point.clone());
+    drives.dedup_by_key(|m| m.point.clone());
+    for m in drives {
+        let name = m.point.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let folder = ["Games", "games"].iter().map(|g| m.point.join(g)).find(|g| g.is_dir()).unwrap_or_else(|| m.point.clone());
+        if let Some(free) = crate::moving::free_space(&folder) {
+            out.push((format!("The {name} drive"), folder, free, m.windows_format()));
+        }
+    }
+    // gamefix's games folder, when it's somewhere else again.
+    let gamefix = gamefix::setup::games_folder();
+    if gamefix.is_dir() && !out.iter().any(|(_, f, ..)| crate::library::norm(f) == crate::library::norm(&gamefix)) {
+        if let Some(free) = crate::moving::free_space(&gamefix) {
+            out.push(("gamefix's games folder".to_string(), gamefix.clone(), free, windows(&gamefix)));
+        }
+    }
+    // Not where it already is.
+    out.retain(|(_, f, ..)| from.parent().map(crate::library::norm) != Some(crate::library::norm(f)));
+    out
 }
