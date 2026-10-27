@@ -396,6 +396,14 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
             eprintln!("lobby: {e}");
         }
     }
+    // An EA game in Lobby's EA app the app doesn't know is installed: registered first.
+    if let Some((client, _)) = clients::needed(&game).filter(|(c, _)| c.installed()) {
+        match clients::register(&game, client) {
+            Ok(true) => println!("lobby: told the {} where {} is installed.", client.name, game.name),
+            Ok(false) => {}
+            Err(e) => eprintln!("lobby: {e}"),
+        }
+    }
     let command = match launch::add_extras(&game, command.to_vec()) {
         Ok(c) if !battle_net => c,
         Ok(_) => command.to_vec(),

@@ -234,6 +234,68 @@ fn old_prefix(game: &Game, client: &Client) -> Option<PathBuf> {
         .filter(|p| *p != ours && p.join("drive_c").is_dir())
 }
 
+/// The registry key an EA game's own install record (__Installer/installerdata.xml) tells the
+/// EA app to check, `SOFTWARE\BioWare\Mass Effect Andromeda`, and the game's folder.
+fn ea_install_key(game: &Game) -> Option<(String, PathBuf)> {
+    let root = game.program()?.ancestors().find(|a| a.join("__Installer/installerdata.xml").is_file())?.to_path_buf();
+    Some((record_key(&root.join("__Installer/installerdata.xml"))?, root))
+}
+
+/// The first registry key an EA install record names (a value's key, the value left off).
+fn record_key(xml: &Path) -> Option<String> {
+    let xml = fs::read_to_string(xml).ok()?;
+    let inside = xml.split("[HKEY_LOCAL_MACHINE\\").nth(1)?.split(']').next()?;
+    Some(inside.rsplit_once('\\')?.0.to_string())
+}
+
+/// Whether a Wine prefix's registry holds a key (HKEY_LOCAL_MACHINE, either view).
+fn has_key(prefix: &Path, key: &str) -> bool {
+    let reg = [prefix.join("pfx/system.reg"), prefix.join("system.reg")].into_iter().find(|r| r.is_file());
+    let text = reg.and_then(|r| fs::read(r).ok()).map(|b| String::from_utf8_lossy(&b).to_lowercase()).unwrap_or_default();
+    let key = key.to_lowercase().replace('\\', "\\\\");
+    let wow = key.replacen("software\\\\", "software\\\\wow6432node\\\\", 1);
+    text.contains(&format!("[{key}]")) || text.contains(&format!("[{wow}]"))
+}
+
+/// An EA game in Lobby's prefix of the EA app, which the app doesn't know is installed (the
+/// key its install record names isn't there: the app says "Game not installed"): registered as
+/// the app's "Locate game" does it, by the game's own __Installer/Touchup.exe (`install
+/// -installPath <its folder>`, as the EA app ran it when installing; the runtimes it installed
+/// then are left out). Whether it ran.
+pub fn register(game: &Game, client: &Client) -> Result<bool, String> {
+    if client.id != "ea" {
+        return Ok(false);
+    }
+    let Some((key, root)) = ea_install_key(game) else { return Ok(false) };
+    let real = fs::canonicalize(&root).unwrap_or(root.clone());
+    let windows = format!("Z:{}", real.display().to_string().replace('/', "\\"));
+    let locale = std::env::var("LANG").ok().and_then(|l| l.split('.').next().map(String::from)).filter(|l| l.len() == 5).unwrap_or_else(|| "en_US".into());
+    // The game (`install`), then each DLC with its own record and Touchup.exe (`pdlcinstall`,
+    // the game's folder with a trailing \ as the EA app passed it).
+    let mut steps: Vec<(String, PathBuf, Vec<String>)> = vec![(key, root.join("__Installer/Touchup.exe"), ["install", "-locale", &locale, "-installPath", &windows, "-autologging"].map(String::from).to_vec())];
+    for dlc in fs::read_dir(root.join("__Installer/DLC")).into_iter().flatten().flatten().map(|d| d.path().join("__Installer")) {
+        if let Some(k) = record_key(&dlc.join("installerdata.xml")) {
+            steps.push((k, dlc.join("Touchup.exe"), ["pdlcinstall", "-locale", &locale, "-pdlcInstallPath", &format!("{windows}\\"), "-autologging"].map(String::from).to_vec()));
+        }
+    }
+    let mut ran = false;
+    for (key, touchup, args) in steps.into_iter().filter(|(k, ..)| !has_key(&client.prefix(), k)) {
+        if !touchup.is_file() {
+            return Err(format!("{} has no {} to tell the EA app where it is.", game.name, touchup.display()));
+        }
+        let mut command = Command::new("umu-run");
+        command.envs(client.umu("waitforexitandrun"));
+        command.arg(&touchup).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let status = command.status().map_err(|e| format!("umu-run: {e}"))?;
+        if !has_key(&client.prefix(), &key) {
+            return Err(format!("The EA app still doesn't know {} is installed ({} ended: {status}).", game.name, touchup.display()));
+        }
+        crate::log::line(&format!("{}: registered with the EA app ({key}, {windows})", game.name));
+        ran = true;
+    }
+    Ok(ran)
+}
+
 /// Brings the game's saves from the prefix it ran in before into the app's, once (only files
 /// missing there or older; replaced ones are kept in save-backups). How many were copied.
 pub fn bring_saves(game: &Game, client: &Client) -> Result<usize, String> {
@@ -260,6 +322,23 @@ pub fn bring_saves(game: &Game, client: &Client) -> Result<usize, String> {
 mod tests {
     use super::*;
     use crate::library::{Entry, Kind};
+
+    #[test]
+    fn finds_the_key_the_ea_app_checks() {
+        let dir = std::env::temp_dir().join(format!("lobby-ea-key-{}", std::process::id()));
+        fs::create_dir_all(dir.join("Game/__Installer")).unwrap();
+        fs::write(dir.join("Game/__Installer/installerdata.xml"), "<launcher><filePath>[HKEY_LOCAL_MACHINE\\SOFTWARE\\BioWare\\Mass Effect Andromeda\\Install Dir]MassEffectAndromeda.exe</filePath></launcher>").unwrap();
+        let mut e = Entry::new(Source::Folder, "G");
+        e.program = Some(dir.join("Game/MassEffectAndromeda.exe"));
+        let g = Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None };
+        let (key, root) = ea_install_key(&g).unwrap();
+        assert_eq!((key.as_str(), root), ("SOFTWARE\\BioWare\\Mass Effect Andromeda", dir.join("Game")));
+        fs::create_dir_all(dir.join("pfx/pfx")).unwrap();
+        fs::write(dir.join("pfx/pfx/system.reg"), "[Software\\\\Wow6432Node\\\\BioWare\\\\Mass Effect Andromeda] 1791209686\n").unwrap();
+        assert!(has_key(&dir.join("pfx"), &key));
+        assert!(!has_key(&dir.join("pfx"), "SOFTWARE\\EA Games\\Other"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn game(dir: &Path, source: Source) -> Game {
         let mut e = Entry::new(source, "G");
