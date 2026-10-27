@@ -50,7 +50,11 @@ pub fn plan(game: &Game) -> Result<Plan, String> {
     // A game inside its Wine prefix goes with the whole prefix.
     let prefix = game.entries.iter().filter_map(|e| e.prefix.clone()).chain(crate::windows_saves::prefix(game)).map(|p| real(&p)).find(|p| p.join("drive_c").is_dir() && real(&folder).starts_with(p));
     let from = prefix.clone().unwrap_or_else(|| real(&folder));
-    crate::uninstall::found_folder(game, &from).map_err(|what| format!("Its folder, {}, is {what}, so Lobby can't tell what's only this game's.", from.display()))?;
+    crate::uninstall::found_folder(game, &from).map_err(|what| {
+        // found_folder says "which holds …" or "the top of a drive".
+        let what = what.strip_prefix("which ").map_or(format!("is {what}"), str::to_string);
+        format!("Its folder, {}, {what}, so Lobby can't tell what's only this game's.", from.display())
+    })?;
     Ok(Plan { from, prefix: prefix.is_some(), epic })
 }
 

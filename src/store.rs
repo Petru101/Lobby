@@ -105,6 +105,7 @@ impl Library {
             game.protection = o.protection;
             game.hidden = o.hidden;
             game.favourite = o.favourite;
+            game.frame_rate = o.frame_rate;
         }
         for (game, matched) in games.iter_mut().zip(matched) {
             if !matched {
@@ -215,7 +216,7 @@ mod tests {
     fn game(name: &str, key: Key) -> Game {
         let mut e = Entry::new(Source::Steam, name);
         e.keys.push(key);
-        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false }
+        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
     }
 
     #[test]

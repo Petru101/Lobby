@@ -32,7 +32,7 @@ used daily on one computer (Bazzite, KDE Plasma, NVIDIA), and isn't packaged yet
 - **Library tools:** Installed, Library (everything you own) and Downloads pages; sort by last
   played, play time (Lobby's own and what Steam, Heroic, Lutris and Faugus counted), size or
   date added; Continue playing; favourites and hidden games; demos out of sight; each game's
-  save folder; Stop for a game that hangs.
+  save folder; Stop for a game that hangs; Show frame rate (MangoHud's overlay) per game.
 - **Saves from Windows.** It finds a game's saves in a Windows install or backup on another
   drive and copies them into the game's Wine prefix.
 - **Free games.** Epic's weekly free games and others, with a reminder, claimed in Lobby.

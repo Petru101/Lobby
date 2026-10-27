@@ -149,6 +149,7 @@ fn own(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
 /// when the command is the game's own.
 pub fn final_command(game: &Game, command: Vec<String>, protect: bool) -> Result<Vec<String>, String> {
     let command = with_options(command, game.launch_options.as_deref())?;
+    let command = if game.frame_rate { with_frame_rate(command)? } else { command };
     Ok(if protect { crate::sandbox::wrap(game, command) } else { command })
 }
 
@@ -600,10 +601,7 @@ pub fn with_options(command: Vec<String>, options: Option<&str>) -> Result<Vec<S
         return Err(format!("{l} starts it: set its launch options in {l}."));
     }
     if first == "flatpak" {
-        if !o.vars.is_empty() {
-            return Err("It runs in a Flatpak app, which doesn't get variables this way: only words after the program.".into());
-        }
-        return Ok([command, o.args].concat());
+        return Ok([flatpak_env(command, &o.vars), o.args].concat());
     }
     let mut c = command;
     if c.first().is_none_or(|w| w != "env") {
@@ -616,6 +614,65 @@ pub fn with_options(command: Vec<String>, options: Option<&str>) -> Result<Vec<S
     }
     c.extend(o.args);
     Ok(c)
+}
+
+/// A `flatpak run` command with variables for the app: `--env=NAME=value` before the app's id
+/// (variables before `flatpak` would only reach flatpak itself).
+fn flatpak_env(mut command: Vec<String>, vars: &[(String, String)]) -> Vec<String> {
+    let at = command.iter().position(|w| w == "run").map_or(command.len(), |i| i + 1);
+    for (i, (k, v)) in vars.iter().enumerate() {
+        command.insert(at + i, format!("--env={k}={v}"));
+    }
+    command
+}
+
+/// The command with MangoHud's overlay on (frame rate, frame times, CPU and GPU load), or why
+/// it can't be. Windows games (umu-run: Proton draws with Vulkan through DXVK/VKD3D) and Flatpak
+/// apps get `MANGOHUD=1`, which turns on MangoHud's Vulkan layer (in a Flatpak app, Flathub's
+/// MangoHud extension's); anything else runs through `mangohud`, which also catches OpenGL.
+/// `lobby run` adds it itself.
+pub fn with_frame_rate(command: Vec<String>) -> Result<Vec<String>, String> {
+    let first = command.first().map(String::as_str).unwrap_or_default();
+    if command.get(1).is_some_and(|w| w == "run") && first.ends_with("lobby") {
+        return Ok(command);
+    }
+    if first == "steam" {
+        return Err("Steam starts it: turn on Steam's own counter (Steam → Settings → In game → In-game FPS counter), or put mangohud %command% in the game's launch options in Steam.".into());
+    }
+    let launcher = match first {
+        "xdg-open" => Some("Heroic"),
+        "lutris" => Some("Lutris"),
+        f if f.ends_with("faugus-launcher") => Some("Faugus"),
+        _ => None,
+    };
+    if let Some(l) = launcher {
+        return Err(format!("{l} starts it: turn on MangoHud in the game's settings in {l}."));
+    }
+    let on = [("MANGOHUD".to_string(), "1".to_string())];
+    if first == "flatpak" {
+        return Ok(flatpak_env(command, &on));
+    }
+    let umu = command.iter().any(|w| Path::new(w).file_name().is_some_and(|n| n == "umu-run"));
+    if !umu && program_on_path("mangohud").is_none() {
+        return Err("It needs MangoHud, which isn't installed: install your system's mangohud package.".into());
+    }
+    let mut c = command;
+    if c.first().is_none_or(|w| w != "env") {
+        c.insert(0, "env".into());
+    }
+    let at = 1 + c[1..].iter().take_while(|w| w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))).count();
+    c.insert(at, if umu { "MANGOHUD=1".into() } else { "mangohud".into() });
+    Ok(c)
+}
+
+/// Why the frame rate can't be shown the way the plan starts the game, if it can't.
+pub fn frame_rate_unsupported(plan: &Plan) -> Option<String> {
+    match plan {
+        Plan::Run { command, .. } => with_frame_rate(command.clone()).err(),
+        Plan::BattleNet { .. } => Some("Battle.net starts it, and MangoHud would show over Battle.net's own window too.".into()),
+        Plan::SetUp(_) => None,
+        Plan::Cannot(why) => Some(why.clone()),
+    }
 }
 
 /// Why launch options can't apply to how the plan starts the game, if they can't.
@@ -690,7 +747,7 @@ mod tests {
     use crate::library::Entry;
 
     fn game(entries: Vec<Entry>) -> Game {
-        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false }
+        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
     }
 
     fn with_key(source: Source, key: Key) -> Entry {
@@ -732,6 +789,19 @@ mod tests {
     }
 
     #[test]
+    fn frame_rate() {
+        let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(with_frame_rate(cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/game.exe"])).unwrap(), cmd(&["env", "WINEPREFIX=/p", "MANGOHUD=1", "umu-run", "/g/game.exe"]));
+        assert_eq!(with_frame_rate(cmd(&["flatpak", "run", "rs.ruffle.Ruffle", "/g/a.swf"])).unwrap(), cmd(&["flatpak", "run", "--env=MANGOHUD=1", "rs.ruffle.Ruffle", "/g/a.swf"]));
+        assert_eq!(with_frame_rate(cmd(&["/usr/bin/lobby", "run", "g"])).unwrap(), cmd(&["/usr/bin/lobby", "run", "g"]));
+        assert!(with_frame_rate(cmd(&["steam", "steam://rungameid/49520"])).is_err());
+        assert!(with_frame_rate(cmd(&["lutris", "lutris:rungameid/2"])).is_err());
+        if program_on_path("mangohud").is_some() {
+            assert_eq!(with_frame_rate(cmd(&["env", "A=1", "/g/game.x86_64", "-w"])).unwrap(), cmd(&["env", "A=1", "mangohud", "/g/game.x86_64", "-w"]));
+        }
+    }
+
+    #[test]
     fn launch_options() {
         let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let umu = cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/game.exe"]);
@@ -741,6 +811,7 @@ mod tests {
         let with_proton = cmd(&["env", "WINEPREFIX=/p", "PROTONPATH=/a", "umu-run", "/g/game.exe"]);
         assert_eq!(with_options(with_proton, Some("PROTONPATH=/b %command%")).unwrap(), cmd(&["env", "WINEPREFIX=/p", "PROTONPATH=/a", "PROTONPATH=/b", "umu-run", "/g/game.exe"]));
         assert_eq!(with_options(cmd(&["flatpak", "run", "rs.ruffle.Ruffle", "/g/a.swf"]), Some("--fullscreen")).unwrap(), cmd(&["flatpak", "run", "rs.ruffle.Ruffle", "/g/a.swf", "--fullscreen"]));
+        assert_eq!(with_options(cmd(&["flatpak", "run", "rs.ruffle.Ruffle", "/g/a.swf"]), Some("MANGOHUD=1 %command% --fullscreen")).unwrap(), cmd(&["flatpak", "run", "--env=MANGOHUD=1", "rs.ruffle.Ruffle", "/g/a.swf", "--fullscreen"]));
         assert_eq!(with_options(cmd(&["/g/game.x86_64"]), Some("-w \"two words\"")).unwrap(), cmd(&["env", "/g/game.x86_64", "-w", "two words"]));
         assert_eq!(with_options(umu.clone(), Some("  ")).unwrap(), umu);
         assert!(with_options(umu, Some("-dx11 %command%")).is_err());

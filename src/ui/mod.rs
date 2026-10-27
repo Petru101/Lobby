@@ -2522,6 +2522,7 @@ impl Ui {
         content.append(&info);
         let protection = self.protection_group(&game, &plan);
         if game.kind == Kind::Game {
+            content.append(&self.frame_rate_group(&game, &plan));
             content.append(&self.options_group(&game, &plan));
             content.append(&protection);
         }
@@ -2595,6 +2596,28 @@ impl Ui {
         Some(dialog)
     }
 
+    /// Show frame rate on a game's page: MangoHud's overlay when Lobby starts it.
+    fn frame_rate_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
+        let unsupported = launch::frame_rate_unsupported(plan);
+        let help = unsupported.clone().unwrap_or_else(|| "MangoHud's overlay in the corner: frames per second, frame times, CPU and GPU load. Right Shift+F12 hides it while playing. When Lobby starts the game (Play), not its app-menu shortcut.".into());
+        let group = adw::PreferencesGroup::new();
+        let row = adw::SwitchRow::builder().title("Show frame rate").subtitle(&help).subtitle_lines(0).active(game.frame_rate).sensitive(unsupported.is_none() || game.frame_rate).build();
+        let (u, id) = (self.clone(), game.id.clone());
+        row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            match u.change_lib(|lib| {
+                if let Some(g) = lib.get_mut(&id) {
+                    g.frame_rate = on;
+                }
+            }) {
+                Ok(()) => u.toast(if on { "Frame rate shown from the next Play." } else { "Frame rate not shown any more." }),
+                Err(e) => u.toast(&format!("Couldn't save the library: {e}")),
+            }
+        });
+        group.add(&row);
+        group
+    }
+
     /// Launch options on a game's page: what's added to its command when Lobby starts it.
     fn options_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
         let unsupported = launch::options_unsupported(plan);
@@ -2639,7 +2662,7 @@ impl Ui {
             .build();
         let internet = adw::SwitchRow::builder()
             .title("Internet")
-            .subtitle("Off: it can't reach the internet or your network.")
+            .subtitle("When off, it can't reach the internet or your network.")
             .active(sandbox::internet(game))
             .sensitive(level != Level::Off)
             .build();

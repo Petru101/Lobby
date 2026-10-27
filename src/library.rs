@@ -197,6 +197,9 @@ pub struct Game {
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub favourite: bool,
+    /// MangoHud's overlay when Lobby starts it (`launch::with_frame_rate`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub frame_rate: bool,
 }
 
 impl Game {
@@ -454,7 +457,7 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             };
             let paths: Vec<&PathBuf> = entries.iter().flat_map(|e| [e.folder.as_ref(), e.program.as_ref()]).flatten().collect();
             let missing = !paths.is_empty() && !paths.iter().any(|p| p.exists());
-            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false }
+            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
         })
         .collect();
     games.sort_by_key(|g| g.name.to_lowercase());

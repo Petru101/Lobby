@@ -52,6 +52,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby launch-options <game id> [<options>]  show or set what Play adds to its command
                                (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
        lobby hide|unhide|favourite|unfavourite <game>  out of sight or back; starred or not
+       lobby frame-rate <game> [on|off]  MangoHud's overlay (frame rate ...) when Play starts it
        lobby running           the games running now; lobby stop <game> ends one
        lobby move <game> <folder>  move a game there (another drive, say); its records follow
        lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
@@ -83,6 +84,7 @@ fn main() -> ExitCode {
         (Some("move"), [game, into]) => move_game(game, into),
         (Some("stop"), words) if !words.is_empty() => stop_game(&words.join(" ")),
         (Some(what @ ("hide" | "unhide" | "favourite" | "unfavourite")), words) if !words.is_empty() => mark(what, &words.join(" ")),
+        (Some("frame-rate"), [game, on @ ..]) if on.len() <= 1 => frame_rate(game, on.first().copied()),
         // The options as typed, -- words too (`rest` leaves those out).
         (Some("launch-options"), [_, ..]) => launch_options(&args[1], &args[2..].join(" "), args.len() > 2),
         (Some("protection"), [game, level @ ..]) if level.len() <= 1 => protection(game, level.first().copied(), &args),
@@ -183,6 +185,22 @@ fn mark(what: &str, query: &str) -> Result<(), String> {
     lib.save()
 }
 
+/// Shows whether Play shows a game's frame rate (MangoHud), or turns it on or off.
+fn frame_rate(query: &str, on: Option<&str>) -> Result<(), String> {
+    let mut lib = Library::load().map_or_else(scan, Ok)?;
+    let id = lib.find(query)?.id.clone();
+    let g = lib.get_mut(&id).ok_or("no such game")?;
+    match on {
+        Some("on") => g.frame_rate = true,
+        Some("off") => g.frame_rate = false,
+        Some(other) => return Err(format!("on or off, not {other}")),
+        None => {}
+    }
+    let why = launch::frame_rate_unsupported(&launch::plan(g));
+    println!("{}: frame rate {}{}", g.name, if g.frame_rate { "shown" } else { "not shown" }, why.map(|w| format!(" (Lobby can't show it: {w})")).unwrap_or_default());
+    if on.is_some() { lib.save() } else { Ok(()) }
+}
+
 fn launch_options(query: &str, text: &str, set: bool) -> Result<(), String> {
     let mut lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?.clone();
@@ -253,7 +271,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     // A shortcut naming a game the library lost (deleted, say) still starts it, at Standard.
     let game = Library::load().unwrap_or_default().games.into_iter().find(|g| g.id == id).unwrap_or_else(|| {
         eprintln!("lobby: no game \"{id}\" in the library: starting it with Standard protection.");
-        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false }
+        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
     });
     let start = store::now();
     let status = sandbox::command(&game, &[], command, None).and_then(|mut s| s.command.stdin(std::process::Stdio::null()).status().map_err(|e| format!("bwrap: {e}")));
@@ -471,6 +489,9 @@ fn how(query: &str) -> Result<(), String> {
             println!("{} starts with Battle.net:\n  {}\n  protected: {}", game.name, battlenet::command(&launch).join(" "), sandbox::summary(game));
         }
         launch::Plan::Cannot(why) => println!("{}: {why}", game.name),
+    }
+    if game.frame_rate {
+        println!("  frame rate: {}", launch::frame_rate_unsupported(&launch::plan(game)).map_or("shown (MangoHud)".to_string(), |why| format!("can't be shown: {why}")));
     }
     for warning in drives::warnings(game, &drives::mounts()) {
         println!("\nWarning: {warning}");

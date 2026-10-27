@@ -48,7 +48,9 @@ pub fn run(game: &Game) -> Result<(), String> {
     let options = crate::launch::parse_options(game.launch_options.as_deref().unwrap_or_default())?;
     let program: Vec<String> = program.into_iter().chain(options.args).collect();
     let words: Vec<String> = wine.umu.iter().cloned().chain(program).collect();
-    let env: Vec<(String, String)> = env.into_iter().chain(extra_env).chain(options.vars).collect();
+    // Show frame rate: MangoHud's Vulkan layer (Proton draws with Vulkan).
+    let frame_rate = game.frame_rate.then(|| ("MANGOHUD".to_string(), "1".to_string()));
+    let env: Vec<(String, String)> = env.into_iter().chain(extra_env).chain(frame_rate).chain(options.vars).collect();
     // In the game's sandbox: the store's sign-in and its saves' sync stay out here.
     let mut sandboxed = crate::sandbox::command(game, &env, &words, cwd.as_deref().filter(|d| d.is_dir()))?;
     println!("lobby: protection: {}", crate::sandbox::summary(game));
