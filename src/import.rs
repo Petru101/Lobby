@@ -164,6 +164,43 @@ fn tool_copies() -> Vec<(PathBuf, PathBuf)> {
     out
 }
 
+/// The launchers whose records name a prefix (Heroic's wine setups, taken-over records' from).
+fn launchers_of(prefix: &Path) -> Vec<String> {
+    let same = |p: &Path| library::norm(&unit(p)) == library::norm(prefix);
+    let setups: std::collections::BTreeMap<String, crate::stores::WineSetup> = crate::stores::read_json(&crate::store::dir().join("wine-setups.json"));
+    let mut out: Vec<String> = Vec::new();
+    if setups.values().any(|s| same(&s.prefix)) {
+        out.push("Heroic".into());
+    }
+    for t in crate::taken::load() {
+        if t.prefix.as_deref().is_some_and(same) || t.command.iter().filter_map(|w| w.strip_prefix("WINEPREFIX=")).any(|w| same(Path::new(w))) {
+            out.push(t.from);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A launcher installed as a Flatpak sees only the folders it's allowed: the one Lobby moved its
+/// prefixes into is added (`flatpak override --user`), so the link left behind leads somewhere.
+fn let_launchers_see(prefix: &Path, folder: &Path) {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    for launcher in launchers_of(prefix) {
+        let app = match launcher.as_str() {
+            "Heroic" => "com.heroicgameslauncher.hgl",
+            "Lutris" => "net.lutris.Lutris",
+            "Faugus" => "io.github.Faugus.faugus-launcher",
+            _ => continue,
+        };
+        if ![home.join(".local/share/flatpak/app").join(app), Path::new("/var/lib/flatpak/app").join(app)].iter().any(|d| d.is_dir()) {
+            continue;
+        }
+        let ok = Command::new("flatpak").args(["override", "--user", &format!("--filesystem={}", folder.display()), app]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+        crate::log::line(&format!("import: {launcher}'s Flatpak {} {}", if ok { "may use" } else { "couldn't be given" }, folder.display()));
+    }
+}
+
 /// Makes what imported games need Lobby's own. Returns what it did (or would do, `dry`), a
 /// line each.
 pub fn run(games: &[Game], dry: bool) -> Vec<String> {
@@ -185,6 +222,7 @@ pub fn run(games: &[Game], dry: bool) -> Vec<String> {
         let moved = fs::create_dir_all(to.parent().unwrap()).and_then(|()| fs::rename(&from, &to)).and_then(|()| std::os::unix::fs::symlink(&to, &from));
         match moved.map_err(|e| e.to_string()).and_then(|()| point_records(&from, &to)) {
             Ok(()) => {
+                let_launchers_see(&to, to.parent().unwrap_or(&to));
                 crate::log::line(&format!("import: {} → {} ({who})", from.display(), to.display()));
                 done.push(format!("✓ {who}: Wine setup moved to {} (a link stays at {}).", to.display(), from.display()));
             }
@@ -201,7 +239,10 @@ pub fn run(games: &[Game], dry: bool) -> Vec<String> {
         }
         let made = fs::create_dir_all(&to).and_then(|()| fs::create_dir_all(from.parent().unwrap_or(Path::new("/")))).and_then(|()| std::os::unix::fs::symlink(&to, &from));
         match made.map_err(|e| e.to_string()).and_then(|()| point_records(&from, &to)) {
-            Ok(()) => done.push(format!("✓ {} will be made in {} (a link stays at {}).", unit(&from).display(), to.display(), from.display())),
+            Ok(()) => {
+                let_launchers_see(&to, to.parent().unwrap_or(&to));
+                done.push(format!("✓ {} will be made in {} (a link stays at {}).", unit(&from).display(), to.display(), from.display()));
+            }
             Err(e) => done.push(format!("{} couldn't be set up in Lobby's folder: {e}", from.display())),
         }
     }
