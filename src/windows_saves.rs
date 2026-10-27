@@ -305,6 +305,10 @@ pub fn prefix(game: &Game) -> Option<PathBuf> {
     if crate::battlenet::game_folder(game).is_some() && matches!(crate::launch::plan(game), crate::launch::Plan::BattleNet { .. }) {
         return Some(crate::battlenet::prefix());
     }
+    // A store app's game runs in Lobby's prefix of the app (`clients`).
+    if let Some((client, _)) = crate::clients::needed(game) {
+        return Some(client.prefix());
+    }
     // Steam's: compatdata/<appid>/pfx in the game's library (made by Steam on the first play).
     for e in game.entries.iter().filter(|e| e.source == Source::Steam) {
         let app = e.keys.iter().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
@@ -331,7 +335,7 @@ pub(crate) fn prefix_user(prefix: &Path) -> PathBuf {
 }
 
 /// What a Windows user folder holds of the game's saves, and what of it to copy.
-fn look(paths: &SavePaths, windows: &Path, prefix_user: &Path) -> Found {
+pub(crate) fn look(paths: &SavePaths, windows: &Path, prefix_user: &Path) -> Found {
     let mut found = Found { windows: windows.to_path_buf(), ..Default::default() };
     let mut seen = std::collections::HashSet::new();
     for path in &paths.paths {

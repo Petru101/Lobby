@@ -65,10 +65,15 @@ pub fn installed() -> bool {
     program().is_file()
 }
 
-/// The Proton that made the prefix, else the newest GE-Proton installed (what Battle.net is
-/// known to run on), else umu's own download of it.
 fn proton() -> String {
-    if let Some(p) = crate::launch::proton_of(&prefix()) {
+    newest_proton(&prefix())
+}
+
+/// For a store app's prefix (Battle.net's, `clients`'): the Proton that made it, else the
+/// newest GE-Proton installed (what these apps are known to run on), else umu's own download
+/// of it.
+pub fn newest_proton(prefix: &Path) -> String {
+    if let Some(p) = crate::launch::proton_of(prefix) {
         return p.display().to_string();
     }
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());

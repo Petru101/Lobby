@@ -17,6 +17,9 @@ pub enum Plan {
     /// A Blizzard game: started through lobby's Battle.net (installed the first time), with
     /// what Battle.net's --exec calls it.
     BattleNet { folder: PathBuf, launch: String },
+    /// A game only its store's app lets start (`clients`: the EA app, Ubisoft Connect, the
+    /// Rockstar Games Launcher), which Lobby installs into a prefix of its own first.
+    NeedsClient { client: &'static str, program: PathBuf, cwd: Option<PathBuf> },
     Cannot(String),
 }
 
@@ -57,6 +60,12 @@ pub fn plan(game: &Game) -> Plan {
     let own_battlenet = keys().any(|k| matches!(k, Key::Heroic(..) | Key::Lutris(_) | Key::Faugus(_) | Key::SteamShortcut(_)));
     if let Some((folder, product)) = crate::battlenet::game_folder(game).filter(|_| !own_battlenet) {
         return Plan::BattleNet { folder, launch: product.launch };
+    }
+    // A game only its store's app lets start (EA, Ubisoft, Rockstar): in Lobby's own prefix of
+    // that app, where the game's check finds it; another launcher's setup of it isn't used.
+    if let Some((client, program)) = crate::clients::needed(game) {
+        let cwd = program.parent().map(Path::to_path_buf);
+        return if client.installed() { own(&format!("the {}, Lobby's own copy", client.name), client.command(&program), cwd) } else { Plan::NeedsClient { client: client.id, program, cwd } };
     }
     if let Some(p) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(desktop_plan) {
         return p;
@@ -117,6 +126,10 @@ impl Plan {
             Plan::SetUp(_) => "No launcher knows it: the first time you play, gamefix sets it up (an app-menu entry with any fixes it needs).".into(),
             Plan::BattleNet { .. } if !crate::battlenet::installed() => "A Blizzard game: it starts through Blizzard's Battle.net app, which signs you in. The first time you play, Lobby installs Battle.net for it.".into(),
             Plan::BattleNet { .. } => "Starts with Battle.net, which signs you in.".into(),
+            Plan::NeedsClient { client, .. } => {
+                let name = crate::clients::by_id(client).map_or("its store's app", |c| c.name);
+                format!("It only starts with the {name}. The first time you play, Lobby installs the {name} into a Wine setup of its own, and you sign in.")
+            }
             Plan::Cannot(why) => why.clone(),
         }
     }
@@ -177,7 +190,7 @@ pub fn add_extras(game: &Game, command: Vec<String>) -> Result<Vec<String>, Stri
 /// Why Lobby can't protect the game the way it starts, if it can't.
 pub fn protection_unsupported(plan: &Plan) -> Option<String> {
     match plan {
-        Plan::Run { protect: true, .. } | Plan::SetUp(_) | Plan::BattleNet { .. } => None,
+        Plan::Run { protect: true, .. } | Plan::SetUp(_) | Plan::BattleNet { .. } | Plan::NeedsClient { .. } => None,
         Plan::Run { command, .. } if command.first().is_some_and(|w| w == "steam") => Some("Steam starts it: Steam's games need the Steam client, which runs them itself, so Lobby can't protect them.".into()),
         Plan::Run { command, .. } if hands_over(command).is_some() => hands_over(command),
         Plan::Run { how, .. } => Some(format!("It starts with {how}, whose settings Lobby couldn't read, so Lobby can't protect it.")),
@@ -710,7 +723,7 @@ pub fn frame_rate_unsupported(plan: &Plan) -> Option<String> {
     match plan {
         Plan::Run { command, .. } => with_frame_rate(command.clone()).err(),
         Plan::BattleNet { .. } => Some("Battle.net starts it, and MangoHud would show over Battle.net's own window too.".into()),
-        Plan::SetUp(_) => None,
+        Plan::SetUp(_) | Plan::NeedsClient { .. } => None,
         Plan::Cannot(why) => Some(why.clone()),
     }
 }
@@ -720,7 +733,7 @@ pub fn options_unsupported(plan: &Plan) -> Option<String> {
     match plan {
         Plan::Run { command, .. } => with_options(command.clone(), Some("-x")).err(),
         Plan::BattleNet { .. } => Some("Battle.net starts it: set its launch options in Battle.net (the game's settings, Additional command line arguments).".into()),
-        Plan::SetUp(_) => None,
+        Plan::SetUp(_) | Plan::NeedsClient { .. } => None,
         Plan::Cannot(why) => Some(why.clone()),
     }
 }

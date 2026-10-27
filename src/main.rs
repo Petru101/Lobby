@@ -3,6 +3,7 @@
 
 mod artwork;
 mod battlenet;
+mod clients;
 mod drives;
 mod free;
 mod install;
@@ -482,6 +483,12 @@ fn play(query: &str) -> Result<(), String> {
     let plan = match launch::plan(&game) {
         launch::Plan::Run { how, command, cwd, protect } => (how, command, cwd, protect),
         launch::Plan::Cannot(why) => return Err(format!("{}: {why}", game.name)),
+        launch::Plan::NeedsClient { client, .. } => {
+            let client = clients::by_id(client).ok_or("unknown store app")?;
+            println!("{} only starts with the {}. Installing it (its installer opens: follow it, then sign in)…", game.name, client.name);
+            client.install()?;
+            return play(query);
+        }
         launch::Plan::BattleNet { folder, launch } => {
             if !battlenet::installed() {
                 println!("{} starts through Blizzard's Battle.net app. Installing it (its installer opens: follow it, then sign in to Battle.net)…", game.name);
@@ -518,6 +525,14 @@ fn play(query: &str) -> Result<(), String> {
         }
     };
     let (how, command, cwd, protect) = plan;
+    // A store app's game in Lobby's prefix of the app for the first time: its saves come too.
+    if let Some((client, _)) = clients::needed(&game).filter(|(c, _)| c.installed()) {
+        match clients::bring_saves(&game, client) {
+            Ok(0) => {}
+            Ok(n) => println!("Brought {n} save files of {} over from where it ran before.", game.name),
+            Err(e) => eprintln!("lobby: its saves couldn't be brought over: {e}"),
+        }
+    }
     // The protection it starts with is kept (a default can change once it's been played).
     if let Some(g) = lib.get_mut(&game.id) {
         if sandbox::settle(g) {
@@ -587,6 +602,7 @@ fn how_json(query: &str) -> Result<(), String> {
         launch::Plan::Run { command, cwd, protect, .. } => (launch::final_command(game, command, protect)?, cwd),
         launch::Plan::BattleNet { launch, .. } => (sandbox::wrap(game, battlenet::command(&launch)), None),
         launch::Plan::SetUp(folder) => return Err(format!("{}: gamefix sets {} up first.", game.name, folder.display())),
+        launch::Plan::NeedsClient { client, .. } => return Err(format!("{}: the {} isn't installed yet (Play installs it).", game.name, clients::by_id(client).map_or("store app", |c| c.name))),
         launch::Plan::Cannot(why) => return Err(why),
     };
     println!("{}", serde_json::json!({ "command": command, "cwd": cwd }));
@@ -615,6 +631,10 @@ fn how(query: &str) -> Result<(), String> {
                 println!("{}: Battle.net doesn't know it's in {} yet: lobby adds it (closing Battle.net first if it's open).", game.name, folder.display());
             }
             println!("{} starts with Battle.net:\n  {}\n  protected: {}", game.name, battlenet::command(&launch).join(" "), sandbox::summary(game));
+        }
+        launch::Plan::NeedsClient { client, program, .. } => {
+            let c = clients::by_id(client);
+            println!("{}: only starts with the {}; Lobby installs it into {} first, then runs {} there.", game.name, c.map_or("store app", |c| c.name), c.map(|c| c.prefix().display().to_string()).unwrap_or_default(), program.display());
         }
         launch::Plan::Cannot(why) => println!("{}: {why}", game.name),
     }

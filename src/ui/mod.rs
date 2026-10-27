@@ -2776,14 +2776,53 @@ impl Ui {
         });
         self.sync_shortcut(id);
         match launch::plan(&game) {
-            Plan::Run { command, cwd, protect, .. } => match launch::final_command(&game, command, protect).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
-                Ok(()) => {
-                    self.toast(&format!("Starting {}…", game.name));
-                    self.played(&game.id, None);
+            Plan::Run { command, cwd, protect, .. } => {
+                // A store app's game playing in Lobby's prefix of the app for the first time: its
+                // saves from where it ran before come too.
+                if let Some((client, _)) = crate::clients::needed(&game).filter(|(c, _)| c.installed()) {
+                    match crate::clients::bring_saves(&game, client) {
+                        Ok(0) => {}
+                        Ok(n) => self.toast(&format!("Brought {n} save files of {} over from where it ran before.", game.name)),
+                        Err(e) => self.toast(&format!("Its saves couldn't be brought over: {e}")),
+                    }
                 }
-                Err(e) => self.alert(&format!("{} didn't start", game.name), &e),
-            },
+                match launch::final_command(&game, command, protect).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
+                    Ok(()) => {
+                        self.toast(&format!("Starting {}…", game.name));
+                        self.played(&game.id, None);
+                    }
+                    Err(e) => self.alert(&format!("{} didn't start", game.name), &e),
+                }
+            }
             Plan::Cannot(why) => self.alert(&format!("{} can't be started", game.name), &why),
+            Plan::NeedsClient { client, .. } => {
+                let Some(client) = crate::clients::by_id(client) else { return };
+                let (u, id) = (self.clone(), game.id.clone());
+                glib::spawn_future_local(async move {
+                    let alert = adw::AlertDialog::new(
+                        Some(&format!("{} needs the {}", game.name, client.name)),
+                        Some(&format!("It only starts with the {0}, which checks your copy. Lobby can install the {0} into a Wine setup of its own. Its installer opens: follow it, then sign in to your account in the {0}.", client.name)),
+                    );
+                    alert.add_responses(&[("cancel", "Not now"), ("install", &format!("Install the {}", client.name))]);
+                    alert.set_response_appearance("install", adw::ResponseAppearance::Suggested);
+                    alert.set_default_response(Some("install"));
+                    if alert.choose_future(Some(&u.window)).await != "install" {
+                        return;
+                    }
+                    u.toast(&format!("Installing the {}: follow its installer…", client.name));
+                    if let Err(e) = gio::spawn_blocking(move || client.install()).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                        u.alert(&format!("The {} couldn't be installed", client.name), &e);
+                        return;
+                    }
+                    let alert = adw::AlertDialog::new(Some(&format!("Sign in to the {}", client.name)), Some(&format!("The {0} is installed. Sign in to your account in its window if it asks, then play {1}.", client.name, game.name)));
+                    alert.add_responses(&[("cancel", "Later"), ("play", &format!("Play {}", game.name))]);
+                    alert.set_response_appearance("play", adw::ResponseAppearance::Suggested);
+                    alert.set_default_response(Some("play"));
+                    if alert.choose_future(Some(&u.window)).await == "play" {
+                        u.play(&id);
+                    }
+                });
+            }
             Plan::BattleNet { folder, launch } => {
                 let u = self.clone();
                 glib::spawn_future_local(async move {

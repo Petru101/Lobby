@@ -163,7 +163,9 @@ pub fn prefix_shared_with(prefix: &Path, game: &Game, all: &[Game]) -> Vec<Strin
 fn deletable_prefix(p: &Path) -> bool {
     let home = std::env::var_os("HOME").map(|h| real(Path::new(&h)));
     let empty = fs::read_dir(p).is_ok_and(|mut d| d.next().is_none());
-    (p.join("drive_c").is_dir() || empty) && p.components().count() > 4 && Some(p.to_path_buf()) != home && !p.ends_with("Prefixes") && !p.ends_with("prefixes")
+    // Never a store app's (Battle.net's, the EA app's ...): every game of that store runs there.
+    let store_app = real(p) == real(&crate::battlenet::prefix()) || crate::clients::CLIENTS.iter().any(|c| real(p) == real(&c.prefix()));
+    (p.join("drive_c").is_dir() || empty) && p.components().count() > 4 && Some(p.to_path_buf()) != home && !p.ends_with("Prefixes") && !p.ends_with("prefixes") && !store_app
 }
 
 #[cfg(test)]
