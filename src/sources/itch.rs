@@ -1,8 +1,10 @@
 //! itch.io: which page a downloaded game came from, and that page's title and cover.
 //!
-//! Firefox records, for each download, the page the link was on. Only downloads from itch.io
-//! game pages (`https://<creator>.itch.io/<game>`) are read; nothing else in the history is
-//! looked at. Each page's `data.json` (title, cover) is fetched once and cached in
+//! Browsers record, for each download, the page the link was on: Firefox and its relatives
+//! (LibreWolf, Zen, Floorp, Waterfox) in places.sqlite, Chrome, Chromium, Brave, Edge, Vivaldi
+//! and Opera in each profile's History (`downloads.tab_url`). Only downloads from itch.io game
+//! pages (`https://<creator>.itch.io/<game>`) are kept; from Chromium's only those rows are
+//! even read. Each page's `data.json` (title, cover) is fetched once and cached in
 //! ~/.cache/lobby/itch.json.
 
 use super::Home;
@@ -19,14 +21,58 @@ struct Download {
     page: String,
 }
 
-/// Firefox profiles' history databases: the flatpak's and a native install's.
-fn histories(home: &Home) -> Vec<PathBuf> {
+#[derive(Clone, Copy, PartialEq)]
+enum Browser {
+    /// Firefox and its relatives: places.sqlite.
+    Gecko,
+    /// Chrome and the browsers built on Chromium: History.
+    Chromium,
+}
+
+/// Where each browser keeps its profiles: native and flatpak installs.
+const GECKO: &[&str] = &[
+    ".mozilla/firefox",
+    ".var/app/org.mozilla.firefox/.mozilla/firefox",
+    ".var/app/org.mozilla.firefox/config/mozilla/firefox",
+    ".librewolf",
+    ".var/app/io.gitlab.librewolf-community/.librewolf",
+    ".zen",
+    ".var/app/app.zen_browser.zen/.zen",
+    ".floorp",
+    ".var/app/one.ablaze.floorp/.floorp",
+    ".waterfox",
+    ".var/app/net.waterfox.waterfox/.waterfox",
+];
+const CHROMIUM: &[&str] = &[
+    ".config/google-chrome",
+    ".config/google-chrome-beta",
+    ".config/google-chrome-unstable",
+    ".var/app/com.google.Chrome/config/google-chrome",
+    ".config/chromium",
+    ".var/app/org.chromium.Chromium/config/chromium",
+    ".var/app/io.github.ungoogled_software.ungoogled_chromium/config/chromium",
+    ".config/BraveSoftware/Brave-Browser",
+    ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+    ".config/microsoft-edge",
+    ".var/app/com.microsoft.Edge/config/microsoft-edge",
+    ".config/vivaldi",
+    ".var/app/com.vivaldi.Vivaldi/config/vivaldi",
+    ".config/opera",
+    ".var/app/com.opera.Opera/config/opera",
+];
+
+/// Every browser profile's history database: a profile folder (Firefox's `<random>.default`,
+/// Chromium's `Default`, `Profile 2`), or the browser's folder itself (Opera keeps one there).
+fn histories(home: &Home) -> Vec<(Browser, PathBuf)> {
     let mut out = Vec::new();
-    for dir in [".var/app/org.mozilla.firefox/config/mozilla/firefox", ".var/app/org.mozilla.firefox/.mozilla/firefox", ".mozilla/firefox"] {
-        for profile in fs::read_dir(home.join(dir)).into_iter().flatten().flatten() {
-            let places = profile.path().join("places.sqlite");
-            if places.is_file() {
-                out.push(places);
+    for (browser, dirs, file) in [(Browser::Gecko, GECKO, "places.sqlite"), (Browser::Chromium, CHROMIUM, "History")] {
+        for dir in dirs.iter().map(|d| home.join(d)) {
+            let profiles = fs::read_dir(&dir).into_iter().flatten().flatten().map(|p| p.path()).chain(fs::read_dir(dir.join("Profiles")).into_iter().flatten().flatten().map(|p| p.path())).chain([dir.clone()]);
+            for profile in profiles {
+                let db = profile.join(file);
+                if db.is_file() && !out.iter().any(|(_, p)| *p == db) {
+                    out.push((browser, db));
+                }
             }
         }
     }
@@ -63,20 +109,25 @@ fn file_from_uri(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
 }
 
-/// Firefox's downloads from itch.io pages. Firefox keeps its database locked, so it's read from
-/// a copy, deleted right after: lobby keeps only the itch.io downloads found
-/// (~/.cache/lobby/itch-downloads.json), read again when Firefox changes the database.
+/// The browsers' downloads from itch.io pages. Browsers keep their databases locked, so each is
+/// read from a copy, deleted right after: lobby keeps only the itch.io downloads found
+/// (~/.cache/lobby/itch-downloads.json), read again when the browser changes the database.
 fn downloads(home: &Home) -> Vec<Download> {
     let cache = cache_dir();
     let saved_file = cache.join("itch-downloads.json");
     let mut saved: HashMap<String, Saved> = fs::read_to_string(&saved_file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let mut out = Vec::new();
-    for places in histories(home) {
+    for (browser, places) in histories(home) {
         let key = places.display().to_string();
         let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-        let stamp = mtime(&places).max(mtime(&places.with_extension("sqlite-wal")));
+        let side = |ext: &str| PathBuf::from(format!("{}-{ext}", places.display()));
+        let stamp = mtime(&places).max(mtime(&side("wal"))).max(mtime(&side("journal")));
         if saved.get(&key).is_none_or(|s| s.stamp != stamp) {
-            saved.insert(key.clone(), Saved { stamp, downloads: read_firefox(&places, &cache) });
+            let found = match browser {
+                Browser::Gecko => read_firefox(&places, &cache),
+                Browser::Chromium => read_chromium(&places, &cache),
+            };
+            saved.insert(key.clone(), Saved { stamp, downloads: found });
         }
         out.extend(saved[&key].downloads.iter().map(|(file, page)| Download { file: file.clone(), page: page.clone() }));
     }
@@ -123,6 +174,33 @@ fn read_firefox(places: &Path, cache: &Path) -> Vec<(PathBuf, String)> {
         let _ = fs::remove_file(f);
     }
     out
+}
+
+/// Chromium's downloads from itch.io pages: the query asks only for rows whose tab, the tab's
+/// referrer or the download's referrer is on itch.io; the first that's a game page counts (a
+/// game's download page, `<game>/download/<key>`, is that game's).
+fn read_chromium(history: &Path, cache: &Path) -> Vec<(PathBuf, String)> {
+    let copy = cache.join(format!("chromium-{}.sqlite", std::process::id()));
+    let _ = fs::create_dir_all(cache);
+    let mut out = Vec::new();
+    if fs::copy(history, &copy).is_ok() {
+        if let Ok(db) = rusqlite::Connection::open(&copy) {
+            out = itch_downloads(&db);
+        }
+    }
+    let _ = fs::remove_file(&copy);
+    out
+}
+
+fn itch_downloads(db: &rusqlite::Connection) -> Vec<(PathBuf, String)> {
+    let Ok(mut q) = db.prepare(
+        "SELECT target_path, tab_url, tab_referrer_url, referrer FROM downloads
+         WHERE tab_url LIKE '%itch.io/%' OR tab_referrer_url LIKE '%itch.io/%' OR referrer LIKE '%itch.io/%'",
+    ) else {
+        return Vec::new();
+    };
+    let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, [r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?])));
+    rows.into_iter().flatten().flatten().filter_map(|(file, pages)| Some((PathBuf::from(file).clone(), pages.iter().flatten().find_map(|p| game_page(p))?))).filter(|(f, _)| !f.as_os_str().is_empty()).collect()
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -218,6 +296,23 @@ pub fn entries(home: &Home, found: &[Entry]) -> Vec<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chromium_downloads() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE downloads (target_path TEXT, tab_url TEXT, tab_referrer_url TEXT, referrer TEXT);
+             INSERT INTO downloads VALUES ('/home/u/Downloads/Game.zip', 'https://maker.itch.io/cool-game/download/abc123', 'https://itch.io/games', '');
+             INSERT INTO downloads VALUES ('/home/u/Downloads/tax.pdf', 'https://bank.example/statements', '', '');
+             INSERT INTO downloads VALUES ('/home/u/Downloads/other.zip', 'https://itch.io/my-purchases', 'https://maker.itch.io/other-game', '');
+             INSERT INTO downloads VALUES ('', 'https://maker.itch.io/cancelled', '', '');",
+        )
+        .unwrap();
+        assert_eq!(
+            itch_downloads(&db),
+            vec![(PathBuf::from("/home/u/Downloads/Game.zip"), "https://maker.itch.io/cool-game".to_string()), (PathBuf::from("/home/u/Downloads/other.zip"), "https://maker.itch.io/other-game".to_string())]
+        );
+    }
 
     #[test]
     fn game_pages() {

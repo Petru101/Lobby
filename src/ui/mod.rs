@@ -2444,11 +2444,14 @@ impl Ui {
             b.set_icon_name(if on { "starred-symbolic" } else { "non-starred-symbolic" });
             u.mark(&id, |g| g.favourite = on);
         });
-        let hide = gtk::ToggleButton::builder().icon_name("view-conceal-symbolic").active(game.hidden).tooltip_text(if game.hidden { "Hidden: press to show it again" } else { "Hide it (Show → Hidden games brings it back)" }).valign(gtk::Align::Center).build();
+        // An open eye while it shows, a crossed one once it's hidden.
+        let eye = |hidden: bool| if hidden { "view-conceal-symbolic" } else { "view-reveal-symbolic" };
+        let hide = gtk::ToggleButton::builder().icon_name(eye(game.hidden)).active(game.hidden).tooltip_text(if game.hidden { "Hidden: press to show it again" } else { "Hide it (Show → Hidden games brings it back)" }).valign(gtk::Align::Center).build();
         hide.add_css_class("circular");
         let (u, id) = (self.clone(), game.id.clone());
         hide.connect_toggled(move |b| {
             let on = b.is_active();
+            b.set_icon_name(eye(on));
             b.set_tooltip_text(Some(if on { "Hidden: press to show it again" } else { "Hide it (Show → Hidden games brings it back)" }));
             u.mark(&id, |g| g.hidden = on);
         });

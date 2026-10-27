@@ -60,8 +60,9 @@ protection <game> ...`, and more: `lobby --help`.
 ## Privacy
 
 Lobby only reads launchers' files and changes its own (and the app-menu entries it makes).
-To know which downloads came from itch.io, it reads Firefox's history for downloads whose page
-was an itch.io game page, and keeps only those. It asks the stores and Steam's public store
+To know which downloads came from itch.io, it reads the browsers' download history (Firefox,
+LibreWolf, Zen, Floorp, Waterfox; Chrome, Chromium, Brave, Edge, Vivaldi, Opera) for downloads
+whose page was an itch.io game page, and keeps only those. It asks the stores and Steam's public store
 for covers and names. Sign-ins stay on your computer, in Lobby's own folders.
 
 ## License
