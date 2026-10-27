@@ -83,8 +83,10 @@ pub fn entries() -> Vec<Entry> {
             let mut e = Entry::new(Source::Lobby, t.name);
             e.keys.push(t.key);
             e.keys.extend(t.keys);
+            // Lutris names no prefix when the program is in one (Infested Planet's): the one
+            // holding it.
+            e.prefix = t.prefix.or_else(|| t.program.as_deref()?.ancestors().find_map(crate::library::prefix_in));
             e.program = t.program;
-            e.prefix = t.prefix;
             e.folder = t.folder;
             e.cover = t.cover;
             e.icon = t.icon;

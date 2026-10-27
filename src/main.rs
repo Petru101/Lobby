@@ -7,6 +7,7 @@ mod battlenet;
 mod clients;
 mod drives;
 mod free;
+mod import;
 mod install;
 mod anticheat;
 mod launch;
@@ -68,6 +69,9 @@ const USAGE: &str = "usage: lobby                   open the window
                                how lobby protects a game it starts; change it
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (each scan does)
+       lobby import [--dry]    move imported games' Wine setups into Lobby's folders (a link left
+                               behind) and copy launchers' Proton builds (each scan does)
+       lobby own-wine-setup <game>  give a game in a shared Wine setup a copy of its own
        lobby proton <game> [<name> | default] [--anyway]  the Proton it starts with; pick another
                                of Steam's (default: the one it was set up with)
        lobby backups <game> [now | restore [<n>]]  its save backups (newest is 1); back up now;
@@ -92,6 +96,8 @@ fn main() -> ExitCode {
         (Some("install"), words) if !words.is_empty() => install(&words.join(" ")),
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
+        (Some("import"), []) => import_now(args.iter().any(|a| a == "--dry")),
+        (Some("own-wine-setup"), words) if !words.is_empty() => own_wine_setup(&words.join(" ")),
         (Some("search"), []) => search_drives(),
         (Some("running"), []) => running_games(),
         (Some("move"), [game, into]) => move_game(game, into),
@@ -529,6 +535,10 @@ fn scan() -> Result<Library, String> {
     if !log::timed("scan: taking games over", || taken::take_over(&lib.games)).is_empty() {
         return scan();
     }
+    // What imported games need becomes Lobby's (their Wine prefixes, launchers' Proton builds).
+    if log::timed("scan: importing", || import::run(&lib.games, false)).iter().any(|l| l.starts_with('✓')) {
+        return scan();
+    }
     log::timed("scan: app-menu entries' protection", || sandbox::sync_shortcuts(&lib.games));
     Ok(lib)
 }
@@ -931,6 +941,30 @@ fn save_backups(query: &str, what: &[&str]) -> Result<(), String> {
         }
         _ => Err(USAGE.to_string()),
     }
+}
+
+/// Makes what imported games need Lobby's own now (--dry: says what it would do).
+fn import_now(dry: bool) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let done = import::run(&lib.games, dry);
+    if done.is_empty() {
+        println!("Everything imported games need is Lobby's already.");
+    }
+    for l in &done {
+        println!("  {l}");
+    }
+    if !dry && done.iter().any(|l| l.starts_with('✓')) {
+        scan()?;
+    }
+    Ok(())
+}
+
+fn own_wine_setup(query: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?;
+    let to = import::own_prefix(game, &lib.games)?;
+    println!("{} has a Wine setup of its own now: {} (a copy of the shared one; its Proton can be picked).", game.name, to.display());
+    Ok(())
 }
 
 fn take_over_heroic() -> Result<(), String> {

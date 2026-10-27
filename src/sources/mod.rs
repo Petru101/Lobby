@@ -61,6 +61,10 @@ pub fn scan(home: &Home) -> Found {
     entries.extend(crate::log::timed("scan: gamefix records", || gamefix::records(home)));
     entries.extend(crate::log::timed("scan: app menu", || menu::entries(home)));
     entries.extend(crate::log::timed("scan: games Lobby took over", crate::taken::entries));
+    // A game imported from Heroic, Lutris or Faugus is Lobby's from then on: nothing of the
+    // launcher's (its prefix, cover, play time) is used again, only Lobby's record of it.
+    let imported: Vec<crate::library::Key> = crate::taken::load().into_iter().flat_map(|t| std::iter::once(t.key).chain(t.keys)).chain(entries.iter().filter(|e| matches!(e.source, crate::library::Source::Epic | crate::library::Source::Gog) && e.kind != crate::library::Kind::Owned).flat_map(|e| e.keys.clone())).collect();
+    entries.retain(|e| !matches!(e.source, crate::library::Source::Heroic | crate::library::Source::Lutris | crate::library::Source::Faugus) || !e.keys.iter().any(|k| imported.contains(k)));
 
     let roots = folders::roots(home);
     let games = crate::places::Places::load().games;

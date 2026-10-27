@@ -1501,6 +1501,14 @@ impl Ui {
                     let taken = gio::spawn_blocking(move || crate::taken::take_over(&taking)).await.unwrap_or_default();
                     if !taken.is_empty() {
                         u.scan_again.set(true);
+                    } else {
+                        // What imported games need becomes Lobby's (their Wine prefixes moved,
+                        // launchers' Proton builds copied): looked at again after.
+                        let importing = games.clone();
+                        let imported = gio::spawn_blocking(move || crate::log::timed("importing", || crate::import::run(&importing, false))).await.unwrap_or_default();
+                        if imported.iter().any(|l| l.starts_with('✓')) {
+                            u.scan_again.set(true);
+                        }
                     }
                     gio::spawn_blocking(move || crate::log::timed("app-menu entries' protection", || crate::sandbox::sync_shortcuts(&games)));
                 }
@@ -3248,6 +3256,27 @@ impl Ui {
         let help = locked.clone().unwrap_or_else(|| "Any Proton Steam has, its own and GE-Proton's. Used from Play and from its app-menu and desktop shortcuts.".into());
         let group = adw::PreferencesGroup::builder().title("Proton").description(&help).build();
         if locked.is_some() {
+            // Shared with other games (Heroic's shared prefix): a copy of its own frees it.
+            let shares = crate::stores::installed_in(game).is_some_and(|(s, id)| crate::stores::wine_setup(s, &id).is_some()) && !crate::import::sharing(game, &self.lib.borrow().games).1.is_empty();
+            if shares {
+                let row = adw::ActionRow::builder().title("Its own Wine setup").subtitle("A copy of the shared one, with its settings and saves, used only by this game: then any Proton can be picked for it. The other games keep the shared one.").subtitle_lines(0).build();
+                let button = gtk::Button::builder().label("Give it its own").valign(gtk::Align::Center).build();
+                row.add_suffix(&button);
+                group.add(&row);
+                let (u, game) = (self.clone(), game.clone());
+                button.connect_clicked(move |button| {
+                    button.set_sensitive(false);
+                    let (u, g, all) = (u.clone(), game.clone(), u.lib.borrow().games.clone());
+                    glib::spawn_future_local(async move {
+                        let name = g.name.clone();
+                        match gio::spawn_blocking(move || crate::import::own_prefix(&g, &all)).await.unwrap_or_else(|_| Err("It stopped with an error.".into())) {
+                            Ok(_) => u.toast(&format!("{name} has its own Wine setup now: open its page again to pick its Proton.")),
+                            Err(e) => u.alert(&format!("{name} couldn't get its own Wine setup"), &e),
+                        }
+                        u.rescan();
+                    });
+                });
+            }
             return group;
         }
         let mut choices: Vec<Option<std::path::PathBuf>> = vec![None];

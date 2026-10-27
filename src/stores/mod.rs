@@ -280,7 +280,7 @@ pub fn wine_setup(store: Store, id: &str) -> Option<WineSetup> {
     all.get(&format!("{}:{id}", store.id())).cloned()
 }
 
-fn save_wine_setup(store: Store, id: &str, setup: WineSetup) -> Result<(), String> {
+pub(crate) fn save_wine_setup(store: Store, id: &str, setup: WineSetup) -> Result<(), String> {
     let mut all: BTreeMap<String, WineSetup> = read_json(&wine_setups_file());
     all.insert(format!("{}:{id}", store.id()), setup);
     fs::create_dir_all(crate::store::dir()).map_err(|e| e.to_string())?;
@@ -473,7 +473,7 @@ pub fn code_in(store: Store, url: &str, text: Option<&str>) -> Option<String> {
     }
 }
 
-fn read_json<T: for<'a> Deserialize<'a> + Default>(file: &Path) -> T {
+pub(crate) fn read_json<T: for<'a> Deserialize<'a> + Default>(file: &Path) -> T {
     fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 

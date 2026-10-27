@@ -282,7 +282,7 @@ fn repoint_beside(text: &str, from: &Path, to: &Path, siblings: Option<&[String]
 }
 
 /// Rewrites a text file naming the old place; whether it changed.
-fn repoint_file(file: &Path, from: &Path, to: &Path) -> Result<bool, String> {
+pub(crate) fn repoint_file(file: &Path, from: &Path, to: &Path) -> Result<bool, String> {
     let Ok(text) = fs::read_to_string(file) else { return Ok(false) };
     let new = repoint(&text, from, to, file.extension().is_some_and(|x| x == "desktop"));
     if new == text {
