@@ -3,6 +3,7 @@ name = "lobby"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
+description = "One game library for Linux: Steam, Epic, GOG, itch.io, Lutris, Faugus, Heroic and games found on your drives"
 
 [dependencies]
 adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
@@ -10,7 +11,9 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 flate2 = "1"
 libc = "0.2"
-gamefix = { path = "../gaming" }
+# Built in from github.com/Petru101/gamefix; a gamefix checkout beside this one (../gaming) is
+# used instead when .cargo/config.toml patches it in (run/cargo.sh writes that).
+gamefix = { git = "https://github.com/Petru101/gamefix", branch = "main" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

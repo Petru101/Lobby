@@ -1,0 +1,69 @@
+# Lobby
+
+**One game library for Linux, whatever put the games there.** Steam, Epic, GOG, itch.io
+downloads, Lutris, Faugus, Heroic, a game in a folder on any drive, an installer you once ran
+into a Wine prefix: Lobby finds them all and shows them in one window, and starts them. It's
+meant for people coming from Windows, with games scattered over several drives.
+
+Lobby is a game launcher for Linux (GTK 4 and libadwaita), written in Rust. It's early: it's
+used daily on one computer (Bazzite, KDE Plasma, NVIDIA), and isn't packaged yet.
+
+## What it does
+
+- **Finds every game.** It reads what Steam, Heroic, Lutris, Faugus and the app menu know, the
+  games folders on every drive, your downloads (zips, installers, disc images, itch.io games)
+  and Wine prefixes, and merges what's the same game into one card. A game found in a folder
+  gets its real name from its own files and a cover from the stores.
+- **Starts them,** with Proton through [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)
+  for Windows games. Games no launcher knows are set up the first time you press Play by
+  [gamefix](https://github.com/Petru101/gamefix), built in, which works out why a game won't
+  start on Linux and fixes it.
+- **Its own store accounts.** Sign in to Epic Games and GOG in Lobby to see what you own,
+  install, update and get DLC, with cloud saves synced before and after playing (through
+  [legendary](https://github.com/derrod/legendary) and [gogdl](https://github.com/Heroic-Games-Launcher/heroic-gogdl),
+  in Lobby's own copies). Your Steam library comes from the Steam app signed in on the
+  computer; Steam still installs and starts Steam games.
+- **Takes games over** from Lutris, Faugus and Steam shortcuts, and Epic and GOG installs from
+  Heroic, so those launchers can be removed.
+- **Protects your computer.** Every game Lobby starts runs in a sandbox (bubblewrap): it can't
+  read your passwords, keys, browser profiles or sign-ins, or make itself start with the
+  computer. Untrusted downloads start isolated, without the internet, until you say otherwise.
+- **Moves games between drives,** keeping everything that points at them working.
+- **Library tools:** Installed, Library (everything you own) and Downloads pages; sort by last
+  played, play time (Lobby's own and what Steam, Heroic, Lutris and Faugus counted), size or
+  date added; Continue playing; favourites and hidden games; demos out of sight; each game's
+  save folder; Stop for a game that hangs.
+- **Saves from Windows.** It finds a game's saves in a Windows install or backup on another
+  drive and copies them into the game's Wine prefix.
+- **Free games.** Epic's weekly free games and others, with a reminder, claimed in Lobby.
+
+## Building
+
+You need Rust, and GTK 4.18, libadwaita 1.8 and WebKitGTK 6.0 with their development files.
+gamefix is fetched from GitHub by Cargo.
+
+```sh
+cargo build --release
+./target/release/lobby
+```
+
+To play, it uses umu-launcher (Windows games), bubblewrap and xdg-dbus-proxy (protection),
+7-Zip and unrar (unpacking downloads), and curl.
+
+## Commands
+
+`lobby` opens the window. Everything also works from a terminal: `lobby scan`, `lobby play
+<game>`, `lobby how <game>` (how it would start, without starting it), `lobby install
+<game>`, `lobby move <game> <folder>`, `lobby running`, `lobby stop <game>`, `lobby
+protection <game> ...`, and more: `lobby --help`.
+
+## Privacy
+
+Lobby only reads launchers' files and changes its own (and the app-menu entries it makes).
+To know which downloads came from itch.io, it reads Firefox's history for downloads whose page
+was an itch.io game page, and keeps only those. It asks the stores and Steam's public store
+for covers and names. Sign-ins stay on your computer, in Lobby's own folders.
+
+## License
+
+GPL-3.0-or-later.

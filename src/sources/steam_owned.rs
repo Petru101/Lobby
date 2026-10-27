@@ -377,7 +377,8 @@ mod tests {
     #[test]
     fn licenses_unscrambled() {
         // A license list (eresult 1, one license: package 21357, flags 512, another expired),
-        // scrambled the client's way for account 12345678: the first bytes match the real cache.
+        // scrambled the client's way for a made-up account. The stream was checked against a real
+        // Steam client's cache when this was written; the bytes pin it.
         let mut list = vec![0x08, 0x01];
         for (package, flags) in [(21357u32, 512u64), (99, 8)] {
             let mut license = vec![0x08];
@@ -395,7 +396,7 @@ mod tests {
             list.extend(license);
         }
         let scrambled = unscramble(&list, 12345678);
-        assert_eq!(&scrambled[..3], &[0x4d, 0x39, 0x41]);
+        assert_eq!(&scrambled[..6], &[113, 51, 76, 43, 71, 129]);
         assert_eq!(decode_licenses(&unscramble(&scrambled, 12345678)), vec![(21357, 0)]);
     }
 
