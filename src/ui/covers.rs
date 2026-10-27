@@ -1,5 +1,6 @@
 //! Cover art for the cards: read and shrunk off the main thread, web covers downloaded once
-//! into ~/.cache/lobby/covers.
+//! into ~/.local/share/lobby/covers/web (kept like the rest of the library: a cache cleaner
+//! won't take them).
 
 use gtk::{gdk, gio, glib};
 use std::path::{Path, PathBuf};
@@ -9,14 +10,22 @@ use std::process::{Command, Stdio};
 const WIDTH: u32 = 360;
 const HEIGHT: u32 = 540;
 
-fn cache_dir() -> PathBuf {
-    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
-    cache.join("lobby/covers")
+fn covers_dir() -> PathBuf {
+    let dir = crate::store::dir().join("covers/web");
+    // Downloaded into the cache folder before: moved over once.
+    if !dir.exists() {
+        let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
+        let old = cache.join("lobby/covers");
+        if old.is_dir() && std::fs::create_dir_all(dir.parent().unwrap_or(&dir)).is_ok() {
+            let _ = std::fs::rename(&old, &dir);
+        }
+    }
+    dir
 }
 
 /// A web cover's local copy, downloaded the first time (curl, which every desktop has).
 fn fetch(url: &str) -> Option<PathBuf> {
-    let file = cache_dir().join(format!("{}.img", crate::sha256_hex(url.as_bytes())));
+    let file = covers_dir().join(format!("{}.img", crate::sha256_hex(url.as_bytes())));
     if file.is_file() {
         return Some(file);
     }
