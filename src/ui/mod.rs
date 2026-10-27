@@ -3812,6 +3812,8 @@ fn origin(g: &Game) -> String {
         return if g.entries.iter().any(|e| e.source == Source::Itch) { "itch.io · on your drive".into() } else { "On your drive".into() };
     }
     let s = g.sources();
+    // A Flatpak app's own entry, which Flatpak keeps in its folder of exported entries.
+    let flatpak = g.entries.iter().filter(|e| e.source == Source::AppMenu).flat_map(|e| e.keys.iter()).any(|k| matches!(k, Key::Desktop(p) if p.components().any(|c| c.as_os_str() == "flatpak")));
     let label = |src: Source| match src {
         Source::Steam => "Steam",
         Source::SteamElsewhere => "Steam (not added)",
@@ -3825,10 +3827,12 @@ fn origin(g: &Game) -> String {
         Source::Itch => "itch.io",
         Source::Artwork => "On your drive",
         Source::SteamShortcut => "Steam shortcut",
+        Source::AppMenu if flatpak => "Flatpak",
         Source::Gamefix | Source::AppMenu => "App menu",
         Source::Prefix | Source::Folder => "On your drive",
     };
-    s.first().map(|&src| label(src).to_string()).unwrap_or_default()
+    // Found artwork says nothing about where the game is.
+    s.iter().find(|&&src| src != Source::Artwork).or(s.first()).map(|&src| label(src).to_string()).unwrap_or_default()
 }
 
 fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {

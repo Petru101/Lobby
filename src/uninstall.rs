@@ -69,7 +69,14 @@ pub fn how(game: &Game) -> How {
             }
         }
     }
-    How::Not(if game.entries.iter().any(|e| e.source == crate::library::Source::AppMenu) && !launchers {
+    let menu = || game.entries.iter().filter(|e| e.source == crate::library::Source::AppMenu);
+    if let Some(app) = menu().find_map(crate::sources::flatpak_app) {
+        return How::Not(format!("It's a Flatpak app: uninstall it in your software app (Discover), or with flatpak uninstall {app}."));
+    }
+    if menu().flat_map(|e| e.keys.iter()).any(|k| matches!(k, Key::Desktop(p) if p.starts_with("/usr"))) {
+        return How::Not("It came with your system or was installed as a system package: remove it with your software app.".into());
+    }
+    How::Not(if menu().next().is_some() && !launchers {
         "An app-menu entry Lobby didn't make starts it, so Lobby can't tell what's the game's: delete its files and that entry yourself.".into()
     } else {
         "Lobby can't tell which files are the game's: delete them yourself.".into()

@@ -166,6 +166,11 @@ const ORIGINAL: &str = "X-Lobby-Original-Exec";
 fn sync_entry(game: &Game, file: &Path) -> Result<bool, String> {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let Ok(text) = fs::read_to_string(file) else { return Ok(false) };
+    // A link is another program's file: a Flatpak's entry links into the app's installed files,
+    // which Flatpak shares with its own store of them (writing it would change both).
+    if fs::symlink_metadata(file).is_ok_and(|m| m.file_type().is_symlink()) || file.components().any(|c| c.as_os_str() == "flatpak") {
+        return Ok(false);
+    }
     if !(file.starts_with(&home) || real(file).starts_with(real(&home))) || fs::metadata(file).is_ok_and(|m| m.permissions().readonly()) {
         return Ok(false);
     }
