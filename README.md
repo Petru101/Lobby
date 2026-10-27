@@ -33,6 +33,8 @@ used daily on one computer (Bazzite, KDE Plasma, NVIDIA), and isn't packaged yet
   played, play time (Lobby's own and what Steam, Heroic, Lutris and Faugus counted), size or
   date added; Continue playing; favourites and hidden games; demos out of sight; each game's
   save folder; Stop for a game that hangs; Show frame rate (MangoHud's overlay) per game.
+- **Cleans up downloads:** the archives, installers and repacks of games already installed,
+  with where to get each again (itch.io, MyAbandonware), deleted when you say so.
 - **Works with a controller:** move with the D-pad or stick, A to open, B to go back, Start
   to play, the shoulder buttons for pages and the triggers for sources.
 - **Saves from Windows.** It finds a game's saves in a Windows install or backup on another

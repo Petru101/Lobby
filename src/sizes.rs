@@ -94,7 +94,7 @@ pub fn measure(games: &[Game]) -> usize {
 }
 
 /// Every file's size under a folder, links not followed.
-fn walk(dir: &Path) -> u64 {
+pub(crate) fn walk(dir: &Path) -> u64 {
     let mut total = 0;
     let mut dirs = vec![dir.to_path_buf()];
     while let Some(d) = dirs.pop() {

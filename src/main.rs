@@ -7,6 +7,7 @@ mod drives;
 mod free;
 mod install;
 mod launch;
+mod leftovers;
 mod library;
 mod log;
 mod moving;
@@ -53,6 +54,9 @@ const USAGE: &str = "usage: lobby                   open the window
                                (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
        lobby hide|unhide|favourite|unfavourite <game>  out of sight or back; starred or not
        lobby frame-rate <game> [on|off]  MangoHud's overlay (frame rate ...) when Play starts it
+       lobby leftovers [--delete <game>]  downloads whose game is installed (with sizes and where to
+                               get them again); --delete removes that game's (to the Trash when
+                               its drive has one)
        lobby running           the games running now; lobby stop <game> ends one
        lobby move <game> <folder>  move a game there (another drive, say); its records follow
        lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
@@ -85,6 +89,8 @@ fn main() -> ExitCode {
         (Some("stop"), words) if !words.is_empty() => stop_game(&words.join(" ")),
         (Some(what @ ("hide" | "unhide" | "favourite" | "unfavourite")), words) if !words.is_empty() => mark(what, &words.join(" ")),
         (Some("frame-rate"), [game, on @ ..]) if on.len() <= 1 => frame_rate(game, on.first().copied()),
+        (Some("leftovers"), []) => list_leftovers(),
+        (Some("leftovers"), ["--delete", game @ ..]) if !game.is_empty() => delete_leftovers(&game.join(" ")),
         // The options as typed, -- words too (`rest` leaves those out).
         (Some("launch-options"), [_, ..]) => launch_options(&args[1], &args[2..].join(" "), args.len() > 2),
         (Some("protection"), [game, level @ ..]) if level.len() <= 1 => protection(game, level.first().copied(), &args),
@@ -183,6 +189,31 @@ fn mark(what: &str, query: &str) -> Result<(), String> {
     }
     println!("{}: {}", g.name, if g.hidden { "hidden" } else if g.favourite { "a favourite" } else { "shown" });
     lib.save()
+}
+
+/// The downloads whose game is installed: what deleting them would free.
+fn list_leftovers() -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let found = leftovers::find(&lib.games);
+    for l in &found {
+        println!("{}: {} ({}; {}{})", l.name, l.path.display(), windows_saves::size_text(l.bytes), l.again.describe(), if l.trash { "" } else { "; no Trash on its drive: deleted for good" });
+    }
+    println!("{} downloads, {}", found.len(), windows_saves::size_text(found.iter().map(|l| l.bytes).sum()));
+    Ok(())
+}
+
+fn delete_leftovers(query: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?;
+    let mine: Vec<_> = leftovers::find(&lib.games).into_iter().filter(|l| l.id == game.id).collect();
+    if mine.is_empty() {
+        return Err(format!("{} has no download left to delete.", game.name));
+    }
+    for l in mine {
+        let trashed = leftovers::delete(&l.path, &lib.games)?;
+        println!("{}: {} {}", game.name, l.path.display(), if trashed { "went to the Trash" } else { "deleted" });
+    }
+    Ok(())
 }
 
 /// Shows whether Play shows a game's frame rate (MangoHud), or turns it on or off.

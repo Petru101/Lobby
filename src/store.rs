@@ -236,6 +236,35 @@ mod tests {
     }
 
     #[test]
+    fn a_game_keeps_its_record_when_its_download_is_deleted() {
+        // Installed from a download (an itch.io zip); the zip deleted, the scan finds only the
+        // installed game: same id, play time, options and protection.
+        let mut installed = Entry::new(Source::Folder, "Apeirophobia");
+        installed.folder = Some("/g/apeirophobia".into());
+        installed.program = Some("/g/apeirophobia/Apeirophobia.exe".into());
+        let mut download = Entry::new(Source::Folder, "Apeirophobia");
+        download.kind = Kind::Download;
+        download.program = Some("/d/NecroLore_Apeirophobia.zip".into());
+        download.keys.push(Key::Download("/d/NecroLore_Apeirophobia.zip".into()));
+        let mut saved = game("Apeirophobia", Key::Itch("https://necrolore.itch.io/apeirophobia".into()));
+        saved.entries = vec![installed.clone(), download];
+        let mut lib = Library::default();
+        lib.update(vec![saved]);
+        {
+            let g = lib.get_mut("apeirophobia").unwrap();
+            g.played = Some(9);
+            g.launch_options = Some("-windowed".into());
+            g.favourite = true;
+        }
+        let mut now = game("Apeirophobia", Key::Itch("https://necrolore.itch.io/apeirophobia".into()));
+        now.entries = vec![installed];
+        lib.update(vec![now]);
+        assert_eq!(lib.games.len(), 1);
+        let g = &lib.games[0];
+        assert_eq!((g.id.as_str(), g.played, g.launch_options.as_deref(), g.favourite), ("apeirophobia", Some(9), Some("-windowed"), true));
+    }
+
+    #[test]
     fn merged_games_keep_the_played_ones_record() {
         // Owned on GOG (listed first) and found on a drive, saved apart; now one game.
         let mut owned = game("Alien Breed 2", Key::Store("gog".into(), "1".into()));

@@ -307,6 +307,13 @@ struct Ui {
     lib: RefCell<Library>,
     page: Cell<Page>,
     origin: Cell<Origin>,
+    /// Downloads whose game is installed (`leftovers::find`, after each scan), and the
+    /// Downloads page's banner offering to clean them up.
+    leftovers: RefCell<Vec<crate::leftovers::Leftover>>,
+    leftover_banner: adw::Banner,
+    /// A game just installed from a download: its download is offered for deleting once the
+    /// scan after the install knows it.
+    offer_leftover: RefCell<Option<String>>,
     /// The page buttons (Installed, Library, Downloads), for a controller's shoulder buttons.
     pages: RefCell<Vec<gtk::ToggleButton>>,
     /// A controller's way back: the card a page was opened from, focused again when it closes.
@@ -435,12 +442,14 @@ fn build(app: &adw::Application) {
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&filters);
+    let leftover_banner = adw::Banner::builder().button_label("Clean up…").revealed(false).build();
+    toolbar.add_top_bar(&leftover_banner);
     toolbar.set_content(Some(&stack));
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default() });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -546,6 +555,8 @@ fn build(app: &adw::Application) {
     }
     let u = ui.clone();
     rescan_button.connect_clicked(move |_| u.rescan());
+    let u = ui.clone();
+    ui.leftover_banner.connect_button_clicked(move |_| u.clean_up());
     // Which games are running, while the window is open (reading /proc: a few ms).
     let u = Rc::downgrade(&ui);
     glib::timeout_add_seconds_local(2, move || {
@@ -706,6 +717,19 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
             web.snapshot(webkit6::SnapshotRegion::Visible, webkit6::SnapshotOptions::NONE, gio::Cancellable::NONE, move |r| {
                 eprintln!("page snapshot: {:?}", r.map(|t| t.save_to_png(&page)));
             });
+        }
+        // The downloads of installed games are found after the scan: a page's row and the
+        // clean-up list need them (LOBBY_SNAPSHOT_CLEANUP=1 opens the list).
+        if std::env::var_os("LOBBY_SNAPSHOT_DETAILS").is_some() || std::env::var_os("LOBBY_SNAPSHOT_CLEANUP").is_some() {
+            for _ in 0..150 {
+                if !u.leftovers.borrow().is_empty() {
+                    break;
+                }
+                glib::timeout_future(std::time::Duration::from_millis(200)).await;
+            }
+        }
+        if std::env::var_os("LOBBY_SNAPSHOT_CLEANUP").is_some() {
+            u.clean_up();
         }
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_DETAILS") {
             u.details(&id);
@@ -1012,6 +1036,7 @@ impl Ui {
     }
 
     fn refilter(&self) {
+        self.show_leftover_banner();
         // Only the sources with games on this page; back to all when the one picked has none.
         let page = self.page.get();
         let show = self.show.get();
@@ -1270,6 +1295,142 @@ impl Ui {
         });
     }
 
+    /// The downloads whose game is installed, looked for again (in the background: repack
+    /// folders are measured); then the banner, and the offer after an install.
+    fn find_leftovers(self: &Rc<Self>) {
+        let games = self.lib.borrow().games.clone();
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let found = gio::spawn_blocking(move || crate::log::timed("leftovers", || crate::leftovers::find(&games))).await.unwrap_or_default();
+            u.leftovers.replace(found);
+            u.show_leftover_banner();
+            let Some(id) = u.offer_leftover.take() else { return };
+            let mine: Vec<_> = u.leftovers.borrow().iter().filter(|l| l.id == id).cloned().collect();
+            if let Some(first) = mine.first() {
+                let file = first.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let toast = adw::Toast::builder().title(format!("{} is installed. Its download, {file}, is still there.", first.name)).button_label("Delete…").timeout(12).build();
+                let u2 = u.clone();
+                toast.connect_button_clicked(move |_| u2.confirm_delete_leftovers(mine.clone()));
+                u.toasts.add_toast(toast);
+            }
+        });
+    }
+
+    fn show_leftover_banner(&self) {
+        let found = self.leftovers.borrow();
+        let bytes: u64 = found.iter().map(|l| l.bytes).sum();
+        self.leftover_banner.set_title(&format!("{} {} of installed games take {}", found.len(), if found.len() == 1 { "download" } else { "downloads" }, crate::windows_saves::size_text(bytes)));
+        self.leftover_banner.set_revealed(self.page.get() == Page::Downloads && !found.is_empty() && self.search.text().is_empty());
+    }
+
+    /// The downloads whose game is installed, each with a box: what's ticked is deleted. Ones
+    /// Lobby can't say where to get again start unticked.
+    fn clean_up(self: &Rc<Self>) {
+        use crate::leftovers::Again;
+        let found = self.leftovers.borrow().clone();
+        let no_trash = found.iter().any(|l| !l.trash);
+        let group = adw::PreferencesGroup::builder()
+            .description(format!(
+                "Archives, installers and repacks whose game is installed: the games stay as they are. Ones Lobby doesn't know where to get again start unticked.{}",
+                if no_trash { " Ones marked \"no Trash\" are on a drive without a Trash: deleting them is for good." } else { "" }
+            ))
+            .build();
+        let delete = gtk::Button::builder().label("Delete").build();
+        delete.add_css_class("destructive-action");
+        let ticks: Rc<RefCell<Vec<(gtk::CheckButton, crate::leftovers::Leftover)>>> = Rc::default();
+        let update = {
+            let (ticks, delete) = (ticks.clone(), delete.clone());
+            move || {
+                let chosen: Vec<u64> = ticks.borrow().iter().filter(|(c, _)| c.is_active()).map(|(_, l)| l.bytes).collect();
+                delete.set_label(&if chosen.is_empty() { "Delete".to_string() } else { format!("Delete {} ({})", chosen.len(), crate::windows_saves::size_text(chosen.iter().sum())) });
+                delete.set_sensitive(!chosen.is_empty());
+            }
+        };
+        for l in found {
+            let file = l.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let gone_for_good = if l.trash { "" } else { " · no Trash" };
+            let row = adw::ActionRow::builder().title(&l.name).subtitle(format!("{file} · {} · {}{gone_for_good}", crate::windows_saves::size_text(l.bytes), l.again.describe())).subtitle_lines(0).use_markup(false).build();
+            let check = gtk::CheckButton::builder().active(l.again != Again::Unknown).valign(gtk::Align::Center).build();
+            row.add_prefix(&check);
+            row.set_activatable_widget(Some(&check));
+            if let Some(url) = l.again.url().map(str::to_string) {
+                let open = gtk::Button::builder().icon_name("adw-external-link-symbolic").tooltip_text("Open where it can be downloaded again").valign(gtk::Align::Center).build();
+                open.add_css_class("flat");
+                let w = self.window.clone();
+                open.connect_clicked(move |_| gtk::UriLauncher::new(&url).launch(Some(&w), gio::Cancellable::NONE, |_| {}));
+                row.add_suffix(&open);
+            }
+            let up = update.clone();
+            check.connect_toggled(move |_| up());
+            ticks.borrow_mut().push((check, l));
+            group.add(&row);
+        }
+        update();
+        let page = adw::PreferencesPage::new();
+        page.add(&group);
+        let header = adw::HeaderBar::new();
+        header.pack_end(&delete);
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&header);
+        view.set_content(Some(&page));
+        let dialog = adw::Dialog::builder().title("Downloads of installed games").content_width(680).content_height(640).child(&view).build();
+        let (u, d) = (self.clone(), dialog.clone());
+        delete.connect_clicked(move |_| {
+            let chosen: Vec<_> = ticks.borrow().iter().filter(|(c, _)| c.is_active()).map(|(_, l)| l.clone()).collect();
+            d.close();
+            u.confirm_delete_leftovers(chosen);
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    /// Asks, saying what's deleted for good (drives without a Trash), then deletes and looks
+    /// again.
+    fn confirm_delete_leftovers(self: &Rc<Self>, chosen: Vec<crate::leftovers::Leftover>) {
+        if chosen.is_empty() {
+            return;
+        }
+        let bytes: u64 = chosen.iter().map(|l| l.bytes).sum();
+        let for_good = chosen.iter().filter(|l| !l.trash).count();
+        let heading = match chosen.as_slice() {
+            [one] => format!("Delete the download of {}?", one.name),
+            more => format!("Delete {} downloads?", more.len()),
+        };
+        let trash = match (for_good, chosen.len()) {
+            (0, 1) => "It goes to the Trash.".to_string(),
+            (0, _) => "They go to the Trash.".to_string(),
+            (1, 1) => "It's deleted for good: its drive has no Trash.".to_string(),
+            (f, n) if f == n => "They're deleted for good: their drive has no Trash.".to_string(),
+            (f, _) => format!("{f} of them are deleted for good (their drive has no Trash); the others go to the Trash."),
+        };
+        let dialog = adw::AlertDialog::new(Some(&heading), Some(&format!("This frees {}. The {} stay installed. {trash}", crate::windows_saves::size_text(bytes), if chosen.len() == 1 { "game" } else { "games" })));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_close_response("cancel");
+        let u = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response != "delete" {
+                return;
+            }
+            let (u, chosen) = (u.clone(), chosen.clone());
+            glib::spawn_future_local(async move {
+                let errors = gio::spawn_blocking(move || {
+                    let games = Library::load().map(|l| l.games).unwrap_or_default();
+                    chosen.iter().filter_map(|l| crate::leftovers::delete(&l.path, &games).err()).collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_else(|_| vec!["It stopped with an error.".into()]);
+                if errors.is_empty() {
+                    u.toast(&format!("{} freed.", crate::windows_saves::size_text(bytes)));
+                } else {
+                    u.alert("Some downloads couldn't be deleted", &errors.join("\n"));
+                }
+                u.rescan();
+            });
+        });
+        dialog.present(Some(&self.window));
+    }
+
     fn toast(&self, text: &str) {
         self.toasts.add_toast(adw::Toast::builder().title(text).timeout(4).build());
     }
@@ -1301,6 +1462,7 @@ impl Ui {
                     let played = games.clone();
                     gio::spawn_blocking(move || crate::playtime::take_in(&played)).await.ok();
                     u.fill();
+                    u.find_leftovers();
                     // Lutris's, Faugus's and Steam shortcuts' games become Lobby's own (shown as
                     // such after a rescan), and app-menu entries start games as Play does.
                     let taking = games.clone();
@@ -1432,6 +1594,7 @@ impl Ui {
                     }
                     if done.entry.is_some() {
                         u.just_installed.replace(Some((game.id.clone(), None)));
+                        u.offer_leftover.replace(Some(game.id.clone()));
                     }
                     u.rescan();
                 }
@@ -1460,6 +1623,21 @@ impl Ui {
             Err(why) => row.set_subtitle(&why),
         }
         group.add(&row);
+        // The download it came from, still on the drive.
+        for l in self.leftovers.borrow().iter().filter(|l| l.id == game.id) {
+            let gone_for_good = if l.trash { "" } else { " · its drive has no Trash: deleting is for good" };
+            let row = adw::ActionRow::builder().title("Its download").subtitle(format!("{} · {} · {}{gone_for_good}", l.path.display(), crate::windows_saves::size_text(l.bytes), l.again.describe())).subtitle_lines(0).use_markup(false).build();
+            let button = gtk::Button::builder().label("Delete…").valign(gtk::Align::Center).tooltip_text("The game stays installed").build();
+            let (u, l, page) = (self.clone(), l.clone(), page.clone());
+            button.connect_clicked(move |_| {
+                if let Some(d) = page.borrow().as_ref() {
+                    d.close();
+                }
+                u.confirm_delete_leftovers(vec![l.clone()]);
+            });
+            row.add_suffix(&button);
+            group.add(&row);
+        }
         group
     }
 
