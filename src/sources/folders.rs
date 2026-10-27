@@ -426,6 +426,10 @@ fn reads_like_title(name: &str) -> bool {
 /// `DoubleDown.exe`).
 fn title(root: &Path, scanned: &str, program: Option<&Path>) -> String {
     let folder = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // A MyAbandonware download unpacked ("Bookworm-Deluxe_Win_EN_ISO").
+    if let Some(name) = (scanned == folder).then(|| super::downloads::myabandonware_name(&folder)).flatten() {
+        return name;
+    }
     if scanned != folder || reads_like_title(&folder) {
         return scanned.to_string();
     }

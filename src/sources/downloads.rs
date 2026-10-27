@@ -124,11 +124,53 @@ fn game_disc(names: &[String]) -> bool {
     })
 }
 
+/// MyAbandonware's naming, for a file or folder: `Title-With-Dashes_Platform_Language[_…]`
+/// (`Black-White_Win_EN_ISO-Version.zip`, `Pac-Man_PC-88_EN.zip`, `SimAnt_Win-3x_EN_…`): the
+/// title (dashes as spaces; "Sorcerer s Stone" is "Sorcerer's Stone") and the platform as
+/// people say it ("Windows", "Windows 3.x", "DOS", "Commodore 64").
+pub fn myabandonware(name: &str) -> Option<(String, String)> {
+    let lower = name.to_lowercase();
+    let stem = [".tar.gz", ".zip", ".rar", ".7z", ".iso", ".exe"].iter().find(|e| lower.ends_with(*e)).map_or(name, |e| &name[..name.len() - e.len()]);
+    let parts: Vec<&str> = stem.split('_').collect();
+    let (title, platform, language) = (parts.first()?, parts.get(1)?, parts.get(2)?);
+    let platform_like = platform.chars().next().is_some_and(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && platform.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    let language_like = language.split('-').all(|l| l.len() == 2 && l.chars().all(|c| c.is_ascii_uppercase()));
+    if title.is_empty() || !platform_like || !language_like {
+        return None;
+    }
+    let mut words: Vec<String> = Vec::new();
+    for w in title.split('-').filter(|w| !w.is_empty()) {
+        match words.last_mut() {
+            Some(last) if w == "s" => last.push_str("'s"),
+            _ => words.push(w.to_string()),
+        }
+    }
+    let platform = match *platform {
+        "Win" => "Windows".to_string(),
+        "Win-3x" => "Windows 3.x".to_string(),
+        "C64" => "Commodore 64".to_string(),
+        "Atari-8-bit" => "Atari 8-bit".to_string(),
+        "VIC-20" | "PC-88" | "PC-98" => platform.to_string(),
+        p => p.replace('-', " "),
+    };
+    Some((words.join(" "), platform))
+}
+
+/// A MyAbandonware download's name: its title, with its platform when that isn't Windows
+/// ("Pac-Man (DOS)": one site lists a game once per system).
+pub fn myabandonware_name(name: &str) -> Option<String> {
+    let (title, platform) = myabandonware(name)?;
+    Some(if platform == "Windows" { title } else { format!("{title} ({platform})") })
+}
+
 /// A download's name as a game's: its file name without the extension, copy numbers
 /// ("(1)"), and versions or platforms at the end ("Ghost_Defender", "XCOW 64Bits",
 /// "Dungeon Dash", "corrupted-boundary-win64-prealpha").
 pub fn title(file: &Path) -> String {
     let mut stem = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if let Some(name) = myabandonware_name(&stem) {
+        return name;
+    }
     for ext in [".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".zip", ".rar", ".7z", ".exe", ".iso"] {
         if stem.to_lowercase().ends_with(ext) {
             stem.truncate(stem.len() - ext.len());
@@ -250,6 +292,17 @@ pub fn look(file: &Path, strict: bool) -> Option<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn myabandonware_names() {
+        assert_eq!(title(Path::new("/d/Bookworm-Deluxe_Win_EN_ISO.zip")), "Bookworm Deluxe");
+        assert_eq!(title(Path::new("/d/Pac-Man_DOS_EN.zip")), "Pac Man (DOS)");
+        assert_eq!(title(Path::new("/d/SimAnt_Win-3x_EN_Win3xO-release.zip")), "SimAnt (Windows 3.x)");
+        assert_eq!(title(Path::new("/d/Harry-Potter-and-the-Sorcerer-s-Stone_Win_EN-ES_installer.zip")), "Harry Potter and the Sorcerer's Stone");
+        assert_eq!(title(Path::new("/d/Pac-Man_Atari-8-bit_EN.zip")), "Pac Man (Atari 8-bit)");
+        assert_eq!(myabandonware("NecroLore_Apeirophobia.zip"), None);
+        assert_eq!(myabandonware("Project_P.I.T.T_DEMO_v0.2.8.1_linux.zip"), None);
+    }
 
     #[test]
     fn titles() {

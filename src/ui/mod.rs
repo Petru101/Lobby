@@ -3612,7 +3612,9 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
         }
     }
 
-    let name = gtk::Label::builder().label(&g.name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).hexpand(true).build();
+    // Up to two lines before it's cut ("A Game About Feeding A Black Hole"); the whole name
+    // is the card's tooltip.
+    let name = gtk::Label::builder().label(&g.name).xalign(0.0).yalign(0.0).wrap(true).wrap_mode(gtk::pango::WrapMode::WordChar).lines(2).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).hexpand(true).build();
     name.add_css_class("card-name");
     let from = gtk::Label::builder().label(origin(g)).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(1).hexpand(true).build();
     from.add_css_class("dim-label");
@@ -3626,7 +3628,9 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     let line = gtk::Box::builder().spacing(6).build();
     line.append(&from);
     line.append(&value);
-    let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).width_request(180).halign(gtk::Align::Center).build();
+    // At the top of its cell: a row's cards are as tall as its tallest (a two-line name), and
+    // the cover must not grow to fill a shorter one's.
+    let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).width_request(180).halign(gtk::Align::Center).valign(gtk::Align::Start).build();
     body.append(&cover);
     body.append(&name);
     body.append(&line);

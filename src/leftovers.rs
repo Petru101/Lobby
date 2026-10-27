@@ -52,21 +52,11 @@ pub struct Leftover {
     pub trash: bool,
 }
 
-/// MyAbandonware's file naming: `Title-With-Dashes_Platform_Language[_Version]`
-/// (`Black-White_Win_EN_ISO-Version.zip`, `Pac-Man_PC-88_EN.zip`,
-/// `Harry-Potter-and-the-Sorcerer-s-Stone_Win_EN-ES_installer`): the search for its title.
+/// A MyAbandonware download (by its naming, `downloads::myabandonware`): the search for its
+/// title there.
 pub fn myabandonware(name: &str) -> Option<String> {
-    let stem = name.split('.').next().unwrap_or(name);
-    let parts: Vec<&str> = stem.split('_').collect();
-    let platform = parts.get(1)?;
-    let language = parts.get(2)?;
-    let platform_like = platform.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && platform.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
-    let language_like = language.split('-').all(|l| l.len() == 2 && l.chars().all(|c| c.is_ascii_uppercase()));
-    if parts[0].is_empty() || !platform_like || !language_like {
-        return None;
-    }
-    let words: Vec<&str> = parts[0].split('-').filter(|w| !w.is_empty()).collect();
-    Some(format!("https://www.myabandonware.com/search/q/{}", words.join("+")))
+    let (title, _) = crate::sources::downloads::myabandonware(name)?;
+    Some(format!("https://www.myabandonware.com/search/q/{}", title.split_whitespace().collect::<Vec<_>>().join("+")))
 }
 
 /// Every download in the library whose game is installed, safe to delete: not the installed
