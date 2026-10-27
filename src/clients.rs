@@ -7,7 +7,8 @@
 //! app. Nothing of another launcher is used (the standing rule).
 //!
 //! A game that ran in another prefix before (Lutris's EA app setup) has its saves brought over
-//! once, by its Ludusavi save paths (`windows_saves::look`).
+//! once, by its Ludusavi save paths (`windows_saves::look`), unless the store keeps them in its
+//! cloud (the app brings those down).
 
 use crate::library::{Game, Source};
 use std::fs;
@@ -23,6 +24,9 @@ pub struct Client {
     program: &'static str,
     /// umu's STORE, for protonfixes.
     store: Option<&'static str>,
+    /// What Ludusavi's manifest calls the app's cloud saves: those games' saves come down from
+    /// it, so local ones aren't brought over.
+    cloud: Option<&'static str>,
     /// Files or folders in a game's folder that say it needs the app (lowercase, relative).
     marks: &'static [&'static str],
 }
@@ -34,6 +38,7 @@ pub const CLIENTS: &[Client] = &[
         url: "https://origin-a.akamaihd.net/EA-Desktop-Client-Download/installer-releases/EAappInstaller.exe",
         program: "Program Files/Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe",
         store: Some("ea"),
+        cloud: Some("origin"),
         marks: &["__installer/installerdata.xml", "core/activation64.dll", "core/activation.dll"],
     },
     Client {
@@ -42,6 +47,7 @@ pub const CLIENTS: &[Client] = &[
         url: "https://static3.cdn.ubi.com/orbit/launcher_installer/UbisoftConnectInstaller.exe",
         program: "Program Files (x86)/Ubisoft/Ubisoft Game Launcher/UbisoftConnect.exe",
         store: Some("ubisoft"),
+        cloud: Some("uplay"),
         marks: &["uplay_install.state", "uplay_r1_loader64.dll", "uplay_r1_loader.dll", "uplay_r2_loader64.dll", "upc_r1_loader64.dll", "upc_r2_loader64.dll"],
     },
     Client {
@@ -50,6 +56,7 @@ pub const CLIENTS: &[Client] = &[
         url: "https://gamedownloads.rockstargames.com/public/installer/Rockstar-Games-Launcher.exe",
         program: "Program Files/Rockstar Games/Launcher/Launcher.exe",
         store: None,
+        cloud: None,
         marks: &["playgtav.exe", "playrdr2.exe", "playgtaiv.exe", "launcherpatcher.exe"],
     },
 ];
@@ -171,6 +178,11 @@ pub fn bring_saves(game: &Game, client: &Client) -> Result<usize, String> {
     let Some(old) = old_prefix(game, client) else { return Ok(0) };
     let index = crate::windows_saves::index();
     let Some(paths) = crate::windows_saves::paths_for(game, &index) else { return Ok(0) };
+    // The store keeps them in its cloud (Mass Effect Andromeda's on EA's): the app brings them
+    // down, and old local copies could be stale (Ferret's tests changed Andromeda's).
+    if client.cloud.is_some_and(|c| paths.cloud.iter().any(|p| p == c)) {
+        return Ok(0);
+    }
     let found = crate::windows_saves::look(paths, &crate::windows_saves::prefix_user(&old), &crate::windows_saves::prefix_user(&client.prefix()));
     let (copied, _) = crate::windows_saves::bring_over(&game.id, &found)?;
     let _ = fs::write(&marker, old.display().to_string());
