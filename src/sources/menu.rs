@@ -75,7 +75,7 @@ fn read(file: &Path) -> Option<Entry> {
     // installed: there it names the installer's folder (Mycopunk's repack in Downloads).
     let path = get("Path").map(PathBuf::from);
     if let Some(root) = get("X-Gamefix-Game").map(PathBuf::from).filter(|r| r.is_absolute() && path.as_ref().is_some_and(|p| p.starts_with(r))) {
-        e.folder = Some(root);
+        e.folder = Some(game_root(&root, path.as_deref().unwrap_or(&root)));
     }
     // Wine's entries: `env WINEPREFIX="/path" wine C:\\...\\game.exe`, or with the whole
     // `"WINEPREFIX=/a path"` quoted (gamefix's): the command's own words, as the desktop-entry
@@ -83,4 +83,28 @@ fn read(file: &Path) -> Option<Entry> {
     let words = crate::launch::desktop_exec(&text).map(|(w, _)| w).unwrap_or_default();
     e.prefix = words.iter().find_map(|w| w.strip_prefix("WINEPREFIX=")).filter(|p| p.starts_with('/')).map(PathBuf::from);
     Some(e)
+}
+
+/// The game's own folder from what gamefix's entry names: a folder named like a folder of games
+/// or downloads ("Downloaded Games/Games", set up when it was taken for a game called "Games")
+/// isn't one game's, so the folder below it on the way to the program is.
+fn game_root(root: &Path, path: &Path) -> PathBuf {
+    let named = root.file_name().is_some_and(|n| crate::places::games_or_downloads(&n.to_string_lossy()));
+    match path.strip_prefix(root).ok().and_then(|rest| rest.components().next()) {
+        Some(first) if named => root.join(first),
+        _ => root.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_games_folder_isnt_the_games_own() {
+        let p = |s: &str| PathBuf::from(s);
+        assert_eq!(game_root(&p("/d/Downloaded Games/Games"), &p("/d/Downloaded Games/Games/Minecraft Dungeons II/Dungeons/Binaries/WinGDK")), p("/d/Downloaded Games/Games/Minecraft Dungeons II"));
+        assert_eq!(game_root(&p("/g/Woodo"), &p("/g/Woodo/Binaries/Win64")), p("/g/Woodo"));
+        assert_eq!(game_root(&p("/d/Games"), &p("/d/Games")), p("/d/Games"));
+    }
 }

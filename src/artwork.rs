@@ -16,12 +16,19 @@ use std::process::{Command, Stdio};
 /// some stores add to a name ("Anno 1602 A.D." on GOG).
 const EDITION: &[&str] = &["the", "a", "of", "and", "edition", "goty", "game", "year", "definitive", "gold", "platinum", "complete", "collection", "enhanced", "anniversary", "deluxe", "ultimate", "remastered", "director", "directors", "cut", "hd", "classic", "special", "history", "version", "ad"];
 
+/// When the name matching last changed: "not found" from before then is looked up again.
+const MATCHING_CHANGED: u64 = 1_793_094_479;
+
 /// Words that make a search result something other than the game.
 const NOT_THE_GAME: &[&str] = &["soundtrack", "ost", "dlc", "artbook", "pack", "expansion", "season", "pass", "editor", "sdk", "server", "tool", "tools", "demo", "playtest", "bundle", "upgrade", "costume", "skin", "skins"];
 
+/// A sequel's number written either way counts the same: "Minecraft Dungeons 2" is Steam's
+/// "Minecraft Dungeons II" (a lone "I" stays a word: "I Am Bread").
+const ROMAN: &[&str] = &["ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"];
+
 fn words(s: &str) -> Vec<String> {
     let s = s.to_lowercase().replace(['™', '®', '©', '\'', '’', '`', '.'], "").replace('&', " and ");
-    s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect()
+    s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(|w| ROMAN.iter().position(|r| *r == w).map_or_else(|| w.to_string(), |n| (n + 2).to_string())).collect()
 }
 
 fn core(w: &[String]) -> Vec<String> {
@@ -283,7 +290,8 @@ pub fn fill(home: &Home, games: &mut [Game]) {
     let mut cache: HashMap<String, Found> = fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let owned = owned(home);
     let now = crate::store::now();
-    let stale = |f: &Found| f.cover.is_none() && now.saturating_sub(f.when) > 30 * 86_400;
+    // Not found a month ago, or before matching last changed (sequel numbers: Oct 27).
+    let stale = |f: &Found| f.cover.is_none() && (now.saturating_sub(f.when) > 30 * 86_400 || f.when < MATCHING_CHANGED);
 
     // What to look up for each game: its key in the cache, or an owned game's art.
     let mut lookups: Vec<(usize, String)> = Vec::new();
@@ -473,6 +481,10 @@ mod tests {
         assert_eq!(score("Unreal Tournament", "Unreal Tournament 2004: Editor's Choice Edition"), 0);
         assert_eq!(score("Unreal Tournament", "Unreal Tournament: Game of the Year Edition"), 2);
         assert_eq!(score("game", "Game"), 0);
+        assert_eq!(score("Minecraft Dungeons 2", "Minecraft Dungeons II"), 3);
+        assert_eq!(score("Grand Theft Auto 5", "Grand Theft Auto V"), 3);
+        assert_eq!(score("Minecraft Dungeons", "Minecraft Dungeons II"), 0);
+        assert_eq!(score("I Am Bread", "I Am Bread"), 3);
         assert_eq!(score("Hell Pie Demo", "Hell Pie Demo"), 3);
     }
 
