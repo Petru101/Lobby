@@ -223,11 +223,19 @@ fn build_time() -> u64 {
     std::env::current_exe().and_then(fs::metadata).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
 }
 
+/// The unpackers on PATH: an archive is only looked into with one, so installing 7-Zip after a
+/// scan (the window's banner asks for it) starts the cache over, or downloads stay unseen.
+fn unpackers() -> String {
+    ["7z", "unrar", "lsar"].iter().filter(|p| crate::launch::program_on_path(p).is_some()).copied().collect::<Vec<_>>().join(" ")
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct Cache {
     version: u32,
     #[serde(default)]
     build: u64,
+    #[serde(default)]
+    unpackers: String,
     folders: HashMap<String, Looked>,
 }
 
@@ -239,11 +247,11 @@ impl Cache {
 
     fn load() -> Cache {
         let cache: Cache = fs::read_to_string(Self::file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        let build = build_time();
-        if cache.version == CACHE_VERSION && cache.build == build {
+        let (build, unpackers) = (build_time(), unpackers());
+        if cache.version == CACHE_VERSION && cache.build == build && cache.unpackers == unpackers {
             cache
         } else {
-            Cache { version: CACHE_VERSION, build, folders: HashMap::new() }
+            Cache { version: CACHE_VERSION, build, unpackers, folders: HashMap::new() }
         }
     }
 

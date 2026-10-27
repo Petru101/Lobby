@@ -72,6 +72,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby check             what Lobby needs that this computer lacks, and how to install it
        lobby allow-sandbox     on Ubuntu: let lobby make the sandboxes Proton and protection need
                                (an AppArmor profile; sudo asks for your password)
+       lobby open-drives       open the drives holding games that aren't open (after a restart)
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (each scan does)
        lobby import [--dry]    move imported games' Wine setups into Lobby's folders (a link left
@@ -118,6 +119,7 @@ fn main() -> ExitCode {
         (Some("launch-options"), [_, ..]) => launch_options(&args[1], &args[2..].join(" "), args.len() > 2),
         (Some("protection"), [game, level @ ..]) if level.len() <= 1 => protection(game, level.first().copied(), &args),
         (Some("check"), []) => check_system(),
+        (Some("open-drives"), []) => open_drives(),
         (Some("allow-sandbox"), []) => apparmor::allow(true).map(|()| println!("Lobby may start games now: its AppArmor profile is in /etc/apparmor.d/lobby.")),
         // How Play runs a game protected: `lobby sandbox <id> -- <command>`.
         (Some("sandbox"), _) if args.get(2).is_some_and(|a| a == "--") && args.len() > 3 => return in_sandbox(&args[1], &args[3..]),
@@ -1065,4 +1067,24 @@ fn show(lib: &Library, json: bool) {
             println!("  {:width$}  {}", "", g.program().or(g.folder()).map(|p| p.display().to_string()).unwrap_or_default());
         }
     }
+    let closed = drives::closed_with_games(&lib.games);
+    if !closed.is_empty() {
+        println!("\n{}. Open {}: lobby open-drives", drives::closed_text(&closed), if closed.len() == 1 { "it" } else { "them" });
+    }
+}
+
+/// Opens the drives holding saved games that aren't open, then looks again.
+fn open_drives() -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let closed = drives::closed_with_games(&lib.games);
+    if closed.is_empty() {
+        println!("No drive with games on it is closed.");
+        return Ok(());
+    }
+    for (d, _) in &closed {
+        drives::open(d)?;
+        println!("Opened the {} drive.", d.name);
+    }
+    show(&scan()?, false);
+    Ok(())
 }

@@ -311,6 +311,9 @@ struct Ui {
     /// Downloads page's banner offering to clean them up.
     leftovers: RefCell<Vec<crate::leftovers::Leftover>>,
     leftover_banner: adw::Banner,
+    /// Drives holding games that aren't open (`drives::closed_with_games`), and its banner.
+    closed: RefCell<Vec<(crate::drives::Closed, usize)>>,
+    closed_banner: adw::Banner,
     /// What may keep each game's online play from working here (`anticheat::warnings`, after
     /// each scan), for its page.
     online_warnings: RefCell<HashMap<String, Vec<String>>>,
@@ -451,6 +454,8 @@ fn build(app: &adw::Application) {
     toolbar.add_top_bar(&filters);
     let leftover_banner = adw::Banner::builder().button_label("Clean up…").revealed(false).build();
     toolbar.add_top_bar(&leftover_banner);
+    let closed_banner = adw::Banner::builder().button_label("Open").revealed(false).build();
+    toolbar.add_top_bar(&closed_banner);
     // What most games need that this computer lacks (`programs`): Steam, curl, 7-Zip ...
     let missing = crate::programs::missing().into_iter().filter(|p| p.essential).collect::<Vec<_>>();
     let steam = crate::programs::steam_missing();
@@ -466,7 +471,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), asked_apparmor: Cell::new(false) });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), asked_apparmor: Cell::new(false) });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -574,6 +579,8 @@ fn build(app: &adw::Application) {
     rescan_button.connect_clicked(move |_| u.rescan());
     let u = ui.clone();
     ui.leftover_banner.connect_button_clicked(move |_| u.clean_up());
+    let u = ui.clone();
+    closed_banner.connect_button_clicked(move |_| u.open_drives());
     let u = ui.clone();
     missing_banner.connect_button_clicked(move |_| u.explain_missing(&missing, steam.as_deref()));
     // Which games are running, while the window is open (reading /proc: a few ms).
@@ -1347,6 +1354,11 @@ impl Ui {
             let all = games.clone();
             let found = gio::spawn_blocking(move || crate::log::timed("leftovers", || crate::leftovers::find(&games))).await.unwrap_or_default();
             u.leftovers.replace(found);
+            let saved = all.clone();
+            let closed = gio::spawn_blocking(move || crate::log::timed("closed drives", || crate::drives::closed_with_games(&saved))).await.unwrap_or_default();
+            u.closed_banner.set_title(&crate::drives::closed_text(&closed));
+            u.closed_banner.set_revealed(!closed.is_empty());
+            u.closed.replace(closed);
             let warnings = gio::spawn_blocking(move || crate::log::timed("anti-cheat", || crate::anticheat::warnings(&all))).await.unwrap_or_default();
             u.online_warnings.replace(warnings);
             u.show_leftover_banner();
@@ -1359,6 +1371,21 @@ impl Ui {
                 toast.connect_button_clicked(move |_| u2.confirm_delete_leftovers(mine.clone()));
                 u.toasts.add_toast(toast);
             }
+        });
+    }
+
+    /// Opens the drives the banner names (the desktop may ask for the password), then looks
+    /// again: their games come back.
+    fn open_drives(self: &Rc<Self>) {
+        let closed: Vec<_> = self.closed.borrow().iter().map(|(d, _)| d.clone()).collect();
+        self.closed_banner.set_revealed(false);
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let failed: Vec<String> = gio::spawn_blocking(move || closed.iter().filter_map(|d| crate::drives::open(d).err()).collect()).await.unwrap_or_default();
+            for f in failed {
+                u.toasts.add_toast(adw::Toast::builder().title(f).timeout(10).build());
+            }
+            u.rescan();
         });
     }
 

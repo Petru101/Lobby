@@ -2,7 +2,9 @@
 //! holding a Wine prefix or a Steam library's Proton prefixes (Wine needs links, a "c:" link
 //! name and Unix permissions, which those drives don't hold), and a Windows drive mounted
 //! read-only (Windows hibernated or shut down with Fast Startup). Games themselves run fine
-//! from Windows drives, so that alone isn't warned about.
+//! from Windows drives, so that alone isn't warned about. And drives plugged in but not opened
+//! (`Closed`): GNOME opens a second internal drive only when it's clicked in Files, so after a
+//! restart the games on it are gone from the library until it is.
 
 use crate::library::{Game, Key, Kind, Source};
 use std::path::{Path, PathBuf};
@@ -146,6 +148,103 @@ fn has_exe(folder: &Path) -> bool {
     })
 }
 
+/// A drive plugged in but not opened (mounted). The desktop opens a drive into a folder named
+/// after its label (or its UUID when it has none) under /run/media/<user> (Ubuntu before 26.04:
+/// /media/<user>), so a saved game's folder there tells which drive it was on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Closed {
+    pub device: String,
+    /// Its label, else its UUID: the folder it opens into.
+    pub name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Lsblk {
+    blockdevices: Vec<Block>,
+}
+
+#[derive(serde::Deserialize)]
+struct Block {
+    path: String,
+    fstype: Option<String>,
+    mountpoint: Option<String>,
+    label: Option<String>,
+    uuid: Option<String>,
+}
+
+/// The drives with a filesystem that aren't opened.
+fn closed_drives() -> Vec<Closed> {
+    let out = std::process::Command::new("lsblk").args(["-Jlpo", "PATH,FSTYPE,MOUNTPOINT,LABEL,UUID"]).stdin(std::process::Stdio::null()).output();
+    let Some(list) = out.ok().and_then(|o| serde_json::from_slice::<Lsblk>(&o.stdout).ok()) else { return Vec::new() };
+    const NOT_FILES: &[&str] = &["swap", "crypto_LUKS", "LVM2_member", "linux_raid_member", "zfs_member", "iso9660", "squashfs", "erofs"];
+    list.blockdevices
+        .into_iter()
+        .filter(|b| b.mountpoint.is_none() && b.fstype.as_deref().is_some_and(|f| !NOT_FILES.contains(&f)))
+        .filter_map(|b| Some(Closed { name: b.label.filter(|l| !l.is_empty()).or(b.uuid)?, device: b.path }))
+        .collect()
+}
+
+/// The closed drives the paths are on, each with how many of the paths are.
+fn holding<'a>(paths: &[&Path], user: &str, drives: &'a [Closed]) -> Vec<(&'a Closed, usize)> {
+    let mut out: Vec<(&Closed, usize)> = Vec::new();
+    for path in paths {
+        let name = ["/run/media", "/media"].iter().find_map(|m| path.strip_prefix(Path::new(m).join(user)).ok()?.components().next());
+        let Some(d) = name.and_then(|n| drives.iter().find(|d| n.as_os_str() == d.name.as_str())) else { continue };
+        match out.iter_mut().find(|(o, _)| *o == d) {
+            Some((_, n)) => *n += 1,
+            None => out.push((d, 1)),
+        }
+    }
+    out
+}
+
+/// The closed drives holding saved games (gone from the library until they're opened), with how
+/// many each holds, and those holding a Steam library Steam lists (none of its games saved yet:
+/// Lobby's first start, 0).
+pub fn closed_with_games(games: &[Game]) -> Vec<(Closed, usize)> {
+    let drives = closed_drives();
+    if drives.is_empty() {
+        return Vec::new();
+    }
+    let Some(home) = crate::sources::Home::find() else { return Vec::new() };
+    let folders: Vec<&Path> = games.iter().filter(|g| g.gone && !g.hidden).filter_map(|g| g.folder().or(g.program())).collect();
+    let mut out: Vec<(Closed, usize)> = holding(&folders, &home.user, &drives).into_iter().map(|(d, n)| (d.clone(), n)).collect();
+    let libraries = crate::sources::steam::known_libraries(&home);
+    let libraries: Vec<&Path> = libraries.iter().map(PathBuf::as_path).collect();
+    for (d, _) in holding(&libraries, &home.user, &drives) {
+        if !out.iter().any(|(o, _)| o == d) {
+            out.push((d.clone(), 0));
+        }
+    }
+    out
+}
+
+/// "2 games are on the Games drive, which isn't open", for `closed_with_games`' drives.
+pub fn closed_text(closed: &[(Closed, usize)]) -> String {
+    let names: Vec<&str> = closed.iter().map(|(d, _)| d.name.as_str()).collect();
+    let drives = match names.split_last() {
+        Some((last, [])) => format!("the {last} drive, which isn't"),
+        Some((last, rest)) => format!("the {} and {last} drives, which aren't", rest.join(", ")),
+        None => return String::new(),
+    };
+    match closed.iter().map(|(_, n)| n).sum::<usize>() {
+        0 => format!("Games may be on {drives} open"),
+        1 => format!("1 game is on {drives} open"),
+        n => format!("{n} games are on {drives} open"),
+    }
+}
+
+/// Opens the drive as Files does (udisks: the desktop asks for the password when it needs one),
+/// into /run/media/<user>/<name>.
+pub fn open(drive: &Closed) -> Result<(), String> {
+    let out = std::process::Command::new("udisksctl").args(["mount", "-b", &drive.device]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("udisksctl: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    Err(format!("The {} drive didn't open: {}", drive.name, err.lines().last().unwrap_or("").trim()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +263,18 @@ mod tests {
         assert!(m[2].read_only && m[2].windows_format());
         assert_eq!(m[2].name(), "the My Storage drive");
                 assert!(!m[3].read_only);
+    }
+
+    #[test]
+    fn finds_the_closed_drive_a_folder_was_on() {
+        let drives = [Closed { device: "/dev/vdb1".into(), name: "Games".into() }, Closed { device: "/dev/sda1".into(), name: "My USB".into() }];
+        let paths = [Path::new("/run/media/p/Games/Games/A/a.exe"), Path::new("/media/p/Games/SteamLibrary"), Path::new("/run/media/p/My USB/B"), Path::new("/run/media/p/Storage/C"), Path::new("/home/p/Games/D"), Path::new("/run/media/q/Games/E")];
+        let found = holding(&paths, "p", &drives);
+        assert_eq!(found, vec![(&drives[0], 2), (&drives[1], 1)]);
+        let closed: Vec<(Closed, usize)> = found.into_iter().map(|(d, n)| (d.clone(), n)).collect();
+        assert_eq!(closed_text(&closed), "3 games are on the Games and My USB drives, which aren't open");
+        assert_eq!(closed_text(&closed[..1]), "2 games are on the Games drive, which isn't open");
+        assert_eq!(closed_text(&[(closed[0].0.clone(), 0)]), "Games may be on the Games drive, which isn't open");
     }
 
     #[test]

@@ -19,7 +19,7 @@ pub struct Program {
 const PROGRAMS: &[Program] = &[
     Program { name: "curl", commands: &["curl"], what: "downloads covers, store games, Proton and umu", essential: true, packages: ["curl"; 4] },
     Program { name: "Python 3", commands: &["python3"], what: "runs umu, which starts Windows games (this system has no umu-launcher of its own)", essential: true, packages: ["python3", "python3", "python", "python3"] },
-    Program { name: "7-Zip", commands: &["7z", "7za", "7zz"], what: "unpacks downloads, installers and disc images", essential: true, packages: ["7zip"; 4] },
+    Program { name: "7-Zip", commands: &["7z"], what: "unpacks downloads, installers and disc images", essential: true, packages: ["7zip"; 4] },
     Program { name: "bubblewrap", commands: &["bwrap"], what: "protects your files from the games (their sandbox)", essential: true, packages: ["bubblewrap"; 4] },
     Program { name: "xdg-dbus-proxy", commands: &["xdg-dbus-proxy"], what: "lets protected games show notifications and keep the screen on", essential: false, packages: ["xdg-dbus-proxy"; 4] },
     Program { name: "unrar", commands: &["unrar"], what: "unpacks .rar downloads", essential: false, packages: ["unrar"; 4] },
