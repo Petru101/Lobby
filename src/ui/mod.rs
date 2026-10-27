@@ -2862,7 +2862,7 @@ impl Ui {
         cover.set_valign(gtk::Align::Start);
         let name = gtk::Label::builder().label(&game.name).wrap(true).xalign(0.0).build();
         name.add_css_class("title-1");
-        let found = gtk::Label::builder().label(format!("Found in: {}", game.sources().iter().map(|s| s.label()).collect::<Vec<_>>().join(", "))).wrap(true).xalign(0.0).build();
+        let found = gtk::Label::builder().label(format!("Found in: {}", game.found_in())).wrap(true).xalign(0.0).build();
         found.add_css_class("dim-label");
 
         // The page's dialog, for buttons made before it is.

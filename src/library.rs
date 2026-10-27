@@ -221,6 +221,18 @@ impl Game {
         s
     }
 
+    /// Where it was found, for people: "gamefix, app menu, folder (cover found online)". The
+    /// online cover isn't a place the game is, so it comes last, in brackets.
+    pub fn found_in(&self) -> String {
+        let places: Vec<&str> = self.sources().into_iter().filter(|s| *s != Source::Artwork).map(|s| s.label()).collect();
+        let cover = self.entries.iter().any(|e| e.source == Source::Artwork);
+        match (places.is_empty(), cover) {
+            (true, true) => Source::Artwork.label().to_string(),
+            (false, true) => format!("{} ({})", places.join(", "), Source::Artwork.label()),
+            _ => places.join(", "),
+        }
+    }
+
     /// Only found by looking through folders: no launcher knows it.
     /// No launcher but lobby (and gamefix, built into it) knows the game: found in a folder or
     /// a Windows setup, and maybe set up by gamefix since.

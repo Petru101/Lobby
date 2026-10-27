@@ -739,7 +739,7 @@ fn accounts() -> Result<(), String> {
 }
 
 fn where_found(g: &Game) -> String {
-    g.sources().iter().map(|s| s.label()).collect::<Vec<_>>().join(", ")
+    g.found_in()
 }
 
 fn show(lib: &Library, json: bool) {
