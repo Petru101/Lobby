@@ -204,8 +204,11 @@ fn sentences(listed: Option<(&str, &[String])>, shipped: Option<&str>, online_on
         // Supported or Running: works.
         Some(_) => {}
         None => {
-            if let Some(ac) = shipped {
+            // Only these two have Linux builds a game's makers can turn on.
+            if let Some(ac) = shipped.filter(|ac| ["Easy Anti-Cheat", "BattlEye"].contains(ac)) {
                 lines.push(format!("It ships {ac}, which works on Linux only for games whose makers allow it; AreWeAntiCheatYet doesn't say for this one."));
+            } else if let Some(ac) = shipped {
+                lines.push(format!("It ships {ac}, which doesn't run on Linux: its online play likely won't work here."));
             }
         }
     }
@@ -228,7 +231,8 @@ mod tests {
         let eac = vec!["Easy Anti-Cheat".to_string()];
         assert!(sentences(Some(("Denied", &eac)), None, false)[0].starts_with("Easy Anti-Cheat: its makers don't allow it"));
         assert!(sentences(Some(("Supported", &eac)), Some("Easy Anti-Cheat"), false).is_empty());
-        assert!(sentences(None, Some("BattlEye"), false)[0].starts_with("It ships BattlEye"));
+        assert!(sentences(None, Some("BattlEye"), false)[0].contains("only for games whose makers allow it"));
+        assert!(sentences(None, Some("PunkBuster"), false)[0].contains("doesn't run on Linux"));
         assert_eq!(sentences(None, None, true).len(), 1);
     }
 
