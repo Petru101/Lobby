@@ -109,6 +109,9 @@ pub fn move_game(game: &Game, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec
         return Err(format!("{} isn't a folder.", into.display()));
     }
     let to = target(&plan, &into).ok_or("no folder name")?;
+    if real(&to) == real(&plan.from) {
+        return Err(format!("It's already in {}.", into.display()));
+    }
     if to.exists() {
         return Err(format!("There's already a {} there.", to.display()));
     }

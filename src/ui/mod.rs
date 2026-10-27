@@ -1683,7 +1683,7 @@ impl Ui {
         let u = self.clone();
         glib::spawn_future_local(async move {
             let from = plan.from.clone();
-            let (choices, (_, bytes)) = gio::spawn_blocking(move || (move_choices(&from), crate::moving::measure(&from))).await.unwrap_or_default();
+            let (choices, (_, bytes)) = gio::spawn_blocking(move || (move_choices(), crate::moving::measure(&from))).await.unwrap_or_default();
             let windows = if plan.prefix { " It lives in its Windows setup (Wine prefix), which Proton needs on a Linux-format drive, so Windows-format ones are greyed out." } else { "" };
             let group = adw::PreferencesGroup::builder().description(format!("{} takes {}. It goes into a folder of its own name in the folder you pick.{windows}", game.name, crate::windows_saves::size_text(bytes))).build();
             let page = adw::PreferencesPage::new();
@@ -1693,10 +1693,13 @@ impl Ui {
             view.set_content(Some(&page));
             let dialog = adw::Dialog::builder().title(format!("Move {}", game.name)).content_width(560).content_height(460).child(&view).build();
             for (title, folder, free, windows) in choices {
-                let row = adw::ActionRow::builder().title(&title).subtitle(format!("{} · {} free{}", folder.display(), crate::windows_saves::size_text(free), if windows { " · Windows format" } else { "" })).activatable(true).use_markup(false).build();
+                // Where it already is: listed, so the drive isn't missing, but not a choice.
+                let here = plan.from.parent().map(crate::library::norm) == Some(crate::library::norm(&folder));
+                let room = if here { "it's here now".to_string() } else { format!("{} free", crate::windows_saves::size_text(free)) };
+                let row = adw::ActionRow::builder().title(&title).subtitle(format!("{} · {room}{}", folder.display(), if windows { " · Windows format" } else { "" })).activatable(true).use_markup(false).build();
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
                 let tight = free < bytes + bytes / 50 + (100 << 20) && !plan.from.starts_with(&folder);
-                row.set_sensitive(!tight && !(windows && plan.prefix));
+                row.set_sensitive(!here && !tight && !(windows && plan.prefix));
                 let (u, d, id) = (u.clone(), dialog.clone(), game.id.clone());
                 row.connect_activated(move |_| {
                     d.close();
@@ -3953,7 +3956,7 @@ fn find_type<T: IsA<gtk::Widget>>(w: &gtk::Widget) -> Option<T> {
 
 /// Where a game can go: each drive's games folder (its Games, else its top), and Lobby's games
 /// folder at home; with the free room there and whether it's a Windows-format drive.
-fn move_choices(from: &Path) -> Vec<(String, std::path::PathBuf, u64, bool)> {
+fn move_choices() -> Vec<(String, std::path::PathBuf, u64, bool)> {
     let user = std::env::var("USER").unwrap_or_default();
     let mounts = crate::drives::mounts();
     let mut out = Vec::new();
@@ -3979,7 +3982,5 @@ fn move_choices(from: &Path) -> Vec<(String, std::path::PathBuf, u64, bool)> {
             out.push(("gamefix's games folder".to_string(), gamefix.clone(), free, windows(&gamefix)));
         }
     }
-    // Not where it already is.
-    out.retain(|(_, f, ..)| from.parent().map(crate::library::norm) != Some(crate::library::norm(f)));
     out
 }
