@@ -61,7 +61,8 @@ pub fn plan(game: &Game) -> Plan {
     if let Some(p) = game.entries.iter().filter(|e| is_gamefix_entry(e)).find_map(desktop_plan) {
         return p;
     }
-    if let Some((runner, app)) = keys().find_map(|k| if let Key::Heroic(r, a) = k { Some((r, a)) } else { None }) {
+    // Handed to another launcher only while it's installed: Lobby keeps working without them.
+    if let Some((runner, app)) = keys().find_map(|k| if let Key::Heroic(r, a) = k { Some((r, a)) } else { None }).filter(|_| launcher_installed("heroic", "com.heroicgameslauncher.hgl")) {
         return run("Heroic", vec!["xdg-open".into(), format!("heroic://launch?appName={app}&runner={runner}")], None);
     }
     // A game Lobby took over from Lutris, Faugus or a Steam shortcut: as Lobby recorded it.
@@ -74,10 +75,10 @@ pub fn plan(game: &Game) -> Plan {
     if let Some((_, from, command, cwd)) = launcher_command(game) {
         return own(&format!("Lobby, as {from} set it up"), command, cwd);
     }
-    if let Some(id) = keys().find_map(|k| if let Key::Lutris(id) = k { Some(*id) } else { None }) {
+    if let Some(id) = keys().find_map(|k| if let Key::Lutris(id) = k { Some(*id) } else { None }).filter(|_| launcher_installed("lutris", "net.lutris.Lutris")) {
         return run("Lutris", vec!["lutris".into(), format!("lutris:rungameid/{id}")], None);
     }
-    if let Some(id) = keys().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }) {
+    if let Some(id) = keys().find_map(|k| if let Key::Faugus(id) = k { Some(id.clone()) } else { None }).filter(|_| launcher_installed("faugus-launcher", "io.github.Faugus.faugus-launcher")) {
         let native = program_on_path("faugus-launcher");
         let command = match native {
             Some(p) => vec![p.display().to_string(), "--game".into(), id],
@@ -133,6 +134,12 @@ pub fn hands_over(command: &[String]) -> Option<String> {
         return Some("It hands the game to another program, which starts it outside Lobby's protection.".into());
     }
     None
+}
+
+/// Another launcher is installed: its program, or its flatpak (the user's or the system's).
+fn launcher_installed(program: &str, flatpak: &str) -> bool {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    program_on_path(program).is_some() || [home.join(".local/share/flatpak/app").join(flatpak), Path::new("/var/lib/flatpak/app").join(flatpak)].iter().any(|d| d.is_dir())
 }
 
 fn run(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
@@ -797,10 +804,19 @@ mod tests {
 
     #[test]
     fn launchers_by_their_ids() {
+        // Handed over only while the launcher is installed (not in the build's sandbox).
         let heroic = game(vec![with_key(Source::Gog, Key::Heroic("gog".into(), "1207658750".into()))]);
-        assert_eq!(plan(&heroic), run("Heroic", vec!["xdg-open".into(), "heroic://launch?appName=1207658750&runner=gog".into()], None));
+        if launcher_installed("heroic", "com.heroicgameslauncher.hgl") {
+            assert_eq!(plan(&heroic), run("Heroic", vec!["xdg-open".into(), "heroic://launch?appName=1207658750&runner=gog".into()], None));
+        } else {
+            assert!(matches!(plan(&heroic), Plan::Cannot(_)));
+        }
         let lutris = game(vec![with_key(Source::SteamShortcut, Key::SteamShortcut(3847822183)), with_key(Source::Lutris, Key::Lutris(2))]);
-        assert_eq!(plan(&lutris), run("Lutris", vec!["lutris".into(), "lutris:rungameid/2".into()], None));
+        if launcher_installed("lutris", "net.lutris.Lutris") {
+            assert_eq!(plan(&lutris), run("Lutris", vec!["lutris".into(), "lutris:rungameid/2".into()], None));
+        } else {
+            assert_eq!(plan(&lutris), run("Steam (non-Steam game)", vec!["steam".into(), "steam://rungameid/16526270436841881600".into()], None));
+        }
         let shortcut = game(vec![with_key(Source::SteamShortcut, Key::SteamShortcut(3847822183))]);
         assert_eq!(plan(&shortcut), run("Steam (non-Steam game)", vec!["steam".into(), "steam://rungameid/16526270436841881600".into()], None));
     }
