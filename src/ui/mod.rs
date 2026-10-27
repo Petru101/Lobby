@@ -3067,7 +3067,7 @@ impl Ui {
     /// Show frame rate on a game's page: MangoHud's overlay when Lobby starts it.
     fn frame_rate_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
         let unsupported = launch::frame_rate_unsupported(plan);
-        let help = unsupported.clone().unwrap_or_else(|| "MangoHud's overlay in the corner: frames per second, frame times, CPU and GPU load. Right Shift+F12 hides it while playing. When Lobby starts the game (Play), not its app-menu shortcut.".into());
+        let help = unsupported.clone().unwrap_or_else(|| "MangoHud's overlay in the corner: frames per second, frame times, CPU and GPU load. Right Shift+F12 hides it while playing. From Play, and from its app-menu and desktop shortcuts.".into());
         let group = adw::PreferencesGroup::new();
         let row = adw::SwitchRow::builder().title("Show frame rate").subtitle(&help).subtitle_lines(0).active(game.frame_rate).sensitive(unsupported.is_none() || game.frame_rate).build();
         let (u, id) = (self.clone(), game.id.clone());
@@ -3089,7 +3089,7 @@ impl Ui {
     /// Launch options on a game's page: what's added to its command when Lobby starts it.
     fn options_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
         let unsupported = launch::options_unsupported(plan);
-        let help = unsupported.clone().unwrap_or_else(|| "Added after the game's program, like -dx11 -windowed. Variables go before %command%: PROTON_LOG=1 %command% -dx11. Used when Lobby starts the game (Play), not by its app-menu shortcut.".into());
+        let help = unsupported.clone().unwrap_or_else(|| "Added after the game's program, like -dx11 -windowed. Variables go before %command%: PROTON_LOG=1 %command% -dx11. Used from Play, and from its app-menu and desktop shortcuts.".into());
         let group = adw::PreferencesGroup::builder().title("Launch options").description(&help).build();
         let row = adw::EntryRow::builder().title("Options").text(game.launch_options.as_deref().unwrap_or_default()).show_apply_button(true).sensitive(unsupported.is_none()).build();
         let (u, id) = (self.clone(), game.id.clone());

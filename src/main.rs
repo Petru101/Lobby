@@ -304,10 +304,23 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
         eprintln!("lobby: no game \"{id}\" in the library: starting it with Standard protection.");
         Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false }
     });
+    // The launch options and frame rate, for Play and the shortcuts alike (Play leaves them to
+    // this). Not Battle.net's: its options are set in Battle.net. A shortcut still starts when
+    // they can't apply.
+    let battle_net = command.iter().any(|w| w.contains("Battle.net.exe"));
+    let command = match launch::add_extras(&game, command.to_vec()) {
+        Ok(c) if !battle_net => c,
+        Ok(_) => command.to_vec(),
+        Err(e) => {
+            eprintln!("lobby: started without its launch options or frame rate: {e}");
+            command.to_vec()
+        }
+    };
+    let command = &command[..];
     let start = store::now();
     let status = sandbox::command(&game, &[], command, None).and_then(|mut s| s.command.stdin(std::process::Stdio::null()).status().map_err(|e| format!("bwrap: {e}")));
     // Timed while it runs: Battle.net's own lifetime isn't a game's.
-    if status.is_ok() && !command.iter().any(|w| w.contains("Battle.net.exe")) {
+    if status.is_ok() && !battle_net {
         playtime::session(id, start, store::now());
     }
     match status {
@@ -520,6 +533,9 @@ fn how(query: &str) -> Result<(), String> {
             println!("{} starts with Battle.net:\n  {}\n  protected: {}", game.name, battlenet::command(&launch).join(" "), sandbox::summary(game));
         }
         launch::Plan::Cannot(why) => println!("{}: {why}", game.name),
+    }
+    if let Some(o) = &game.launch_options {
+        println!("  launch options: {o}");
     }
     if game.frame_rate {
         println!("  frame rate: {}", launch::frame_rate_unsupported(&launch::plan(game)).map_or("shown (MangoHud)".to_string(), |why| format!("can't be shown: {why}")));

@@ -145,12 +145,25 @@ fn own(how: &str, command: Vec<String>, cwd: Option<PathBuf>) -> Plan {
     Plan::Run { how: how.into(), command, cwd, protect }
 }
 
-/// What Play runs for a plan's command: the launch options added, then the sandbox around it
-/// when the command is the game's own.
+/// What Play runs for a plan's command: the sandbox around it when the command is the game's
+/// own, whose `lobby sandbox` adds the launch options and frame rate as it starts (as it does
+/// for the app-menu and desktop shortcuts it wraps); else those added here.
 pub fn final_command(game: &Game, command: Vec<String>, protect: bool) -> Result<Vec<String>, String> {
+    let with_extras = add_extras(game, command.clone())?;
+    if protect {
+        let wrapped = crate::sandbox::wrap(game, command.clone());
+        if wrapped != command {
+            return Ok(wrapped);
+        }
+    }
+    Ok(with_extras)
+}
+
+/// The game's launch options and, when it's on, MangoHud: what Play and its shortcuts add to
+/// its command. An Err says why they can't be (another launcher starts it).
+pub fn add_extras(game: &Game, command: Vec<String>) -> Result<Vec<String>, String> {
     let command = with_options(command, game.launch_options.as_deref())?;
-    let command = if game.frame_rate { with_frame_rate(command)? } else { command };
-    Ok(if protect { crate::sandbox::wrap(game, command) } else { command })
+    if game.frame_rate { with_frame_rate(command) } else { Ok(command) }
 }
 
 /// Why Lobby can't protect the game the way it starts, if it can't.
@@ -786,6 +799,21 @@ mod tests {
         installed.folder = Some("/games/G".into());
         e.folder = Some("/downloads/G".into());
         assert_eq!(plan(&game(vec![e, installed])), Plan::SetUp("/games/G".into()));
+    }
+
+    #[test]
+    fn extras_are_added_once() {
+        let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut g = game(Vec::new());
+        g.launch_options = Some("-dx11".into());
+        let umu = cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/game.exe"]);
+        // Protected: the sandbox step adds them when it starts (shortcuts go through it too).
+        let play = final_command(&g, umu.clone(), true).unwrap();
+        assert_eq!(play[1..4], cmd(&["sandbox", "g", "--"])[..]);
+        assert_eq!(play[4..], umu[..]);
+        assert_eq!(add_extras(&g, umu.clone()).unwrap(), cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/game.exe", "-dx11"]));
+        // Not protected: added here.
+        assert_eq!(final_command(&g, umu.clone(), false).unwrap().last().map(String::as_str), Some("-dx11"));
     }
 
     #[test]
