@@ -1978,7 +1978,7 @@ impl Ui {
         self.toast(&format!("Updating {}…", game.name));
         let u = self.clone();
         glib::spawn_future_local(async move {
-            match u.with_progress(&game.id, "Downloading…", move |p| store.update(&sid, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
+            match u.with_progress(&game.id, "Updating…", move |p| store.update(&sid, p)).await.unwrap_or_else(|| Err("it stopped with an error".into())) {
                 Ok(()) => u.toast(&format!("{} is up to date.", game.name)),
                 Err(e) => u.alert(&format!("{} couldn't be updated", game.name), &e),
             }
