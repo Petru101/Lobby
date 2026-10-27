@@ -3117,7 +3117,7 @@ impl Ui {
     fn protection_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> gtk::Box {
         use crate::sandbox::{self, Level};
         let unsupported = launch::protection_unsupported(plan);
-        let help = unsupported.clone().unwrap_or_else(|| "What the game can reach when Lobby starts it (Play). Its app-menu shortcut doesn't use this yet.".into());
+        let help = unsupported.clone().unwrap_or_else(|| "What the game can reach when it starts: from Play, and from its app-menu and desktop shortcuts too (not from a shortcut in Steam's library).".into());
         let level = sandbox::level(game);
         let group = adw::PreferencesGroup::builder().title("Protection").description(&help).build();
         let names: Vec<&str> = Level::ALL.iter().map(|l| l.name()).collect();
