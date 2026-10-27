@@ -10,9 +10,8 @@ if [ -n "$gamefix" ]; then
     printf '[patch."https://github.com/Petru101/gamefix"]\ngamefix = { path = "%s" }\n' "$gamefix" > "$dir/.cargo/config.toml"
 else
     rm -f "$dir/.cargo/config.toml"
-    gamefix=$dir
 fi
-host-spawn flatpak run --share=network --filesystem="$dir" --filesystem="$gamefix:ro" --filesystem="$HOME/.cargo:create" \
+host-spawn flatpak run --share=network --filesystem="$dir" ${gamefix:+--filesystem="$gamefix:ro"} --filesystem="$HOME/.cargo:create" \
     --command=sh org.gnome.Sdk//50 -c \
     'cd "$0" && PATH=/usr/lib/sdk/rust-stable/bin:$PATH exec cargo "$@"' \
     "$dir" "$@" </dev/null | tr -d '\r'
