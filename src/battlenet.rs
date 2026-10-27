@@ -95,6 +95,8 @@ fn version(name: &str) -> Vec<u32> {
 fn umu(verb: &str) -> Command {
     let mut c = Command::new("umu-run");
     c.env("WINEPREFIX", prefix()).env("PROTONPATH", proton()).env("GAMEID", "umu-0").env("STORE", "battlenet").env("PROTON_VERB", verb);
+    // Typing lags in its sign-in page otherwise, as in the EA app's (`clients::Client::umu`).
+    c.env("WINE_DISABLE_VULKAN_OPWR", "1");
     c
 }
 

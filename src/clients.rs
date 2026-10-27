@@ -101,6 +101,11 @@ impl Client {
             ("PROTONPATH".to_string(), crate::battlenet::newest_proton(&self.prefix())),
             ("GAMEID".to_string(), "umu-0".to_string()),
             ("PROTON_VERB".to_string(), verb.to_string()),
+            // Wine's newer way of showing Vulkan drawing in an X window (OPWR) shows it a frame
+            // late on XWayland: in the app's sign-in page, about 3 letters in 10 appeared only
+            // with the cursor's next blink (~600 ms). Proton turns it off for some Steam games
+            // with the same trouble (noopwrx11); measured: every letter ~60 ms without it.
+            ("WINE_DISABLE_VULKAN_OPWR".to_string(), "1".to_string()),
         ];
         if let Some(s) = self.store {
             env.push(("STORE".into(), s.into()));
