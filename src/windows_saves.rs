@@ -29,7 +29,7 @@ pub struct SavePaths {
     gog: Option<u64>,
     /// Stores whose cloud keeps its saves ("steam", "gog", "epic").
     #[serde(default)]
-    cloud: Vec<String>,
+    pub(crate) cloud: Vec<String>,
     paths: Vec<String>,
     /// Every save path, for the game's save folders here (`save_folders`): its install folder's
     /// (<base>), Windows' shared folders, Linux's; with the system it applies to, if one.
