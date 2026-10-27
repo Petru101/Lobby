@@ -42,6 +42,25 @@ pub fn in_path(path: &str) -> Option<&'static str> {
     path.split(['/', '\\']).find_map(named)
 }
 
+/// Proton's builds of Easy Anti-Cheat and BattlEye for Linux, which Proton's Wine loads from
+/// the folders `PROTON_EAC_RUNTIME` and `PROTON_BATTLEYE_RUNTIME` name. Steam sets them when its
+/// free tools "Proton EasyAntiCheat Runtime" / "Proton BattlEye Runtime" are installed; Lutris
+/// downloads its own copies. Lobby passes whichever is here (Steam's first) to every game it
+/// runs with Proton, as Steam does: without them a game whose anti-cheat works on Linux
+/// doesn't start.
+pub fn runtimes() -> Vec<(&'static str, PathBuf)> {
+    let Some(home) = crate::sources::Home::find() else { return Vec::new() };
+    let steam: Vec<PathBuf> = crate::sources::steam::roots(&home).iter().flat_map(|r| crate::sources::steam::libraries(r)).map(|l| l.join("steamapps/common")).collect();
+    let lutris = [home.join(".local/share/lutris/runtime"), home.join(".var/app/net.lutris.Lutris/data/lutris/runtime")];
+    let find = |steam_name: &str, lutris_name: &str, inside: &str| {
+        steam.iter().map(|c| c.join(steam_name)).chain(lutris.iter().map(|l| l.join(lutris_name))).find(|d| d.join(inside).is_dir())
+    };
+    [("PROTON_EAC_RUNTIME", find("Proton EasyAntiCheat Runtime", "eac_runtime", "v2")), ("PROTON_BATTLEYE_RUNTIME", find("Proton BattlEye Runtime", "battleye_runtime", "v1"))]
+        .into_iter()
+        .filter_map(|(var, dir)| Some((var, dir?)))
+        .collect()
+}
+
 const DEPTH: usize = 5;
 const MAX_ENTRIES: usize = 50_000;
 
@@ -177,14 +196,16 @@ fn sentences(listed: Option<(&str, &[String])>, shipped: Option<&str>, online_on
     let mut lines = Vec::new();
     let named = |acs: &[String]| if acs.is_empty() { shipped.unwrap_or("Its anti-cheat").to_string() } else { acs.join(" and ") };
     match listed {
+        // Easy Anti-Cheat and BattlEye run on Linux (through Proton) for the games whose makers
+        // turned that on: the list says which.
         Some(("Denied", acs)) => lines.push(format!("{}: its makers don't allow it on Linux, so its online play won't work here (AreWeAntiCheatYet).", named(acs))),
-        Some(("Broken", acs)) => lines.push(format!("{} doesn't work on Linux, so its online play likely won't (AreWeAntiCheatYet).", named(acs))),
-        Some(("Planned", acs)) => lines.push(format!("{} doesn't work on Linux yet; its makers plan to allow it (AreWeAntiCheatYet).", named(acs))),
+        Some(("Broken", acs)) => lines.push(format!("{} isn't allowed on Linux for this game, so its online play likely won't work (AreWeAntiCheatYet).", named(acs))),
+        Some(("Planned", acs)) => lines.push(format!("{} isn't allowed on Linux for this game yet; its makers plan to (AreWeAntiCheatYet).", named(acs))),
         // Supported or Running: works.
         Some(_) => {}
         None => {
             if let Some(ac) = shipped {
-                lines.push(format!("It ships {ac}, which often keeps online play from working on Linux."));
+                lines.push(format!("It ships {ac}, which works on Linux only for games whose makers allow it; AreWeAntiCheatYet doesn't say for this one."));
             }
         }
     }

@@ -64,7 +64,7 @@ pub fn after(seconds: u64) -> String {
 /// lines win: Wine prints warnings all along).
 pub fn why(command: &[String], log: &str) -> Option<String> {
     if let Some(ac) = command.iter().find_map(|w| crate::anticheat::in_path(w)) {
-        return Some(format!("It starts through {ac}, which usually doesn't run on Linux."));
+        return Some(format!("It starts through {ac}, which runs on Linux only for games whose makers allow it."));
     }
     let lines: Vec<&str> = log.lines().collect();
     let tail = &lines[lines.len().saturating_sub(400)..];
@@ -72,7 +72,7 @@ pub fn why(command: &[String], log: &str) -> Option<String> {
     for l in tail.iter().rev() {
         if let Some(ac) = ["EasyAntiCheat", "Easy Anti-Cheat", "BattlEye", "BEClient", "EOS_AntiCheat", "AntiCheat"].iter().find(|a| l.contains(**a)) {
             let name = crate::anticheat::named(&ac.replace(' ', "")).unwrap_or("Its anti-cheat");
-            return Some(format!("{name} stopped it: anti-cheat often doesn't run on Linux."));
+            return Some(format!("{name} stopped it: on Linux it runs only for games whose makers allow it."));
         }
     }
     // Wine: `err:module:import_dll Library MSVCP140.dll (which is needed by L"...") not found`.

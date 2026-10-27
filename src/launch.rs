@@ -162,6 +162,7 @@ pub fn final_command(game: &Game, command: Vec<String>, protect: bool) -> Result
 /// The game's launch options and, when it's on, MangoHud: what Play and its shortcuts add to
 /// its command. An Err says why they can't be (another launcher starts it).
 pub fn add_extras(game: &Game, command: Vec<String>) -> Result<Vec<String>, String> {
+    let command = with_runtimes(command, &crate::anticheat::runtimes());
     let command = with_options(command, game.launch_options.as_deref())?;
     if game.frame_rate { with_frame_rate(command) } else { Ok(command) }
 }
@@ -639,6 +640,25 @@ fn flatpak_env(mut command: Vec<String>, vars: &[(String, String)]) -> Vec<Strin
     command
 }
 
+/// A Proton command (umu-run) with Proton's anti-cheat runtimes, as Steam passes them, unless
+/// it names them itself; the user's launch options come after and can change them.
+pub fn with_runtimes(command: Vec<String>, runtimes: &[(&str, PathBuf)]) -> Vec<String> {
+    let umu = command.iter().any(|w| Path::new(w).file_name().is_some_and(|n| n == "umu-run"));
+    let missing: Vec<String> = runtimes.iter().filter(|(var, _)| !command.iter().any(|w| w.starts_with(&format!("{var}=")))).map(|(var, dir)| format!("{var}={}", dir.display())).collect();
+    if !umu || missing.is_empty() {
+        return command;
+    }
+    let mut c = command;
+    if c.first().is_none_or(|w| w != "env") {
+        c.insert(0, "env".into());
+    }
+    let at = 1 + c[1..].iter().take_while(|w| w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))).count();
+    for (i, v) in missing.into_iter().enumerate() {
+        c.insert(at + i, v);
+    }
+    c
+}
+
 /// The command with MangoHud's overlay on (frame rate, frame times, CPU and GPU load), or why
 /// it can't be. Windows games (umu-run: Proton draws with Vulkan through DXVK/VKD3D) and Flatpak
 /// apps get `MANGOHUD=1`, which turns on MangoHud's Vulkan layer (in a Flatpak app, Flathub's
@@ -799,6 +819,15 @@ mod tests {
         installed.folder = Some("/games/G".into());
         e.folder = Some("/downloads/G".into());
         assert_eq!(plan(&game(vec![e, installed])), Plan::SetUp("/games/G".into()));
+    }
+
+    #[test]
+    fn anticheat_runtimes() {
+        let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let rt = [("PROTON_EAC_RUNTIME", PathBuf::from("/rt/eac"))];
+        assert_eq!(with_runtimes(cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/a.exe"]), &rt), cmd(&["env", "WINEPREFIX=/p", "PROTON_EAC_RUNTIME=/rt/eac", "umu-run", "/g/a.exe"]));
+        assert_eq!(with_runtimes(cmd(&["env", "PROTON_EAC_RUNTIME=/mine", "umu-run", "/g/a.exe"]), &rt), cmd(&["env", "PROTON_EAC_RUNTIME=/mine", "umu-run", "/g/a.exe"]));
+        assert_eq!(with_runtimes(cmd(&["/g/game.x86_64"]), &rt), cmd(&["/g/game.x86_64"]));
     }
 
     #[test]

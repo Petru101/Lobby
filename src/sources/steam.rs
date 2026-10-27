@@ -24,7 +24,7 @@ pub(crate) fn roots(home: &Home) -> Vec<PathBuf> {
     roots
 }
 
-fn libraries(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn libraries(root: &Path) -> Vec<PathBuf> {
     let mut out = vec![root.to_path_buf()];
     let text = fs::read_to_string(root.join("steamapps/libraryfolders.vdf")).unwrap_or_default();
     let Ok(doc) = vdf::parse(&text) else { return out };
