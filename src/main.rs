@@ -74,6 +74,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby allow-sandbox     on Ubuntu: let lobby make the sandboxes Proton and protection need
                                (an AppArmor profile; sudo asks for your password)
        lobby add <file>        add a game by the program that starts it (or its installer or archive)
+       lobby self-update       get the newest Lobby (the AppImage replaces itself; the window does it daily)
        lobby open-drives       open the drives holding games that aren't open (after a restart)
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (each scan does)
@@ -133,6 +134,7 @@ fn main() -> ExitCode {
         (Some("protection"), [game, level @ ..]) if level.len() <= 1 => protection(game, level.first().copied(), &args),
         (Some("check"), []) => check_system(),
         (Some("open-drives"), []) => open_drives(),
+        (Some("self-update"), []) => self_update(),
         (Some("add"), [file]) => add_game(std::path::Path::new(file)),
         (Some("allow-sandbox"), []) => apparmor::allow(true).map(|()| println!("Lobby may start games now: its AppArmor profile is in /etc/apparmor.d/lobby.")),
         // How Play runs a game protected: `lobby sandbox <id> -- <command>`.
@@ -1101,6 +1103,24 @@ fn add_game(file: &std::path::Path) -> Result<(), String> {
         Some(g) => println!("Added {} [{}]: lobby play {} starts it.", g.name, g.id, g.id),
         None => println!("Saved, but no game came of it."),
     }
+    Ok(())
+}
+
+/// The newest Lobby, when this one is an AppImage: downloaded and put in its place.
+fn self_update() -> Result<(), String> {
+    if appimage::file().is_none() {
+        return Err("This Lobby isn't the AppImage: update it the way it was installed (a build from source: git pull, then build again).".into());
+    }
+    let Some(update) = appimage::check()? else {
+        println!("Lobby {} is the newest.", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    };
+    if !appimage::can_replace() {
+        return Err(format!("Lobby {} is out, but Lobby can't replace its own file here. Download it: {}", update.version, update.page));
+    }
+    println!("Downloading Lobby {}…", update.version);
+    appimage::install(&update)?;
+    println!("Lobby {} is in place: it starts from the next time Lobby does.", update.version);
     Ok(())
 }
 

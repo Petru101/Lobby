@@ -592,6 +592,7 @@ fn build(app: &adw::Application) {
     ui.leftover_banner.connect_button_clicked(move |_| u.clean_up());
     let u = ui.clone();
     closed_banner.connect_button_clicked(move |_| u.open_drives());
+    ui.self_update();
     let u = ui.clone();
     missing_banner.connect_button_clicked(move |_| u.explain_missing(&missing, steam.as_deref()));
     // Which games are running, while the window is open (reading /proc: a few ms).
@@ -2994,6 +2995,47 @@ impl Ui {
             u.restart();
         });
         false
+    }
+
+    /// Once a day, when Lobby is the AppImage: a newer one from GitHub, downloaded in the
+    /// background and put in place, then a toast to restart into it (or, when Lobby can't
+    /// replace its own file, one to download it). Failures only go to the log.
+    fn self_update(self: &Rc<Self>) {
+        if std::env::var_os("LOBBY_SNAPSHOT").is_some() && std::env::var_os("LOBBY_UPDATE_URL").is_none() {
+            return;
+        }
+        if !crate::appimage::due() {
+            return;
+        }
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let found = gio::spawn_blocking(|| {
+                let update = crate::appimage::check()?;
+                match update {
+                    Some(up) if crate::appimage::can_replace() => crate::appimage::install(&up).map(|()| Some((up, true))),
+                    Some(up) => Ok(Some((up, false))),
+                    None => Ok(None),
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err("it stopped with an error".into()));
+            match found {
+                Ok(Some((up, true))) => {
+                    let toast = adw::Toast::builder().title(format!("Lobby {} is ready", up.version)).button_label("Restart").timeout(0).build();
+                    let u2 = u.clone();
+                    toast.connect_button_clicked(move |_| u2.restart());
+                    u.toasts.add_toast(toast);
+                }
+                Ok(Some((up, false))) => {
+                    let toast = adw::Toast::builder().title(format!("Lobby {} is out", up.version)).button_label("Download").timeout(0).build();
+                    let (w, page) = (u.window.clone(), up.page.clone());
+                    toast.connect_button_clicked(move |_| gtk::UriLauncher::new(&page).launch(Some(&w), gio::Cancellable::NONE, |_| {}));
+                    u.toasts.add_toast(toast);
+                }
+                Ok(None) => {}
+                Err(e) => crate::log::line(&format!("self-update: {e}")),
+            }
+        });
     }
 
     /// Lobby quits and starts again (a second start would only bring this window up).

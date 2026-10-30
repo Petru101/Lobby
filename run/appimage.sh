@@ -129,5 +129,10 @@ EOF
 chmod +x "$appdir/wk/WebKitNetworkProcess"
 
 version=$(grep -m1 '^version' "$dir/Cargo.toml" | cut -d'"' -f2)
-ARCH=x86_64 VERSION=$version appimagetool-x86_64.AppImage --no-appstream "$appdir" "$out/Lobby-x86_64.AppImage"
-ls -la "$out/Lobby-x86_64.AppImage"
+# Update information: Gear Lever, AppImageUpdate and the like update it from GitHub's latest
+# release, fetching only what changed through the .zsync file (attach both to each release).
+# Lobby updates itself from the same releases (appimage.rs).
+cd "$out"
+ARCH=x86_64 VERSION=$version appimagetool-x86_64.AppImage --no-appstream \
+	-u "gh-releases-zsync|Petru101|Lobby|latest|Lobby-x86_64.AppImage.zsync" "$appdir" Lobby-x86_64.AppImage
+ls -la "$out"/Lobby-x86_64.AppImage*
