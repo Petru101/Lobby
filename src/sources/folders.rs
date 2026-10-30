@@ -379,6 +379,7 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
 /// many things share (the home folder, Downloads, a drive's top, a folder Lobby looks into),
 /// which Uninstall must never take for the game's.
 pub fn added(program: &Path, roots: &[PathBuf]) -> Option<Entry> {
+    let program = &library::norm(program);
     if !program.is_file() {
         return None;
     }
@@ -487,6 +488,12 @@ fn reads_like_title(name: &str) -> bool {
 /// `DoubleDown.exe`).
 fn title(root: &Path, scanned: &str, program: Option<&Path>) -> String {
     let folder = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // A packaged game's platform folder (an Unreal build's Windows/): the folder above names it.
+    if scanned == folder && library::platform_folder(&folder) {
+        if let Some(name) = library::above_platform(root) {
+            return name;
+        }
+    }
     // A MyAbandonware download unpacked ("Bookworm-Deluxe_Win_EN_ISO").
     if let Some(name) = (scanned == folder).then(|| super::downloads::myabandonware_name(&folder)).flatten() {
         return name;
@@ -589,6 +596,10 @@ mod tests {
         let e = added(&dir.join("Games/Moon_Garden_v1.2_win.zip"), &roots).unwrap();
         assert_eq!(e.kind, Kind::Download);
         assert!(added(&dir.join("Games/gone.exe"), &roots).is_none());
+        // An Unreal build's platform folder: named by the folder above.
+        fs::create_dir_all(dir.join("Game49-Win64/Windows")).unwrap();
+        fs::write(dir.join("Game49-Win64/Windows/NewGame.exe"), "").unwrap();
+        assert_eq!(added(&dir.join("Game49-Win64/Windows/NewGame.exe"), &roots).unwrap().name, "Game49");
         fs::remove_dir_all(&dir).unwrap();
     }
 

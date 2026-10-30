@@ -1077,7 +1077,7 @@ fn show(lib: &Library, json: bool) {
 
 /// Adds a game by its program, then looks again and says what it became.
 fn add_game(file: &std::path::Path) -> Result<(), String> {
-    let file = std::fs::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let file = std::fs::canonicalize(file).map(|f| library::norm(&f)).map_err(|e| format!("{}: {e}", file.display()))?;
     if !file.is_file() {
         return Err(format!("{} isn't a file: pick the program that starts the game", file.display()));
     }

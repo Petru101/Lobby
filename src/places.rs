@@ -51,7 +51,7 @@ impl Places {
 
     /// Adds a game by its program (not twice).
     pub fn add_program(&mut self, program: &Path) {
-        let program = program.to_path_buf();
+        let program = crate::library::norm(program);
         if !self.programs.contains(&program) {
             self.programs.push(program);
         }

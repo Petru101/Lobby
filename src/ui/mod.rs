@@ -2253,7 +2253,7 @@ impl Ui {
     fn add_games(self: &Rc<Self>, programs: &[std::path::PathBuf]) {
         let mut places = crate::places::Places::load();
         for p in programs {
-            places.add_program(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+            places.add_program(p);
         }
         match places.save() {
             Ok(()) => {
@@ -3221,11 +3221,13 @@ impl Ui {
             row("Update", &if version.is_empty() { "A newer version is ready to download.".to_string() } else { format!("Version {version} is ready to download.") });
         }
         row("How it starts", &plan.describe());
-        if let Some(p) = game.program() {
-            row(if download { "Download" } else { "Program" }, &p.display().to_string());
-        }
+        // Where it is first; then the program as a person knows it (not an Unreal game's
+        // Shipping build three folders down).
         if let Some(f) = &folder {
             row("Folder", &f.display().to_string());
+        }
+        if let Some(p) = game.shown_program() {
+            row(if download { "Download" } else { "Program" }, &p.display().to_string());
         }
         if let Some(p) = game.entries.iter().find_map(|e| e.prefix.as_ref()) {
             row("Windows setup (Wine prefix)", &p.display().to_string());

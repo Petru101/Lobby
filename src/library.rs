@@ -156,6 +156,24 @@ impl Entry {
 /// Words that make a name or a store's slug a demo's.
 pub const DEMO_WORDS: [&str; 4] = ["demo", "prologue", "playtest", "demos"];
 
+/// A platform folder a packaged game's files sit in (Unreal's Windows/WindowsNoEditor, Win64,
+/// Linux): what the folder is for, not the game's name.
+pub fn platform_folder(name: &str) -> bool {
+    ["windows", "windowsnoeditor", "windowsclient", "win64", "win32", "linux", "linuxnoeditor", "linux64", "linuxarm64"].contains(&name.to_lowercase().as_str())
+}
+
+/// The name of the folder above a platform folder, without its own platform ending
+/// ("Game49-Win64/Windows" → "Game49").
+pub fn above_platform(folder: &Path) -> Option<String> {
+    let name = folder.parent()?.file_name()?.to_string_lossy().into_owned();
+    let mut words: Vec<&str> = name.split(['-', '_', ' ']).collect();
+    while words.len() > 1 && words.last().is_some_and(|w| platform_folder(w) || ["x64", "x86", "shipping"].contains(&w.to_lowercase().as_str())) {
+        words.pop();
+    }
+    let t = words.join(" ").trim().to_string();
+    (!t.is_empty() && !platform_folder(&t)).then_some(t)
+}
+
 /// A demo's or prologue's name: "Hell Pie Demo", "Farlanders Prologue", "Vertical Third Tech
 /// Demo" (not "Book of Demons" or "Trials of the Olympian Gods").
 pub fn named_like_demo(name: &str) -> bool {
@@ -265,6 +283,20 @@ impl Game {
 
     pub fn program(&self) -> Option<&Path> {
         self.installed_first().find_map(|e| e.program.as_deref())
+    }
+
+    /// The program as a person knows it, to show: the one they picked (Add a game), else
+    /// `program`, an Unreal game's starter beside its folder over the Shipping build three
+    /// folders down (`Proj/Binaries/Win64/Proj-Win64-Shipping.exe` → `Proj.exe`).
+    pub fn shown_program(&self) -> Option<PathBuf> {
+        let added = self.entries.iter().flat_map(|e| &e.keys).find_map(|k| if let Key::Added(p) = k { Some(p.clone()) } else { None });
+        let program = added.or_else(|| self.program().map(Path::to_path_buf))?;
+        let stem = program.file_stem()?.to_string_lossy().into_owned();
+        let starter = stem.find("-Win64-").or_else(|| stem.find("-Win32-")).filter(|_| stem.ends_with("-Shipping")).and_then(|i| {
+            let root = program.ancestors().nth(4)?;
+            Some(root.join(format!("{}.exe", &stem[..i])))
+        });
+        Some(starter.filter(|s| s.is_file()).unwrap_or(program))
     }
 
     /// Its cover: a file on disk first, else a web address.
@@ -456,7 +488,9 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
         .filter(|g| !g.iter().all(|e| e.annotation))
         .map(|mut entries| {
             entries.sort_by_key(|e| e.source);
-            let named = entries.iter().find(|e| !e.annotation && e.kind != Kind::Download).or_else(|| entries.iter().find(|e| !e.annotation)).unwrap_or(&entries[0]);
+            // A platform folder's name ("Windows": gamefix names a game after its program's
+            // folder) gives way to any other.
+            let named = entries.iter().find(|e| !e.annotation && e.kind != Kind::Download && !platform_folder(&e.name)).or_else(|| entries.iter().find(|e| !e.annotation && e.kind != Kind::Download)).or_else(|| entries.iter().find(|e| !e.annotation)).unwrap_or(&entries[0]);
             // A name taken from a folder or a prefix gives way to the itch.io page's title (the
             // page is about the download; the installed copy's folder is someone's choice).
             let named = match entries.iter().find(|e| e.source == Source::Itch) {
@@ -531,6 +565,24 @@ mod tests {
         for n in ["Book of Demons", "Populous 2: Trials of the Olympian Gods", "SpellForce 2: Demons Of The Past", "Demolition Company"] {
             assert!(!named_like_demo(n), "{n}");
         }
+    }
+
+    #[test]
+    fn an_unreal_build_by_its_folder_and_starter() {
+        let dir = std::env::temp_dir().join(format!("lobby-ue-build-{}", std::process::id()));
+        let w = dir.join("Game49-Win64/Windows");
+        std::fs::create_dir_all(w.join("NewGame/Binaries/Win64")).unwrap();
+        std::fs::write(w.join("NewGame.exe"), "").unwrap();
+        std::fs::write(w.join("NewGame/Binaries/Win64/NewGame-Win64-Shipping.exe"), "").unwrap();
+        let w = w.to_string_lossy().into_owned();
+        let shipping = format!("{w}/NewGame/Binaries/Win64/NewGame-Win64-Shipping.exe");
+        let lib = merge(vec![entry(Source::AppMenu, "Windows", Some(&w), Some(&shipping)), entry(Source::Folder, "Game49", Some(&w), Some(&format!("{w}/NewGame.exe")))], &[]);
+        assert_eq!(lib.len(), 1);
+        assert_eq!(lib[0].name, "Game49");
+        assert_eq!(lib[0].program(), Some(Path::new(&shipping)));
+        assert_eq!(lib[0].shown_program(), Some(PathBuf::from(format!("{w}/NewGame.exe"))));
+        assert_eq!(above_platform(Path::new(&w)).as_deref(), Some("Game49"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn entry(source: Source, name: &str, folder: Option<&str>, program: Option<&str>) -> Entry {
