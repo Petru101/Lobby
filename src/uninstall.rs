@@ -55,6 +55,11 @@ pub fn how(game: &Game) -> How {
     // plainly the one game's.
     let launchers = game.entries.iter().any(|e| matches!(e.source, crate::library::Source::Heroic | crate::library::Source::Lutris | crate::library::Source::Faugus));
     if game.unknown_to_launchers() || launchers {
+        let copies = game.copies();
+        if copies.len() > 1 {
+            let list: Vec<String> = copies.iter().map(|c| c.display().to_string()).collect();
+            return How::Not(format!("It's on your drive more than once ({}): delete the copies you don't want yourself, and Lobby keeps the rest.", list.join(", ")));
+        }
         if let Some(folder) = game.folder().map(Path::to_path_buf) {
             return match found_folder(game, &folder) {
                 Ok(()) => How::Found(folder),

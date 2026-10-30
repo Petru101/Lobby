@@ -285,6 +285,17 @@ impl Game {
         self.installed_first().find_map(|e| e.program.as_deref())
     }
 
+    /// The game's copies on disk: its installed entries' folders that exist, none inside
+    /// another (one copy's Binaries/Win32 is that copy).
+    pub fn copies(&self) -> Vec<PathBuf> {
+        let mut folders: Vec<PathBuf> = self.entries.iter().filter(|e| e.kind == Kind::Game).filter_map(|e| e.folder.as_deref()).filter(|f| f.is_dir()).map(norm).collect();
+        folders.sort();
+        folders.dedup();
+        let all = folders.clone();
+        folders.retain(|f| !all.iter().any(|o| o != f && f.starts_with(o)));
+        folders
+    }
+
     /// The program as a person knows it, to show: the one they picked (Add a game), else
     /// `program`, an Unreal game's starter beside its folder over the Shipping build three
     /// folders down (`Proj/Binaries/Win64/Proj-Win64-Shipping.exe` → `Proj.exe`).
@@ -382,17 +393,35 @@ pub fn same_name(download: &str, folder: &str) -> bool {
     let (d, f) = (plain(download), plain(folder));
     // Names that say what a file is, not which game.
     let generic = |n: &str| ["game", "games", "setup", "install", "installer", "windows", "linux", "build", "release", "demo", "download"].contains(&n);
-    if d.len() < 4 || f.len() < 4 || generic(&d) || generic(&f) {
+    if d.is_empty() || generic(&d) || generic(&f) {
         return false;
     }
+    // The same name, however short ("ᗢ").
     if d == f {
         return true;
     }
+    if d.chars().count() < 4 || f.chars().count() < 4 {
+        return false;
+    }
     let (long, short) = if d.len() > f.len() { (&d, &f) } else { (&f, &d) };
     let Some(rest) = long.strip_prefix(short.as_str()) else { return false };
-    short.len() >= 5 && ["", "v", "ver", "version", "build", "demo", "windows", "win", "win32", "win64", "linux", "x64", "x86", "32bit", "64bit", "bit", "beta", "alpha", "final", "release", "pc"].iter().any(|w| {
-        rest.strip_prefix(w).is_some_and(|r| r.chars().all(|c| c.is_ascii_digit() || "bit".contains(c)))
-    })
+    if short.chars().count() < 5 {
+        return false;
+    }
+    // What a download's name adds: a version, a platform, a build ("Potato Dungeon 64 bit",
+    // MyAbandonware's "(DOS)").
+    const TAGS: &[&str] = &["version", "windows", "release", "build", "demo", "win32", "win64", "linux", "32bit", "64bit", "beta", "alpha", "final", "ver", "win", "x64", "x86", "bit", "dos", "pc", "v"];
+    if TAGS.iter().chain(&[""]).any(|w| rest.strip_prefix(w).is_some_and(|r| r.chars().all(|c| c.is_ascii_digit() || "bit".contains(c)))) {
+        return true;
+    }
+    // Or a version and then anything ("Zombielicious - Beta v.1.0 (x64) (by its maker)").
+    let mut r: &str = rest;
+    let mut tagged = false;
+    while let Some(next) = TAGS.iter().find_map(|w| r.strip_prefix(w)) {
+        r = next;
+        tagged = true;
+    }
+    tagged && r.starts_with(|c: char| c.is_ascii_digit())
 }
 
 
@@ -400,29 +429,6 @@ pub fn same_name(download: &str, folder: &str) -> bool {
 /// those naming the same game.
 pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
     entries.retain(|e| !not_a_game(&e.name) && !tool_shortcut(e));
-    // A download of a game that is installed belongs with it (the-mammoth's zip beside its
-    // unpacked folder, "Shoot'n'Slaughter 0.0.0.4.rar" beside shootnslaughter): its name is the
-    // game's or its folder's, give or take a version.
-    // A folder's name counts for games named after their folder: a launcher's games have names,
-    // and their folder may hold several (Black & White and Creature Isle share one).
-    let names = |e: &Entry| -> Vec<String> {
-        let folder = e.folder.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).filter(|_| matches!(e.source, Source::Folder | Source::Itch));
-        std::iter::once(e.name.clone()).chain(folder).collect()
-    };
-    let installed: Vec<(usize, Vec<String>)> = entries.iter().enumerate().filter(|(_, e)| e.kind == Kind::Game).map(|(i, e)| (i, names(e))).collect();
-    let mut ties: Vec<(usize, usize)> = Vec::new();
-    for (d, e) in entries.iter().enumerate().filter(|(_, e)| e.kind == Kind::Download) {
-        for (g, game_names) in &installed {
-            if game_names.iter().any(|n| same_name(&e.name, n)) {
-                ties.push((d, *g));
-            }
-        }
-    }
-    for (d, g) in ties {
-        let key = Key::Name(format!("{d}"));
-        entries[d].keys.push(key.clone());
-        entries[g].keys.push(key);
-    }
     for e in &mut entries {
         // A download's path the same way whoever names it (gamefix writes /var/home).
         for k in &mut e.keys {
@@ -452,6 +458,38 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
         if e.program.as_deref().is_some_and(store_app) {
             e.kind = Kind::StoreApp;
         }
+    }
+
+    // A download of a game that is installed belongs with it (the-mammoth's zip beside its
+    // unpacked folder, "Shoot'n'Slaughter 0.0.0.4.rar" beside shootnslaughter): its name is the
+    // game's or its folder's, give or take a version.
+    // A folder's name counts for games named after their folder: a launcher's games have names,
+    // and their folder may hold several (Black & White and Creature Isle share one).
+    let names = |e: &Entry| -> Vec<String> {
+        let folder = e.folder.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).filter(|_| matches!(e.source, Source::Folder | Source::Itch));
+        std::iter::once(e.name.clone()).chain(folder).collect()
+    };
+    // Only copies still there: a shortcut left behind when the game was moved (gamefix's entry
+    // for a folder since moved into Downloaded Games) would pull its dead start into the card.
+    // After the tidying above, which drops runners (/usr/bin/flatpak) from programs.
+    let there = |e: &Entry| [e.folder.as_deref(), e.program.as_deref()].into_iter().flatten().any(Path::exists);
+    let installed: Vec<(usize, Vec<String>)> = entries.iter().enumerate().filter(|(_, e)| e.kind == Kind::Game && there(e)).map(|(i, e)| (i, names(e))).collect();
+    let mut ties: Vec<(usize, usize)> = Vec::new();
+    for (d, e) in entries.iter().enumerate().filter(|(_, e)| e.kind == Kind::Download) {
+        // Its own file's name too: itch.io's page may name it otherwise ("Retro Bike Shooter
+        // (Demo)" for UDKInstall-RetroBikePrk.exe).
+        let own = e.program.as_deref().and_then(Path::file_stem).map(|s| crate::sources::downloads::title(Path::new(gamefix::scan::udk_title(&s.to_string_lossy()))));
+        let download_names: Vec<&str> = std::iter::once(e.name.as_str()).chain(own.as_deref()).collect();
+        for (g, game_names) in &installed {
+            if game_names.iter().any(|n| download_names.iter().any(|d| same_name(d, n))) {
+                ties.push((d, *g));
+            }
+        }
+    }
+    for (d, g) in ties {
+        let key = Key::Name(format!("{d}"));
+        entries[d].keys.push(key.clone());
+        entries[g].keys.push(key);
     }
 
     // A folder found on a drive that holds the programs of games a launcher lists apart (two
@@ -502,6 +540,14 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             // page is about the download; the installed copy's folder is someone's choice).
             let named = match entries.iter().find(|e| e.source == Source::Itch) {
                 Some(itch) if matches!(named.source, Source::Folder | Source::Prefix) => itch,
+                _ => named,
+            };
+            // A folder's name that isn't a title ("simant-the-electronic-ant-colony", which
+            // gamefix's entries carry too) gives way to its download's ("SimAnt The Electronic
+            // Ant Colony (DOS)").
+            let titled = |n: &str| n.contains(' ') || (n.chars().any(char::is_uppercase) && n.chars().any(char::is_lowercase));
+            let named = match entries.iter().find(|e| e.kind == Kind::Download && e.source == Source::Folder && titled(&e.name)) {
+                Some(d) if matches!(named.source, Source::Folder | Source::Prefix | Source::AppMenu | Source::SteamShortcut | Source::Gamefix | Source::Lobby) && !titled(&named.name) => d,
                 _ => named,
             };
             let name = named.name.clone();
@@ -674,12 +720,21 @@ mod tests {
 
     #[test]
     fn a_download_belongs_with_its_installed_game() {
+        let dir = std::env::temp_dir().join(format!("lobby-tie-{}", std::process::id()));
+        let g = dir.join("the-mammoth");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(g.join("TheMammoth.exe"), "").unwrap();
+        let (g, exe) = (g.to_string_lossy().into_owned(), g.join("TheMammoth.exe").to_string_lossy().into_owned());
         let mut zip = entry(Source::Folder, "the-mammoth", Some("/w/dl/the-mammoth"), Some("/w/dl/the-mammoth/mammoth.zip"));
         zip.kind = Kind::Download;
-        let games = merge(vec![zip, entry(Source::Folder, "The Mammoth", Some("/g/the-mammoth"), Some("/g/the-mammoth/TheMammoth.exe"))], &[]);
-        assert_eq!(games.len(), 1);
-        assert_eq!(games[0].kind, Kind::Game);
-        assert_eq!(games[0].program(), Some(Path::new("/g/the-mammoth/TheMammoth.exe")));
+        // A shortcut left where the game was before it moved: not tied, so not in its card.
+        let mut moved = entry(Source::AppMenu, "the-mammoth", Some("/gone/the-mammoth"), Some("/usr/bin/flatpak"));
+        moved.keys.push(Key::Desktop("/a/gamefix-the-mammoth.desktop".into()));
+        let games = merge(vec![zip, entry(Source::Folder, "The Mammoth", Some(&g), Some(&exe)), moved], &[]);
+        assert_eq!(games.len(), 2);
+        let game = games.iter().find(|x| x.kind == Kind::Game && x.entries.len() == 2).unwrap();
+        assert_eq!(game.program().map(norm), Some(norm(Path::new(&exe))));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -702,6 +757,12 @@ mod tests {
         assert!(same_name("PB_ver.1.03", "pb_ver.1.03"));
         assert!(!same_name("Dungeon", "Dungeon Colony"));
         assert!(!same_name("game", "game"));
+        assert!(same_name("ᗢ", "ᗢ"));
+        assert!(same_name("SimAnt The Electronic Ant Colony (DOS)", "simant-the-electronic-ant-colony"));
+        assert!(!same_name("SimAnt The Electronic Ant Colony (Amiga)", "simant-the-electronic-ant-colony"));
+        assert!(same_name("Zombielicious Beta v.1.0 (x64) (by Johnatan Dellazzari)", "zombielicious"));
+        assert!(!same_name("Portal", "Portal 2 Something"));
+        assert!(!same_name("Dungeon", "Dungeon Colony"));
     }
 
     #[test]

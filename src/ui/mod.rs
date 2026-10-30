@@ -3226,6 +3226,11 @@ impl Ui {
         if let Some(f) = &folder {
             row("Folder", &f.display().to_string());
         }
+        // A second copy on disk (an x64 and an x32 build, a copy on another drive).
+        let others: Vec<String> = game.copies().into_iter().filter(|c| folder.as_deref().map(crate::library::norm).as_ref() != Some(c)).map(|c| c.display().to_string()).collect();
+        if !others.is_empty() {
+            row("Also on your drive", &others.join("\n"));
+        }
         if let Some(p) = game.shown_program() {
             row(if download { "Download" } else { "Program" }, &p.display().to_string());
         }
