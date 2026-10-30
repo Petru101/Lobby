@@ -350,8 +350,15 @@ pub fn store_app(program: &Path) -> bool {
     STORE_APPS.iter().any(|s| name.contains(s))
 }
 
+/// A program in a store app's own folder (Epic's launcher brings an Online Services installer):
+/// part of the app, not a game.
+pub fn in_store_app(program: &Path) -> bool {
+    let p = program.to_string_lossy().to_lowercase();
+    ["/epic games/launcher/", "/ea desktop/", "/electronic arts/ea desktop/", "/ubisoft game launcher/", "/battle.net/", "/gog galaxy/", "/rockstar games/launcher/", "/amazon games/app/"].iter().any(|s| p.contains(s))
+}
+
 /// Programs that come with games or are kept beside them, but aren't games.
-const NOT_GAMES: &[&str] = &["cheat engine", "cheatengine", "uninstall", "readme", "manual", "website", "error report", "crash report", "kernel module", "settings", "configurat", "support", "register"];
+const NOT_GAMES: &[&str] = &["no-cd", "nocd", "cheat engine", "cheatengine", "uninstall", "readme", "manual", "website", "error report", "crash report", "kernel module", "settings", "configurat", "support", "register"];
 
 pub fn not_a_game(name: &str) -> bool {
     let name = name.to_lowercase();

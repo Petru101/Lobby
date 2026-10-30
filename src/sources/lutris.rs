@@ -145,7 +145,7 @@ pub fn games(home: &Home) -> Vec<Entry> {
             let directory = directory.filter(|d| !d.is_empty()).map(PathBuf::from);
             let config = configpath.and_then(|c| fs::read_to_string(dir.join("games").join(format!("{c}.yml"))).ok()).unwrap_or_default();
             let block = game_block(&config);
-            let get = |k: &str| block.iter().find(|(key, _)| key == k).map(|(_, v)| PathBuf::from(v));
+            let get = |k: &str| block.iter().find(|(key, _)| key == k).map(|(_, v)| v.trim_matches(['\'', '"'])).filter(|v| !v.is_empty()).map(PathBuf::from);
             e.prefix = get("prefix");
             // A relative program is in the game's folder (Lutris installs into the prefix).
             // Runners other than Wine name the game's file otherwise (DOSBox's main_file, an
@@ -155,6 +155,11 @@ pub fn games(home: &Home) -> Vec<Entry> {
                 _ => exe,
             });
             e.folder = get("working_dir").or(get("path")).or(directory).filter(|d| d != Path::new("/"));
+            // A Wine game with no program: an install that never finished (Lutris ran a repack's
+            // setup.exe and was never told what it installed). Nothing to start.
+            if e.prefix.is_some() && e.program.is_none() {
+                continue;
+            }
             entries.push(e);
         }
     }

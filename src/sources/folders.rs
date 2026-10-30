@@ -286,7 +286,7 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
                 // Only a program in the prefix's own C:. gamefix also looks for new programs on
                 // the prefix's other drive letters (right for its own install run), which in an
                 // old prefix with v: = /run/media found Borderlands 4 for dome-keeper's prefix.
-                disc::Installed::Program(exe, label) if fs::canonicalize(&exe).is_ok_and(|e| e.starts_with(fs::canonicalize(pfx.join("drive_c")).unwrap_or_default())) => {
+                disc::Installed::Program(exe, label) if fs::canonicalize(&exe).is_ok_and(|e| e.starts_with(fs::canonicalize(pfx.join("drive_c")).unwrap_or_default())) && !library::in_store_app(&exe) => {
                     let mut e = Entry::new(Source::Folder, label);
                     e.program = Some(exe);
                     e.prefix = Some(pfx.clone());
@@ -328,6 +328,10 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
         return vec![Found::Nothing];
     }
     let program = gog.or_else(|| game.main.or(game.windows).or(game.portable).map(|i| game.full(&game.files[i])));
+    // A store app's own program (a Wine setup with Epic's launcher in it): no game here.
+    if program.as_deref().is_some_and(library::in_store_app) {
+        return vec![Found::Nothing];
+    }
     let download = [game.cd_installer, game.linux_installer, game.packed, game.disc, game.archive].into_iter().flatten().next();
     let mut e = Entry::new(Source::Folder, title(&game.root, &game.name, program.as_deref()));
     e.folder = Some(game.root.clone());

@@ -235,6 +235,18 @@ pub fn title(file: &Path) -> String {
     if t.is_empty() { stem } else { t }
 }
 
+/// Downloads of a store's or launcher's own app, or of a game engine's editor, by their names
+/// with only letters and digits ("EpicInstaller-20.3.3-unrealEngine.exe",
+/// "Linux_Unreal_Engine_5.8.4.zip"): not games.
+const APPS: &[&str] = &["epicinstaller", "epicgameslauncher", "steamsetup", "steaminstall", "galaxysetup", "goggalaxy", "battlenet", "eaappinstaller", "originthinsetup", "ubisoftconnectinstaller", "uplayinstaller", "rockstargameslauncher", "itchsetup", "amazongamessetup", "heroicgameslauncher", "unrealengine", "unityhub", "unitysetup", "godotv"];
+
+/// A download named as something for a game (a patch, a mod, a trainer) or as an app or engine.
+fn not_a_game_download(name: &str) -> bool {
+    let words: Vec<String> = name.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
+    let plain: String = words.concat();
+    not_a_game(name) || words.iter().any(|w| NOT_A_GAME.contains(&w.as_str())) || ["patch", "trainer", "cheatengine"].iter().chain(APPS).any(|w| plain.contains(w))
+}
+
 /// A loose file as a game download, or nothing.
 /// `strict` (a dumping ground of a folder: an old Downloads): only an archive showing a game
 /// engine counts, and no loose .exe (tools and installers of all sorts).
@@ -242,7 +254,7 @@ pub fn look(file: &Path, strict: bool) -> Option<Entry> {
     let name = title(file);
     let words: Vec<String> = name.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
     let plain: String = words.concat();
-    if not_a_game(&name) || words.iter().any(|w| NOT_A_GAME.contains(&w.as_str())) || ["patch", "trainer", "cheatengine"].iter().any(|w| plain.contains(w)) {
+    if not_a_game_download(&name) {
         return None;
     }
     let ext = file.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -302,6 +314,16 @@ mod tests {
         assert_eq!(title(Path::new("/d/Pac-Man_Atari-8-bit_EN.zip")), "Pac Man (Atari 8-bit)");
         assert_eq!(myabandonware("NecroLore_Apeirophobia.zip"), None);
         assert_eq!(myabandonware("Project_P.I.T.T_DEMO_v0.2.8.1_linux.zip"), None);
+    }
+
+    #[test]
+    fn apps_and_engines_arent_games() {
+        for f in ["EpicInstaller-20.3.3-unrealEngine.exe", "Linux_Unreal_Engine_5.8.4.zip", "SteamSetup.exe", "Godot_v4.3-stable_linux.x86_64.zip", "UnityHubSetup.exe", "Battle.net-Setup.exe", "EAappInstaller.exe"] {
+            assert!(not_a_game_download(&title(Path::new(f))), "{f}");
+        }
+        for f in ["Ghost_Defender.zip", "setup_amber_fields_1.0.exe", "Moon_Garden_v1.2_win.zip", "Unreal_Gold.zip", "Steamworld_Dig.zip"] {
+            assert!(!not_a_game_download(&title(Path::new(f))), "{f}");
+        }
     }
 
     #[test]
