@@ -47,7 +47,8 @@ Fedora 44 and Arch, and isn't packaged yet.
 ## Installing
 
 The AppImage runs on Ubuntu 24.04 and newer, Fedora, Arch and the like: download
-`Lobby-x86_64.AppImage`, make it executable (`chmod +x Lobby-x86_64.AppImage`, or the file's
+[Lobby-x86_64.AppImage](https://github.com/Petru101/Lobby/releases/latest/download/Lobby-x86_64.AppImage)
+(all versions: [Releases](https://github.com/Petru101/Lobby/releases)), make it executable (`chmod +x Lobby-x86_64.AppImage`, or the file's
 Properties) and start it. The first start puts Lobby in the app menu. It brings its own GTK,
 libadwaita and WebKitGTK; the system needs FUSE (`fusermount3`), bubblewrap and
 xdg-dbus-proxy, which desktops almost always have.
