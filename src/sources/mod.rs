@@ -68,10 +68,15 @@ pub fn scan(home: &Home) -> Found {
     entries.retain(|e| !matches!(e.source, crate::library::Source::Heroic | crate::library::Source::Lutris | crate::library::Source::Faugus) || !e.keys.iter().any(|k| imported.contains(k)));
 
     let roots = folders::roots(home);
-    let games = crate::places::Places::load().games;
+    let places = crate::places::Places::load();
     let strict = folders::strict_roots(home);
-    let (found, folder_prefixes, collections) = crate::log::timed("scan: folders", || folders::scan(&roots, &strict, &games, &entries));
+    let (mut found, folder_prefixes, collections) = crate::log::timed("scan: folders", || folders::scan(&roots, &strict, &places.games, &entries));
+    // Games added by their program: the program picked starts the game, so the folder scan's
+    // own look at its folder goes.
+    let added: Vec<library::Entry> = places.programs.iter().filter_map(|p| folders::added(p, &roots)).collect();
+    found.retain(|e| !added.iter().any(|a| a.folder.is_some() && a.folder.as_deref().map(library::norm) == e.folder.as_deref().map(library::norm)));
     entries.extend(found);
+    entries.extend(added);
     // Names and covers for what came from itch.io.
     let itch = crate::log::timed("scan: itch.io", || itch::entries(home, &entries));
     entries.extend(itch);

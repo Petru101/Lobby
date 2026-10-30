@@ -74,6 +74,8 @@ pub enum Key {
     Download(PathBuf),
     /// A download and an installed game of the same name.
     Name(String),
+    /// A game the user added by its program (Add a game): that program starts it.
+    Added(PathBuf),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

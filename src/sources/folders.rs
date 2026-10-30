@@ -373,6 +373,59 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
     vec![Found::Game(e)]
 }
 
+/// A game the user added by picking its program (Add a game, places.programs): that program
+/// starts it, whatever the folder scan would pick. An archive, disc image or installer picked is
+/// a download, waiting to be installed. The program's folder is the game's, unless it's a folder
+/// many things share (the home folder, Downloads, a drive's top, a folder Lobby looks into),
+/// which Uninstall must never take for the game's.
+pub fn added(program: &Path, roots: &[PathBuf]) -> Option<Entry> {
+    if !program.is_file() {
+        return None;
+    }
+    let ext = program.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let installer = matches!(gamefix::binary::identify(program), Some(Binary::Pe(pe)) if pe.installer.is_some());
+    if installer || super::downloads::ARCHIVES.contains(&ext.as_str()) {
+        let mut e = super::downloads::look(program, false).unwrap_or_else(|| {
+            let mut e = Entry::new(Source::Folder, super::downloads::title(program));
+            e.program = Some(program.to_path_buf());
+            e.keys.push(crate::library::Key::Download(program.to_path_buf()));
+            e
+        });
+        e.kind = Kind::Download;
+        return Some(e);
+    }
+    let dir = program.parent()?;
+    let mut e = match shared(dir, roots) {
+        true => Entry::new(Source::Folder, program_title(program).unwrap_or_else(|| super::downloads::title(program))),
+        false => {
+            let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut e = Entry::new(Source::Folder, title(dir, &folder, Some(program)));
+            e.folder = Some(dir.to_path_buf());
+            if let Some(i) = gamefix::gog::read(dir) {
+                e.keys.push(crate::library::Key::Store("gog".into(), i.id));
+            }
+            e
+        }
+    };
+    e.program = Some(program.to_path_buf());
+    e.keys.push(crate::library::Key::Added(program.to_path_buf()));
+    Some(e)
+}
+
+/// A folder many things share: the home folder or one right in it (Downloads, Desktop), a
+/// drive's top, the system's, or a folder Lobby looks into.
+fn shared(dir: &Path, roots: &[PathBuf]) -> bool {
+    let dir = library::norm(dir);
+    let home = std::env::var_os("HOME").map(|h| library::norm(Path::new(&h)));
+    let user = std::env::var("USER").unwrap_or_default();
+    let tops = [PathBuf::from("/run/media").join(&user), PathBuf::from("/media").join(&user), PathBuf::from("/mnt"), PathBuf::from("/run/media"), PathBuf::from("/media")];
+    dir.parent().is_none()
+        || home.as_ref().is_some_and(|h| &dir == h || dir.parent() == Some(h.as_path()))
+        || tops.iter().any(|t| dir.parent() == Some(t.as_path()) || dir == *t)
+        || ["/usr", "/opt", "/var", "/tmp"].iter().any(|s| dir == Path::new(s))
+        || roots.iter().any(|r| library::norm(r) == dir)
+}
+
 /// An install of Unreal Engine (the launcher's, or built from source), not a game made with it:
 /// packaged games ship neither the engine's source nor its editor.
 fn unreal_engine(dir: &Path) -> bool {
@@ -518,6 +571,26 @@ fn has_program_at_top(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_game_added_by_its_program() {
+        let dir = std::env::temp_dir().join(format!("lobby-added-{}", std::process::id()));
+        fs::create_dir_all(dir.join("Games/frost_harbor")).unwrap();
+        for f in ["Games/frost_harbor/FrostHarbor.exe", "Games/frost_harbor/Launcher.exe", "Games/LoosePuzzle.exe", "Games/Moon_Garden_v1.2_win.zip"] {
+            fs::write(dir.join(f), "").unwrap();
+        }
+        let roots = [dir.join("Games")];
+        let e = added(&dir.join("Games/frost_harbor/FrostHarbor.exe"), &roots).unwrap();
+        assert_eq!((e.name.as_str(), e.kind, e.folder.as_deref()), ("Frost Harbor", Kind::Game, Some(dir.join("Games/frost_harbor").as_path())));
+        assert_eq!(e.program.as_deref(), Some(dir.join("Games/frost_harbor/FrostHarbor.exe").as_path()));
+        // Loose in a folder Lobby looks into: that folder isn't the game's.
+        let e = added(&dir.join("Games/LoosePuzzle.exe"), &roots).unwrap();
+        assert_eq!((e.name.as_str(), e.folder), ("Loose Puzzle", None));
+        let e = added(&dir.join("Games/Moon_Garden_v1.2_win.zip"), &roots).unwrap();
+        assert_eq!(e.kind, Kind::Download);
+        assert!(added(&dir.join("Games/gone.exe"), &roots).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn unreal_engine_isnt_a_game() {

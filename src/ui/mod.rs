@@ -373,6 +373,8 @@ fn build(app: &adw::Application) {
     // The pages, in the middle of the header.
     let pages = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
     let header = adw::HeaderBar::builder().title_widget(&pages).build();
+    let add_button = gtk::Button::builder().icon_name("list-add-symbolic").tooltip_text("Add a game: pick the program that starts it").build();
+    header.pack_start(&add_button);
     let rescan_button = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Look for games again (F5)").build();
     header.pack_start(&rescan_button);
     let accounts_button = gtk::Button::builder().icon_name("avatar-default-symbolic").tooltip_text("Store accounts: Epic Games and GOG").build();
@@ -598,18 +600,21 @@ fn build(app: &adw::Application) {
     free_button.connect_clicked(move |_| u.free_games());
     let u = ui.clone();
     places_button.connect_clicked(move |_| u.places());
-    // A folder dropped on the window: looked in from now on.
+    let u = ui.clone();
+    add_button.connect_clicked(move |_| u.pick_game());
+    // A folder dropped on the window: looked in from now on; a file: added as a game.
     let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
     let u = ui.clone();
     drop.connect_drop(move |_, value, _, _| {
         let Ok(files) = value.get::<gdk::FileList>() else { return false };
-        let folders: Vec<std::path::PathBuf> = files.files().iter().filter_map(|f| f.path()).filter(|p| p.is_dir()).collect();
-        if folders.is_empty() {
-            u.toast("Drop a folder to have Lobby look for games in it.");
-            return false;
+        let (folders, programs): (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) = files.files().iter().filter_map(|f| f.path()).partition(|p| p.is_dir());
+        if !programs.is_empty() {
+            u.add_games(&programs);
         }
-        u.add_places(&folders);
-        true
+        if !folders.is_empty() {
+            u.add_places(&folders);
+        }
+        !(folders.is_empty() && programs.is_empty())
     });
     window.add_controller(drop);
 
@@ -2233,6 +2238,33 @@ impl Ui {
         }
     }
 
+    /// Add a game: the program that starts it (or its installer or archive), picked.
+    fn pick_game(self: &Rc<Self>) {
+        let chooser = gtk::FileDialog::builder().title("The program that starts the game").modal(true).build();
+        let u = self.clone();
+        chooser.open(Some(&self.window), gio::Cancellable::NONE, move |r| {
+            if let Some(path) = r.ok().and_then(|f| f.path()) {
+                u.add_games(&[path]);
+            }
+        });
+    }
+
+    /// Games added by their programs: in the library from the scan that starts now.
+    fn add_games(self: &Rc<Self>, programs: &[std::path::PathBuf]) {
+        let mut places = crate::places::Places::load();
+        for p in programs {
+            places.add_program(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+        }
+        match places.save() {
+            Ok(()) => {
+                let names: Vec<String> = programs.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+                self.toast(&format!("Adding {}…", names.join(", ")));
+                self.rescan();
+            }
+            Err(e) => self.alert("Couldn't add the game", &e),
+        }
+    }
+
     /// Where lobby looks: the folders it looks in by itself, the ones added, the games taken
     /// from the search, and the search of all drives.
     fn places(self: &Rc<Self>) {
@@ -2278,6 +2310,19 @@ impl Ui {
                     u.add_places(&[path]);
                 }
             });
+        });
+
+        let programs = adw::PreferencesGroup::builder().title("Games you added").description("Each by the program that starts it: the + button, or a game's file dropped on Lobby's window.").build();
+        let add_game = gtk::Button::builder().label("Add a game…").valign(gtk::Align::Center).build();
+        programs.set_header_suffix(Some(&add_game));
+        for p in &places.programs {
+            remove_row(&programs, p, |p| &mut p.programs);
+        }
+        page.add(&programs);
+        let (u, d) = (self.clone(), dialog.clone());
+        add_game.connect_clicked(move |_| {
+            d.close();
+            u.pick_game();
         });
 
         if !places.games.is_empty() {

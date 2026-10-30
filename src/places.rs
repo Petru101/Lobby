@@ -1,7 +1,7 @@
 //! Where lobby looks for games besides the usual places: folders the user added (looked into
 //! like ~/Games: each folder in them is a game or a folder of games), game folders the user
-//! took from the search of all drives (each one game), and the search's suggestions turned
-//! down. Kept in ~/.config/lobby/places.json.
+//! took from the search of all drives (each one game), games the user added by their program
+//! (Add a game), and the search's suggestions turned down. Kept in ~/.config/lobby/places.json.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -15,6 +15,9 @@ pub struct Places {
     /// Game folders taken from the search: each one game.
     #[serde(default)]
     pub games: Vec<PathBuf>,
+    /// Games the user added by picking the program that starts them (or their download).
+    #[serde(default)]
+    pub programs: Vec<PathBuf>,
     /// The search's suggestions the user turned down: not suggested again.
     #[serde(default)]
     pub dismissed: Vec<PathBuf>,
@@ -43,6 +46,14 @@ impl Places {
         let folder = folder.to_path_buf();
         if !self.added.contains(&folder) {
             self.added.push(folder);
+        }
+    }
+
+    /// Adds a game by its program (not twice).
+    pub fn add_program(&mut self, program: &Path) {
+        let program = program.to_path_buf();
+        if !self.programs.contains(&program) {
+            self.programs.push(program);
         }
     }
 }

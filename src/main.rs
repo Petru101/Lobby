@@ -72,6 +72,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby check             what Lobby needs that this computer lacks, and how to install it
        lobby allow-sandbox     on Ubuntu: let lobby make the sandboxes Proton and protection need
                                (an AppArmor profile; sudo asks for your password)
+       lobby add <file>        add a game by the program that starts it (or its installer or archive)
        lobby open-drives       open the drives holding games that aren't open (after a restart)
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (each scan does)
@@ -120,6 +121,7 @@ fn main() -> ExitCode {
         (Some("protection"), [game, level @ ..]) if level.len() <= 1 => protection(game, level.first().copied(), &args),
         (Some("check"), []) => check_system(),
         (Some("open-drives"), []) => open_drives(),
+        (Some("add"), [file]) => add_game(std::path::Path::new(file)),
         (Some("allow-sandbox"), []) => apparmor::allow(true).map(|()| println!("Lobby may start games now: its AppArmor profile is in /etc/apparmor.d/lobby.")),
         // How Play runs a game protected: `lobby sandbox <id> -- <command>`.
         (Some("sandbox"), _) if args.get(2).is_some_and(|a| a == "--") && args.len() > 3 => return in_sandbox(&args[1], &args[3..]),
@@ -1071,6 +1073,24 @@ fn show(lib: &Library, json: bool) {
     if !closed.is_empty() {
         println!("\n{}. Open {}: lobby open-drives", drives::closed_text(&closed), if closed.len() == 1 { "it" } else { "them" });
     }
+}
+
+/// Adds a game by its program, then looks again and says what it became.
+fn add_game(file: &std::path::Path) -> Result<(), String> {
+    let file = std::fs::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    if !file.is_file() {
+        return Err(format!("{} isn't a file: pick the program that starts the game", file.display()));
+    }
+    let mut places = places::Places::load();
+    places.add_program(&file);
+    places.save()?;
+    let lib = scan()?;
+    match lib.games.iter().find(|g| g.entries.iter().any(|e| e.program.as_deref() == Some(file.as_path()))) {
+        Some(g) if g.kind == Kind::Download => println!("Added {} [{}] to Downloads: lobby install {} installs it.", g.name, g.id, g.id),
+        Some(g) => println!("Added {} [{}]: lobby play {} starts it.", g.name, g.id, g.id),
+        None => println!("Saved, but no game came of it."),
+    }
+    Ok(())
 }
 
 /// Opens the drives holding saved games that aren't open, then looks again.

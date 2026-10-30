@@ -99,6 +99,10 @@ pub fn plan(game: &Game) -> Plan {
     if let Some(target) = game.entries.iter().filter(|e| matches!(e.source, Source::Lutris | Source::Faugus | Source::Heroic)).find_map(|e| e.folder.clone().filter(|f| f.is_dir()).or_else(|| e.program.clone().filter(|p| p.exists()))) {
         return Plan::SetUp(target);
     }
+    // A game added by its program: gamefix sets up that program, not its own pick in the folder.
+    if let Some(program) = game.entries.iter().flat_map(|e| &e.keys).find_map(|k| if let Key::Added(p) = k { Some(p) } else { None }).filter(|p| p.is_file()) {
+        return Plan::SetUp(program.clone());
+    }
     // A folder, or a game in one program (a loose .exe in Downloads).
     // The installed one when the game's download was found too.
     let folders = || game.entries.iter().filter(|e| e.source == Source::Folder);

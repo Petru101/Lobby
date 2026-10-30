@@ -8,7 +8,7 @@ use crate::library::{not_a_game, Entry, Key, Kind, Source};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-const ARCHIVES: &[&str] = &["zip", "rar", "7z", "gz", "tgz", "xz", "bz2", "iso"];
+pub const ARCHIVES: &[&str] = &["zip", "rar", "7z", "gz", "tgz", "xz", "bz2", "iso"];
 
 /// Whether lobby looks at the file at all.
 pub fn wanted(path: &Path) -> bool {
