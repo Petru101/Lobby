@@ -22,9 +22,10 @@ fn label() -> String {
     ["/proc/self/attr/apparmor/current", "/proc/self/attr/current"].iter().find_map(|f| fs::read_to_string(f).ok()).unwrap_or_default().trim().to_string()
 }
 
-/// The program the profile is for: this one, as installed.
+/// The program the profile is for: this one, as installed; an AppImage's file (what it starts,
+/// Lobby inside it among them, stays in the profile).
 fn program() -> PathBuf {
-    std::env::current_exe().ok().and_then(|p| fs::canonicalize(p).ok()).unwrap_or_else(|| PathBuf::from("/usr/bin/lobby"))
+    fs::canonicalize(crate::me()).unwrap_or_else(|_| PathBuf::from("/usr/bin/lobby"))
 }
 
 fn profile_text(program: &Path) -> String {

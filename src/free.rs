@@ -226,7 +226,7 @@ pub fn keep_daily_check() -> Result<(), String> {
     if daily_off() {
         return Ok(());
     }
-    let lobby = std::env::current_exe().map_err(|e| e.to_string())?;
+    let lobby = crate::me();
     let service = format!("[Unit]\nDescription=Lobby: look for games free to keep\n\n[Service]\nExecStart={} free --notify\n", lobby.display());
     let timer = "[Unit]\nDescription=Lobby: look for games free to keep, daily\n\n[Timer]\nOnCalendar=*-*-* 17:30\nOnStartupSec=15min\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n";
     let dir = units_dir();

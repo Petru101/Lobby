@@ -11,6 +11,7 @@ mod import;
 mod install;
 mod anticheat;
 mod apparmor;
+mod appimage;
 mod launch;
 mod leftovers;
 mod library;
@@ -84,11 +85,22 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby backups <game> [now | restore [<n>]]  its save backups (newest is 1); back up now;
                                put one back (the saves there now are backed up first)";
 
+/// Lobby's own program, as others (shortcuts, the daily timer, Lobby's sandbox) should start it:
+/// the AppImage file when it runs as one (its insides are mounted somewhere new each start),
+/// else this program.
+pub fn me() -> std::path::PathBuf {
+    std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).filter(|p| p.is_file()).or_else(|| std::env::current_exe().ok()).unwrap_or_else(|| "lobby".into())
+}
+
 fn main() -> ExitCode {
     stores::tools::provide();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let json = args.iter().any(|a| a == "--json");
     let rest: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with("--")).map(String::as_str).collect();
+    // The window puts the system's settings back once GTK has started; the rest has no GTK.
+    if !args.is_empty() && !matches!(args[0].as_str(), "claim") {
+        appimage::host_env();
+    }
     if args.is_empty() {
         return match ui::run(false) {
             c if c == gtk::glib::ExitCode::SUCCESS => ExitCode::SUCCESS,
@@ -895,8 +907,7 @@ fn free_notify() -> Result<(), String> {
     let action = if epic_ones { "claim=Claim" } else { "claim=Show" };
     let out = std::process::Command::new("notify-send").args(["-a", "Lobby", "-i", "applications-games", "-A", action, "-w", "Free to keep", &body.join("\n")]).stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
     if String::from_utf8_lossy(&out.stdout).trim() == "claim" {
-        let lobby = std::env::current_exe().map_err(|e| e.to_string())?;
-        std::os::unix::process::CommandExt::process_group(&mut std::process::Command::new(lobby), 0).arg("claim").stdin(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
+        std::os::unix::process::CommandExt::process_group(&mut std::process::Command::new(me()), 0).arg("claim").stdin(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
     }
     Ok(())
 }

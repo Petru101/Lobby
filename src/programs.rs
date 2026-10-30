@@ -21,11 +21,16 @@ const PROGRAMS: &[Program] = &[
     Program { name: "Python 3", commands: &["python3"], what: "runs umu, which starts Windows games (this system has no umu-launcher of its own)", essential: true, packages: ["python3", "python3", "python", "python3"] },
     Program { name: "7-Zip", commands: &["7z"], what: "unpacks downloads, installers and disc images", essential: true, packages: ["7zip"; 4] },
     Program { name: "bubblewrap", commands: &["bwrap"], what: "protects your files from the games (their sandbox)", essential: true, packages: ["bubblewrap"; 4] },
-    Program { name: "xdg-dbus-proxy", commands: &["xdg-dbus-proxy"], what: "lets protected games show notifications and keep the screen on", essential: false, packages: ["xdg-dbus-proxy"; 4] },
+    Program { name: "xdg-dbus-proxy", commands: &["xdg-dbus-proxy"], what: "lets store sign-in pages open (their sandbox needs it), and protected games show notifications and keep the screen on", essential: true, packages: ["xdg-dbus-proxy"; 4] },
     Program { name: "unrar", commands: &["unrar"], what: "unpacks .rar downloads", essential: false, packages: ["unrar"; 4] },
     Program { name: "Flatpak", commands: &["flatpak"], what: "installs the programs some games run in (DOSBox, Ruffle, LÖVE ...) from Flathub", essential: false, packages: ["flatpak"; 4] },
     Program { name: "MangoHud", commands: &["mangohud"], what: "shows a game's frame rate (Show frame rate)", essential: false, packages: ["mangohud"; 4] },
 ];
+
+/// The program by its name, for saying how to install it.
+pub fn named(name: &str) -> Option<&'static Program> {
+    PROGRAMS.iter().find(|p| p.name == name)
+}
 
 /// The programs this system lacks.
 pub fn missing() -> Vec<&'static Program> {

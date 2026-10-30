@@ -44,6 +44,17 @@ Fedora 44 and Arch, and isn't packaged yet.
   drive and copies them into the game's Wine prefix.
 - **Free games.** Epic's weekly free games and others, with a reminder, claimed in Lobby.
 
+## Installing
+
+The AppImage runs on Ubuntu 24.04 and newer, Fedora, Arch and the like: download
+`Lobby-x86_64.AppImage`, make it executable (`chmod +x Lobby-x86_64.AppImage`, or the file's
+Properties) and start it. The first start puts Lobby in the app menu. It brings its own GTK,
+libadwaita and WebKitGTK; the system needs FUSE (`fusermount3`), bubblewrap and
+xdg-dbus-proxy, which desktops almost always have.
+
+To build the AppImage, run `run/appimage.sh` on Ubuntu 24.04 (the oldest system it should
+start on) with the build packages below installed; it lands in `target/appimage`.
+
 ## Building
 
 You need Rust (from [rustup](https://rustup.rs)), and GTK 4.14, libadwaita 1.5 and WebKitGTK
@@ -62,12 +73,12 @@ cargo build --release
 ```
 
 To play, it needs Steam (its own package, Ubuntu's `steam-installer`, or Steam from Flathub),
-curl, 7-Zip, bubblewrap, and Python 3 for umu-launcher, which runs Windows games (Lobby
-downloads its own copy when the system has none). unrar, Flatpak and MangoHud are used when
-there. `lobby check` lists what's missing and the command that installs it. On Ubuntu (23.10
+curl, 7-Zip, bubblewrap, xdg-dbus-proxy (store sign-in pages open in a sandbox that needs
+it), and Python 3 for umu-launcher, which runs Windows games (Lobby downloads its own copy when
+the system has none). unrar, Flatpak and MangoHud are used when there. `lobby check` lists what's missing and the command that installs it. On Ubuntu (23.10
 and later) Lobby asks once for your password to add itself to the programs AppArmor lets
-make sandboxes, which Proton needs for every Windows game (`lobby allow-sandbox` does it from
-a terminal).
+make sandboxes, which Proton needs for every Windows game and store pages need too
+(`lobby allow-sandbox` does it from a terminal).
 
 ## Commands
 

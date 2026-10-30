@@ -31,11 +31,20 @@ thread_local! {
 /// The window; with `claim`, straight at the checkout for the free games not claimed yet (the
 /// notification's Claim button). Lobby already open gets the request.
 pub fn run(claim: bool) -> glib::ExitCode {
+    crate::appimage::enter();
+    crate::appimage::menu_entry();
     // A checking run (LOBBY_SNAPSHOT) is a copy of its own: otherwise it would hand over to the
     // user's open Lobby and quit.
     let flags = if std::env::var_os("LOBBY_SNAPSHOT").is_some() { gio::ApplicationFlags::NON_UNIQUE } else { gio::ApplicationFlags::empty() };
     let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
     app.connect_startup(|_| {
+        crate::appimage::let_webkit_in();
+        // GTK has read where its parts are (an AppImage's), once these are loaded: the system's
+        // own settings then go to what Lobby starts.
+        let _ = gtk::gdk_pixbuf::Pixbuf::formats();
+        let _ = gio::SettingsSchemaSource::default();
+        let _ = glib::system_data_dirs();
+        crate::appimage::host_env();
         let css = gtk::CssProvider::new();
         css.load_from_string(include_str!("style.css"));
         gtk::style_context_add_provider_for_display(&gdk::Display::default().expect("a display"), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -748,12 +757,15 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         // The page itself as WebKit draws it (<file>.page.png): some pages don't show in the
         // window's snapshot.
         if let Some(store) = std::env::var("LOBBY_SNAPSHOT_SIGNIN").ok().and_then(|s| Store::from_id(&s)) {
+            // None: Lobby asked first (Ubuntu's permission); the window shows the question.
             let web = u.sign_in(store);
             let page = file.with_extension("page.png");
             glib::timeout_future(std::time::Duration::from_secs(8)).await;
-            web.snapshot(webkit6::SnapshotRegion::Visible, webkit6::SnapshotOptions::NONE, gio::Cancellable::NONE, move |r| {
-                eprintln!("page snapshot: {:?}", r.map(|t| t.save_to_png(&page)));
-            });
+            if let Some(web) = web {
+                web.snapshot(webkit6::SnapshotRegion::Visible, webkit6::SnapshotOptions::NONE, gio::Cancellable::NONE, move |r| {
+                    eprintln!("page snapshot: {:?}", r.map(|t| t.save_to_png(&page)));
+                });
+            }
         }
         // The downloads of installed games are found after the scan: a page's row and the
         // clean-up list need them (LOBBY_SNAPSHOT_CLEANUP=1 opens the list).
@@ -2638,9 +2650,7 @@ impl Ui {
             };
             u.free_button.set_label(&if count > 0 { format!("Free games ({count})") } else { "Free games".to_string() });
             if new && !checking {
-                if let Ok(lobby) = std::env::current_exe() {
-                    let _ = std::process::Command::new(lobby).args(["free", "--notify"]).stdin(std::process::Stdio::null()).process_group(0).spawn();
-                }
+                let _ = std::process::Command::new(crate::me()).args(["free", "--notify"]).stdin(std::process::Stdio::null()).process_group(0).spawn();
             }
         });
     }
@@ -2698,7 +2708,7 @@ impl Ui {
     /// and says what was added.
     fn claim(self: &Rc<Self>, games: Vec<crate::free::FreeGame>) -> Option<webkit6::WebView> {
         use crate::free::Claim;
-        if games.is_empty() {
+        if games.is_empty() || !self.web_allowed() {
             return None;
         }
         let session = webkit6::NetworkSession::new_ephemeral();
@@ -2866,7 +2876,7 @@ impl Ui {
                         u.rescan();
                     });
                 } else {
-                    u.sign_in(store);
+                    let _ = u.sign_in(store);
                 }
             });
         }
@@ -2875,7 +2885,10 @@ impl Ui {
 
     /// The store's own sign-in page, in a browser view that keeps nothing (no cookies, no
     /// history): once it hands over the sign-in code, the store tool signs in with it.
-    fn sign_in(self: &Rc<Self>, store: Store) -> webkit6::WebView {
+    fn sign_in(self: &Rc<Self>, store: Store) -> Option<webkit6::WebView> {
+        if !self.web_allowed() {
+            return None;
+        }
         let session = webkit6::NetworkSession::new_ephemeral();
         let web = webkit6::WebView::builder().network_session(&session).vexpand(true).hexpand(true).build();
         let view = adw::ToolbarView::new();
@@ -2919,7 +2932,7 @@ impl Ui {
         });
         web.load_uri(store.sign_in_page());
         dialog.present(Some(&self.window));
-        web
+        Some(web)
     }
 
     fn finish_sign_in(self: &Rc<Self>, store: Store, code: String) {
@@ -2938,6 +2951,57 @@ impl Ui {
             }
             u.rescan();
         });
+    }
+
+    /// Whether a web page (a store's sign-in, the checkout) may open: WebKit runs pages in a
+    /// sandbox Ubuntu stops until Lobby is allowed (and then quits Lobby with it). Allowing
+    /// only covers programs started afterwards: a game is (Play starts Lobby again), but this
+    /// window's pages aren't, so Lobby offers to restart. Asks, and says no, when not.
+    fn web_allowed(self: &Rc<Self>) -> bool {
+        // WebKit's page sandbox runs this program by that path, and quits Lobby without it.
+        if !std::path::Path::new("/usr/bin/xdg-dbus-proxy").exists() {
+            let how = crate::programs::named("xdg-dbus-proxy").map(|p| crate::programs::install_command(&[p])).unwrap_or_default();
+            self.alert("Store pages can't open yet", &format!("They open in a sandbox that needs xdg-dbus-proxy, a small program this computer lacks. Install it in a terminal:\n{how}"));
+            return false;
+        }
+        if !crate::apparmor::blocked_here() {
+            return true;
+        }
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            if crate::apparmor::blocked() {
+                let alert = adw::AlertDialog::new(Some("Allow Lobby to open store pages?"), Some(&format!("{} Store pages open in a sandbox too. Lobby can add itself to the programs Ubuntu knows (a file in /etc/apparmor.d); you'll be asked for your password once, and Lobby restarts.", crate::apparmor::WHY)));
+                alert.add_responses(&[("cancel", "Not now"), ("allow", "Allow Lobby")]);
+                alert.set_response_appearance("allow", adw::ResponseAppearance::Suggested);
+                alert.set_default_response(Some("allow"));
+                if alert.choose_future(Some(&u.window)).await != "allow" {
+                    return;
+                }
+                if let Err(e) = gio::spawn_blocking(|| crate::apparmor::allow(false)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                    u.alert("Lobby isn't allowed yet", &e);
+                    return;
+                }
+                u.asked_apparmor.set(true);
+            } else {
+                let alert = adw::AlertDialog::new(Some("Restart Lobby first"), Some("Lobby is allowed now, but this window was opened before: store pages open once it restarts."));
+                alert.add_responses(&[("cancel", "Not now"), ("restart", "Restart")]);
+                alert.set_response_appearance("restart", adw::ResponseAppearance::Suggested);
+                alert.set_default_response(Some("restart"));
+                if alert.choose_future(Some(&u.window)).await != "restart" {
+                    return;
+                }
+            }
+            u.restart();
+        });
+        false
+    }
+
+    /// Lobby quits and starts again (a second start would only bring this window up).
+    fn restart(&self) {
+        let _ = std::process::Command::new("sh").args(["-c", "sleep 1; exec \"$0\""]).arg(crate::me()).stdin(std::process::Stdio::null()).process_group(0).spawn();
+        if let Some(app) = self.window.application() {
+            app.quit();
+        }
     }
 
     fn play(self: &Rc<Self>, id: &str) {

@@ -104,20 +104,29 @@ pub fn settle(game: &mut Game) -> bool {
 }
 
 fn lobby_exe() -> String {
-    std::env::current_exe().map_or_else(|_| "lobby".to_string(), |p| p.display().to_string())
+    crate::me().display().to_string()
+}
+
+/// Whether a command's first word is Lobby: `lobby`, its AppImage (this one, or a file named
+/// Lobby….AppImage: an older download a shortcut still names), or Lobby running inside an
+/// AppImage (its mount's AppRun, as a process names itself).
+pub fn is_lobby(word: &str) -> bool {
+    let path = Path::new(word);
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    name == "lobby" || (name.starts_with("lobby") && name.ends_with(".appimage")) || path == crate::me() || (word.contains("/.mount_Lobby") && name.starts_with("apprun"))
 }
 
 /// `<lobby> sandbox <id> --` before a command: how lobby (and gamefix's entries, once they
 /// carry it) runs a game protected. The words after it, when there.
 pub fn unwrapped(words: &[String]) -> Option<&[String]> {
-    let lobby = words.first().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "lobby"));
+    let lobby = words.first().is_some_and(|w| is_lobby(w));
     (lobby && words.get(1).is_some_and(|w| w == "sandbox") && words.get(3).is_some_and(|w| w == "--")).then(|| &words[4..])
 }
 
 /// The command Play runs: the game's own inside the sandbox, unless it's off (or `lobby run`,
 /// which sandboxes the game itself and needs the store's sign-in outside).
 pub fn wrap(game: &Game, command: Vec<String>) -> Vec<String> {
-    let lobby_run = command.first().is_some_and(|w| w.ends_with("lobby")) && command.get(1).is_some_and(|w| w == "run");
+    let lobby_run = command.first().is_some_and(|w| is_lobby(w)) && command.get(1).is_some_and(|w| w == "run");
     // Off too: `lobby sandbox` then runs it as it is, and times it (`playtime`).
     if lobby_run || unwrapped(&command).is_some() {
         return command;
@@ -126,9 +135,10 @@ pub fn wrap(game: &Game, command: Vec<String>) -> Vec<String> {
 }
 
 /// The installed lobby (run/install.sh's), which app-menu entries name: not a build being tried.
+/// An AppImage names itself.
 fn installed_lobby() -> String {
     let installed = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/bin/lobby");
-    if installed.is_file() { installed.display().to_string() } else { lobby_exe() }
+    if installed.is_file() && std::env::var_os("APPIMAGE").is_none() { installed.display().to_string() } else { lobby_exe() }
 }
 
 /// Makes gamefix's app-menu entry for the game start it as Play does: `lobby sandbox <id> --`
@@ -787,6 +797,16 @@ pub fn summary(game: &Game) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_lobby_in_every_form() {
+        for w in ["/home/p/.local/bin/lobby", "/home/p/Applications/Lobby-x86_64.AppImage", "/home/p/Downloads/lobby-0.3.appimage", "/tmp/.mount_Lobby-AbC123/AppRun.wrapped"] {
+            assert!(is_lobby(w), "{w}");
+        }
+        for w in ["/usr/bin/umu-run", "/home/p/Applications/Other.AppImage", "/tmp/.mount_Other-x/AppRun.wrapped", "/home/p/lobby-tools/x"] {
+            assert!(!is_lobby(w), "{w}");
+        }
+    }
 
     fn spec(level: Level) -> Spec {
         Spec {

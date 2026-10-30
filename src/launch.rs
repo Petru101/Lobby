@@ -541,7 +541,7 @@ fn store_plan(game: &Game) -> Option<Plan> {
     if wine_command(game).is_none() {
         return Some(Plan::SetUp(folder));
     }
-    let lobby = std::env::current_exe().map_or_else(|_| "lobby".to_string(), |p| p.display().to_string());
+    let lobby = crate::me().display().to_string();
     let setup = match crate::stores::wine_setup(store, &id) {
         Some(s) => format!("in the Wine prefix it had in Heroic, {}", s.prefix.display()),
         None => "as its gamefix setup runs it".to_string(),
@@ -722,7 +722,7 @@ pub fn with_options(command: Vec<String>, options: Option<&str>) -> Result<Vec<S
     let Some(text) = options.filter(|o| !o.trim().is_empty()) else { return Ok(command) };
     let o = parse_options(text)?;
     let first = command.first().map(String::as_str).unwrap_or_default();
-    if command.get(1).is_some_and(|w| w == "run") && first.ends_with("lobby") {
+    if command.get(1).is_some_and(|w| w == "run") && crate::sandbox::is_lobby(first) {
         return Ok(command);
     }
     if first == "steam" {
@@ -794,7 +794,7 @@ pub fn with_runtimes(command: Vec<String>, runtimes: &[(&str, PathBuf)]) -> Vec<
 /// `lobby run` adds it itself.
 pub fn with_frame_rate(command: Vec<String>) -> Result<Vec<String>, String> {
     let first = command.first().map(String::as_str).unwrap_or_default();
-    if command.get(1).is_some_and(|w| w == "run") && first.ends_with("lobby") {
+    if command.get(1).is_some_and(|w| w == "run") && crate::sandbox::is_lobby(first) {
         return Ok(command);
     }
     if first == "steam" {

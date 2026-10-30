@@ -73,7 +73,7 @@ pub fn find(games: &[Game]) -> HashMap<String, Vec<i32>> {
     let steam_app = |g: &Game| g.entries.iter().flat_map(|e| e.keys.iter()).find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
     let programs: Vec<(&Game, &Path)> = games.iter().filter(|g| g.kind == Kind::Game && !g.gone).flat_map(|g| g.entries.iter().filter_map(move |e| e.program.as_deref().map(|p| (g, p)))).collect();
     for p in &procs {
-        let lobby = p.args.first().is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "lobby"));
+        let lobby = p.args.first().is_some_and(|a| crate::sandbox::is_lobby(a));
         // `lobby sandbox <id> -- …` (not Battle.net's own: it isn't a game) and `lobby run <id>`.
         if lobby && p.args.get(1).is_some_and(|a| a == "sandbox") && p.args.get(3).is_some_and(|a| a == "--") && !p.args.iter().any(|a| a.contains("Battle.net.exe")) {
             out.entry(p.args[2].clone()).or_default().push(p.pid);
@@ -143,7 +143,7 @@ pub struct Stopped {
 pub fn stop(game: &Game, all: &[Game], patience: std::time::Duration) -> Result<Stopped, String> {
     let roots = find(all).remove(&game.id).ok_or_else(|| format!("{} isn't running.", game.name))?;
     let targets = |procs: &[Process]| -> Vec<i32> {
-        let wrapper = |pid: i32| procs.iter().find(|p| p.pid == pid).is_some_and(|p| p.args.first().is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "lobby")) || p.args.iter().any(|a| a == "SteamLaunch"));
+        let wrapper = |pid: i32| procs.iter().find(|p| p.pid == pid).is_some_and(|p| p.args.first().is_some_and(|a| crate::sandbox::is_lobby(a)) || p.args.iter().any(|a| a == "SteamLaunch"));
         let mut t: Vec<i32> = procs.iter().filter(|p| roots.iter().any(|&r| descends(procs, p.pid, r))).map(|p| p.pid).collect();
         // A game's own process (no wrapper) goes too.
         t.extend(roots.iter().filter(|&&r| !wrapper(r)));
