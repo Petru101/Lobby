@@ -9,6 +9,9 @@ Lobby is a game launcher for Linux (GTK 4 and libadwaita), written in Rust. It's
 used daily on one computer (Bazzite, KDE Plasma, NVIDIA), tested on Ubuntu 24.04 and 26.04,
 Fedora 44 and Arch, and isn't packaged yet.
 
+<img width="1330" height="910" alt="image" src="https://github.com/user-attachments/assets/4305bbb6-d44b-4ae6-9443-d20a8a249725" />
+
+
 ## What it does
 
 - **Finds every game.** It reads what Steam, Heroic, Lutris, Faugus and the app menu know, the
