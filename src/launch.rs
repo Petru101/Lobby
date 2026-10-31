@@ -28,7 +28,48 @@ fn is_gamefix_entry(e: &Entry) -> bool {
 }
 
 /// How a game starts, from the entries it was found by, best first.
+/// How Play starts it: as it was set up, with a Proton that has moved since (a Steam library moved
+/// to another drive takes its Protons along) found again.
 pub fn plan(game: &Game) -> Plan {
+    match plan_as_set_up(game) {
+        Plan::Run { how, command, cwd, protect } => Plan::Run { how, command: proton_found(command), cwd, protect },
+        other => other,
+    }
+}
+
+/// A Proton folder: its `proton` script is there.
+fn is_proton(dir: &Path) -> bool {
+    dir.join("proton").is_file()
+}
+
+/// Where a Proton named in a setup is now, when it's no longer where it was: the folder of the
+/// same name (so the same Proton: a prefix mustn't meet another) in Steam's libraries or its
+/// compatibilitytools.d folders.
+fn moved_proton(old: &Path) -> Option<PathBuf> {
+    if is_proton(old) {
+        return None;
+    }
+    let name = old.file_name()?;
+    let home = crate::sources::Home::find()?;
+    let libraries = crate::sources::steam::known_libraries(&home).into_iter().map(|l| l.join("steamapps/common"));
+    libraries.chain(compat_tool_dirs()).map(|d| d.join(name)).find(|d| is_proton(d))
+}
+
+/// The command with each Proton that has moved (PROTONPATH=, or a path inside it) at its new
+/// place.
+pub fn proton_found(command: Vec<String>) -> Vec<String> {
+    let moved: Vec<(String, String)> = command
+        .iter()
+        .filter_map(|w| w.strip_prefix("PROTONPATH="))
+        .filter_map(|old| Some((old.trim_end_matches('/').to_string(), moved_proton(Path::new(old))?.display().to_string())))
+        .collect();
+    if moved.is_empty() {
+        return command;
+    }
+    command.into_iter().map(|w| moved.iter().fold(w, |w, (old, new)| w.replace(old.as_str(), new))).collect()
+}
+
+fn plan_as_set_up(game: &Game) -> Plan {
     if let Some(note) = game.entries.iter().find_map(|e| e.note.as_ref()).filter(|_| game.kind == Kind::WrongSystem) {
         return Plan::Cannot(format!("{note}. The game's page may have a version for Windows or Linux."));
     }

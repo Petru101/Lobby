@@ -63,13 +63,21 @@ pub fn after(seconds: u64) -> String {
 /// The likely reason, in plain words, from the game's command and what it printed (the last
 /// lines win: Wine prints warnings all along).
 pub fn why(command: &[String], log: &str) -> Option<String> {
-    if let Some(ac) = command.iter().find_map(|w| crate::anticheat::in_path(w)) {
+    // Not the anti-cheat runtimes Lobby offers every Proton game (PROTON_BATTLEYE_RUNTIME=…):
+    // they named BattlEye for every failed start.
+    let runtime = |w: &str| w.contains("_RUNTIME=") || w.contains("/lobby/tools/");
+    if let Some(ac) = command.iter().filter(|w| !runtime(w)).find_map(|w| crate::anticheat::in_path(w)) {
         return Some(format!("It starts through {ac}, which runs on Linux only for games whose makers allow it."));
     }
     let lines: Vec<&str> = log.lines().collect();
     let tail = &lines[lines.len().saturating_sub(400)..];
     let find = |needle: &str| tail.iter().rev().find(|l| l.contains(needle)).copied();
-    for l in tail.iter().rev() {
+    // umu: "PROTONPATH '…' is not valid, toolmanifest.vdf not found".
+    if let Some(l) = find("PROTONPATH '") {
+        let path = l.split('\'').nth(1).unwrap_or("its Proton");
+        return Some(format!("Its Proton isn't where its setup says ({path}): it was moved or uninstalled. Install it again in Steam (Lobby finds a Proton moved to another Steam library by itself)."));
+    }
+    for l in tail.iter().rev().filter(|l| !runtime(l)) {
         if let Some(ac) = ["EasyAntiCheat", "Easy Anti-Cheat", "BattlEye", "BEClient", "EOS_AntiCheat", "AntiCheat"].iter().find(|a| l.contains(**a)) {
             let name = crate::anticheat::named(&ac.replace(' ', "")).unwrap_or("Its anti-cheat");
             return Some(format!("{name} stopped it: on Linux it runs only for games whose makers allow it."));
@@ -106,6 +114,10 @@ mod tests {
     #[test]
     fn reasons() {
         let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let proton = cmd(&["env", "PROTON_BATTLEYE_RUNTIME=/h/.local/share/lobby/tools/battleye_runtime-2024-05-21", "PROTONPATH=/s/Proton - Experimental", "umu-run", "/g/CoreBreaker.exe"]);
+        let log = "FileNotFoundError: PROTONPATH '/s/Proton - Experimental' is not valid, toolmanifest.vdf not found";
+        assert!(why(&proton, log).unwrap().contains("Its Proton isn't where its setup says (/s/Proton - Experimental)"));
+        assert_eq!(why(&proton, ""), None);
         let plain = cmd(&["umu-run", "/g/game.exe"]);
         assert!(why(&cmd(&["umu-run", "/g/start_protected_game.exe"]), "").unwrap().contains("Easy Anti-Cheat"));
         assert_eq!(why(&plain, "0024:err:module:import_dll Library MSVCP140.dll (which is needed by L\"Z:\\\\g\\\\game.exe\") not found\n").as_deref(), Some("A Windows file it needs is missing: MSVCP140.dll."));

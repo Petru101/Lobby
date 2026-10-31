@@ -267,6 +267,9 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
     // umu-run by its path: Lobby's own (in its folder in the home) is then there, read-only,
     // in an isolated home too.
     let words: Vec<String> = words.iter().map(|w| if w == "umu-run" { crate::launch::program_on_path(w).map_or(w.clone(), |p| real(&p).display().to_string()) } else { w.clone() }).collect();
+    // A Proton that moved since the game was set up (app-menu entries and shortcuts come here
+    // with the old place).
+    let words = crate::launch::proton_found(words);
     let words = &words[..];
     let (program, args) = words.split_first().ok_or("empty command")?;
     let level = level(game);
@@ -298,7 +301,8 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
         level,
         internet: internet(game),
         game: game_folders(game, env, words, cwd, &home),
-        reads: named_paths(env, words).into_iter().filter(|p| hidden_area(p, &home)).collect(),
+        reads: named_paths(env, words).into_iter().filter(|p| hidden_area(p, &home) && !p.join("proton").is_file()).collect(),
+        protons: named_paths(env, words).into_iter().filter(|p| p.join("proton").is_file() && !steam_roots(&home).iter().any(|r| p.starts_with(home.join(r)))).collect(),
         devices: devices(),
         sockets: runtime.as_deref().map(sockets).unwrap_or_default(),
         x11: x11_socket(),
@@ -416,6 +420,9 @@ struct Spec {
     game: Vec<PathBuf>,
     /// Read-only: other paths the command names (Java, a config file gamefix wrote ...).
     reads: Vec<PathBuf>,
+    /// Protons the command names outside Steam's folder in the home (a Steam library on another
+    /// drive): usable, unchanged, like those in it (Proton writes a lock file into its folder).
+    protons: Vec<PathBuf>,
     devices: Vec<PathBuf>,
     /// Display, sound and Discord sockets under the runtime folder: (the socket, where it goes).
     sockets: Vec<(PathBuf, PathBuf)>,
@@ -597,8 +604,9 @@ fn args_for(s: &Spec) -> Vec<String> {
     }
     // umu's runtime and Proton: usable, unchanged.
     let proton = |n: &Path| s.steam.iter().any(|r| n == r.join("compatibilitytools.d") || n.starts_with(r.join("steamapps/common")));
-    for (rel, _) in s.present.iter().filter(|(n, dir)| *dir && (TOOLS.iter().any(|t| Path::new(t) == n) || proton(n))) {
-        let path = p(&at_home(rel));
+    let in_home = s.present.iter().filter(|(n, dir)| *dir && (TOOLS.iter().any(|t| Path::new(t) == n) || proton(n))).map(|(rel, _)| at_home(rel));
+    for path in in_home.chain(s.protons.iter().cloned()) {
+        let path = p(&path);
         match s.overlays {
             true => push(&["--overlay-src", &path, "--tmp-overlay", &path]),
             false => push(&["--bind", &path, &path]),
@@ -817,6 +825,7 @@ mod tests {
             private: Some("/home/p/.local/share/lobby/sandboxes/g".into()),
             game: vec!["/run/media/p/Games/G".into(), "/home/p/.local/share/gamefix/prefixes/g".into()],
             reads: vec!["/home/p/.local/share/gamefix/java/25".into(), "/run/media/p/Games/G/G.exe".into()],
+            protons: vec!["/run/media/p/Games/SteamLibrary/steamapps/common/Proton - Experimental".into()],
             devices: vec!["/dev/dri".into()],
             sockets: vec![("/run/user/1000/wayland-0".into(), "/run/user/1000/wayland-0".into())],
             x11: None,
@@ -825,6 +834,17 @@ mod tests {
             overlays: true,
             steam: vec![".local/share/Steam".into()],
             present: vec![(".ssh".into(), true), (".bashrc".into(), false), (".local/share/umu".into(), true), (".local/share/Steam".into(), true), (".local/share/Steam/linux64".into(), true), ("invent-kde-token".into(), false), (".local/share/gamefix".into(), true)],
+        }
+    }
+
+    #[test]
+    fn a_proton_on_another_drive_is_usable_unchanged() {
+        let proton = "/run/media/p/Games/SteamLibrary/steamapps/common/Proton - Experimental";
+        for level in [Level::Standard, Level::Isolated] {
+            let a = args_for(&spec(level));
+            let masked = a.windows(2).position(|w| w == ["--tmpfs", "/run/media"]);
+            let layer = a.windows(4).position(|w| w == ["--overlay-src", proton, "--tmp-overlay", proton]).unwrap();
+            assert!(masked.is_none_or(|m| m < layer), "{level:?}");
         }
     }
 
