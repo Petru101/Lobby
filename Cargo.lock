@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "lobby"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "flate2",
  "gamefix",
