@@ -266,9 +266,13 @@ pub fn entries(home: &Home, found: &[Entry]) -> Vec<Entry> {
     // downloaded game (its folder then isn't scanned as a folder: the entry has it).
     for e in found.iter().filter(|e| matches!(e.source, Source::Folder | Source::AppMenu | Source::Gamefix | Source::SteamShortcut) && e.program.is_some()) {
         let folder_name = e.folder.as_deref().map(stem).unwrap_or_default();
+        // The download Lobby installed the folder from, which may be deleted since: then only
+        // the folder's note ties them (corrupted-boundary-win64-prealpha.zip, a name too far
+        // from "Corrupted Boundary" to match, lost the game its cover).
+        let source = e.folder.as_deref().and_then(|f| fs::read_to_string(f.join(crate::install::SOURCE_NOTE)).ok()).map(|s| crate::library::norm(Path::new(s.trim())));
         let hit = downloads
             .iter()
-            .find(|d| e.program.as_deref() == Some(d.file.as_path()))
+            .find(|d| e.program.as_deref() == Some(d.file.as_path()) || source.as_deref() == Some(crate::library::norm(&d.file).as_path()))
             .or_else(|| downloads.iter().find(|d| same_name(&stem(&d.file), &folder_name) || same_name(&stem(&d.file), &e.name)));
         if let Some(d) = hit {
             matched.push((e, d));

@@ -5,6 +5,7 @@ mod artwork;
 mod backups;
 mod battlenet;
 mod clients;
+mod covers;
 mod drives;
 mod free;
 mod import;
@@ -409,7 +410,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     // A shortcut naming a game the library lost (deleted, say) still starts it, at Standard.
     let game = Library::load().unwrap_or_default().games.into_iter().find(|g| g.id == id).unwrap_or_else(|| {
         eprintln!("lobby: no game \"{id}\" in the library: starting it with Standard protection.");
-        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None }
+        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
     });
     // The launch options and frame rate, for Play and the shortcuts alike (Play leaves them to
     // this). Not Battle.net's: its options are set in Battle.net. A shortcut still starts when
@@ -554,6 +555,7 @@ pub fn find_games() -> Result<Vec<Game>, String> {
     let found = sources::scan(&home);
     let mut games = log::timed("scan: merging", || library::merge(found.entries, &found.roots));
     log::timed("scan: covers", || artwork::fill(&home, &mut games));
+    log::timed("scan: keeping covers", || covers::keep(&mut games));
     Ok(games)
 }
 

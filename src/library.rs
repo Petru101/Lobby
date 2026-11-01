@@ -228,6 +228,12 @@ pub struct Game {
     /// (`launch::with_proton`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proton: Option<PathBuf>,
+    /// Its cover and icon as last found, copied into Lobby's folder (`covers::keep`): shown
+    /// when what they came from is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_cover: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_icon: Option<PathBuf>,
 }
 
 impl Game {
@@ -320,12 +326,17 @@ impl Game {
         if let Some(c) = &self.chosen_cover {
             return Some(c);
         }
+        self.found_cover().or_else(|| self.kept_cover.as_deref().filter(|c| Path::new(c).is_file()))
+    }
+
+    /// The cover its sources give it now.
+    pub fn found_cover(&self) -> Option<&str> {
         let covers = || self.entries.iter().filter_map(|e| e.cover.as_deref());
         covers().find(|c| c.starts_with('/') && Path::new(c).is_file()).or_else(|| covers().find(|c| c.starts_with("https://")))
     }
 
     pub fn icon(&self) -> Option<&Path> {
-        self.entries.iter().filter_map(|e| e.icon.as_deref()).find(|p| p.is_file())
+        self.entries.iter().filter_map(|e| e.icon.as_deref()).find(|p| p.is_file()).or_else(|| self.kept_icon.as_deref().filter(|p| p.is_file()))
     }
 }
 
@@ -566,7 +577,7 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             };
             let paths: Vec<&PathBuf> = entries.iter().flat_map(|e| [e.folder.as_ref(), e.program.as_ref()]).flatten().collect();
             let missing = !paths.is_empty() && !paths.iter().any(|p| p.exists());
-            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None }
+            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
         })
         .collect();
     games.sort_by_key(|g| g.name.to_lowercase());

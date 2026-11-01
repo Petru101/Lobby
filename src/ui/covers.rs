@@ -1,44 +1,12 @@
 //! Cover art for the cards: read and shrunk off the main thread, web covers downloaded once
-//! into ~/.local/share/lobby/covers/web (kept like the rest of the library: a cache cleaner
-//! won't take them).
+//! into Lobby's covers folder (`crate::covers`).
 
 use gtk::{gdk, gio, glib};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 /// Cards are 180x270; twice that for sharp covers on scaled screens.
 const WIDTH: u32 = 360;
 const HEIGHT: u32 = 540;
-
-fn covers_dir() -> PathBuf {
-    let dir = crate::store::dir().join("covers/web");
-    // Downloaded into the cache folder before: moved over once.
-    if !dir.exists() {
-        let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
-        let old = cache.join("lobby/covers");
-        if old.is_dir() && std::fs::create_dir_all(dir.parent().unwrap_or(&dir)).is_ok() {
-            let _ = std::fs::rename(&old, &dir);
-        }
-    }
-    dir
-}
-
-/// A web cover's local copy, downloaded the first time (curl, which every desktop has).
-fn fetch(url: &str) -> Option<PathBuf> {
-    let file = covers_dir().join(format!("{}.img", crate::sha256_hex(url.as_bytes())));
-    if file.is_file() {
-        return Some(file);
-    }
-    std::fs::create_dir_all(file.parent()?).ok()?;
-    let tmp = file.with_extension("part");
-    let ok = Command::new("curl").args(["-sfL", "--max-time", "30", "-o"]).arg(&tmp).arg(url).stdin(Stdio::null()).status().is_ok_and(|s| s.success());
-    if !ok {
-        let _ = std::fs::remove_file(&tmp);
-        return None;
-    }
-    std::fs::rename(&tmp, &file).ok()?;
-    Some(file)
-}
 
 /// The image shrunk to the card's size, as RGBA bytes.
 fn decode(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
@@ -52,7 +20,7 @@ fn decode(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
 pub fn load(cover: String, ready: impl FnOnce(Option<gdk::MemoryTexture>) + 'static) {
     glib::spawn_future_local(async move {
         let decoded = gio::spawn_blocking(move || {
-            let path = if cover.starts_with("https://") { fetch(&cover)? } else { PathBuf::from(&cover) };
+            let path = if cover.starts_with("https://") { crate::covers::web_copy(&cover)? } else { PathBuf::from(&cover) };
             decode(&path)
         })
         .await

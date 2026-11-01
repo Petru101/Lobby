@@ -107,6 +107,9 @@ impl Library {
             game.favourite = o.favourite;
             game.frame_rate = o.frame_rate;
             game.proton = o.proton;
+            // A cover no source gives any more: the copy kept of it.
+            game.kept_cover = game.kept_cover.take().or(o.kept_cover);
+            game.kept_icon = game.kept_icon.take().or(o.kept_icon);
         }
         for (game, matched) in games.iter_mut().zip(matched) {
             if !matched {
@@ -217,7 +220,7 @@ mod tests {
     fn game(name: &str, key: Key) -> Game {
         let mut e = Entry::new(Source::Steam, name);
         e.keys.push(key);
-        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None }
+        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
     }
 
     #[test]
@@ -234,6 +237,14 @@ mod tests {
         assert_eq!((v.id.as_str(), v.played, v.gone), ("valheim", Some(5), false));
         assert_eq!(v.cover(), Some("/covers/valheim.png"));
         assert!(lib.games.iter().any(|g| g.name == "Brotato" && g.gone));
+        // Its kept cover stays when no source gives one, and is replaced by a new one.
+        lib.get_mut("valheim").unwrap().kept_cover = Some("/kept/a.jpg".into());
+        lib.update(vec![game("Valheim", Key::SteamApp(892970))]);
+        assert_eq!(lib.get_mut("valheim").unwrap().kept_cover.as_deref(), Some("/kept/a.jpg"));
+        let mut newer = game("Valheim", Key::SteamApp(892970));
+        newer.kept_cover = Some("/kept/b.jpg".into());
+        lib.update(vec![newer]);
+        assert_eq!(lib.get_mut("valheim").unwrap().kept_cover.as_deref(), Some("/kept/b.jpg"));
     }
 
     #[test]
