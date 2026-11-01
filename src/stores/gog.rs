@@ -4,7 +4,7 @@
 //! (each install's manifest, which updates patch from) go in ~/.config/lobby/heroic_gogdl
 //! (GOGDL_CONFIG_PATH), not the ~/.config/heroic_gogdl it uses by default.
 
-use super::{config_dir, config_home, get_json, output, post_json, read_json, run_with_progress, tools, Dlc, Installed, Owned, Update};
+use super::{config_dir, config_home, get_json, output, read_json, run_with_progress, tools, Dlc, Installed, Owned, Update};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,15 +63,40 @@ pub fn giveaway_claimed() -> Result<bool, String> {
     v.get("isClaimed").and_then(|c| c.as_bool()).ok_or_else(|| "GOG didn't say whether it's claimed".to_string())
 }
 
-/// Claims GOG's current giveaway for the signed-in account, as gog.com's own button does: a POST
-/// with the account's token (Lobby's GOG sign-in is accepted), then GOG asked again to be sure.
-pub fn claim_giveaway() -> Result<(), String> {
-    post_json("https://www.gog.com/giveaway/claim", &token()?, "{}").map_err(|e| format!("GOG didn't take the claim: {e}"))?;
-    match giveaway_claimed() {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("GOG took the claim but doesn't show it as claimed yet.".into()),
-        Err(e) => Err(e),
+/// gog.com's sign-in cookies for the signed-in account (gog-al and the rest), which GOG sets in
+/// answer to a request carrying the account's token: a web page given them is signed in to
+/// gog.com, no password. (name, value) pairs.
+pub fn web_cookies() -> Result<Vec<(String, String)>, String> {
+    let token = token()?;
+    let mut child = Command::new("curl")
+        .args(["-sS", "--max-time", "30", "-A", "lobby", "-o", "/dev/null", "-c", "-", "-H", "@-", "https://www.gog.com/giveaway/status"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().unwrap();
+    let _ = std::io::Write::write_all(&mut stdin, format!("Authorization: Bearer {token}\n").as_bytes());
+    drop(stdin);
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let cookies = parse_cookie_jar(&String::from_utf8_lossy(&out.stdout));
+    if !cookies.iter().any(|(n, _)| n == "gog-al") {
+        return Err("GOG didn't sign the page in: sign in to GOG again in Accounts.".into());
     }
+    Ok(cookies)
+}
+
+/// curl's cookie jar (Netscape's format: domain, subdomains, path, secure, expiry, name, value
+/// by tabs; httponly ones start "#HttpOnly_"): the gog.com cookies' names and values.
+fn parse_cookie_jar(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(|l| l.strip_prefix("#HttpOnly_").unwrap_or(l))
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f.len() == 7 && f[0].trim_start_matches('.').ends_with("gog.com")).then(|| (f[5].to_string(), f[6].to_string()))
+        })
+        .collect()
 }
 
 pub fn sign_out() -> Result<(), String> {
@@ -302,4 +327,15 @@ pub fn install(id: &str, games: &Path, progress: &dyn Fn(f64)) -> Result<PathBuf
     let build = info.get("buildId").and_then(|b| b.as_str()).map(String::from);
     record(Installed { id: id.to_string(), title, folder: folder.clone(), program, build, platform: None })?;
     Ok(folder)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_curls_cookie_jar() {
+        let jar = "# Netscape HTTP Cookie File\n\n#HttpOnly_.gog.com\tTRUE\t/\tTRUE\t1817000000\tgog-al\tabc\n.gog.com\tTRUE\t/\tFALSE\t1817000000\tgog_lc\tGB_GBP_en-US\n.example.com\tTRUE\t/\tFALSE\t0\tx\ty\n";
+        assert_eq!(parse_cookie_jar(jar), vec![("gog-al".to_string(), "abc".to_string()), ("gog_lc".into(), "GB_GBP_en-US".into())]);
+    }
 }

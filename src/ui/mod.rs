@@ -829,6 +829,11 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if let Some(title) = &claiming {
             let t = title.clone();
             let games = gio::spawn_blocking(move || crate::free::list().unwrap_or_default().into_iter().filter(|g| t.split(',').any(|w| w == g.title)).collect::<Vec<_>>()).await.unwrap_or_default();
+            let (gog, games): (Vec<_>, Vec<_>) = games.into_iter().partition(|g| matches!(g.claim, crate::free::Claim::GogGiveaway(_)));
+            if let Some(g) = gog.into_iter().next() {
+                u.claim_gog(g);
+                glib::timeout_future(std::time::Duration::from_secs(25)).await;
+            }
             if let Some(web) = u.claim(games) {
                 glib::timeout_future(std::time::Duration::from_secs(35)).await;
                 let page = file.with_extension("page.png");
@@ -2669,13 +2674,12 @@ impl Ui {
             })
             .await
             .unwrap_or_default();
-            // GOG's giveaway needs no page: claimed at once.
-            if crate::stores::Store::Gog.account().is_some() {
-                if let Some(g) = all.iter().find(|g| matches!(g.claim, crate::free::Claim::GogGiveaway(_))) {
-                    u.claim_gog(g.clone());
-                }
-            }
+            // GOG's giveaway has a page of its own: when there's nothing on Epic to claim.
+            let gog = all.iter().find(|g| matches!(g.claim, crate::free::Claim::GogGiveaway(_))).cloned().filter(|_| crate::stores::Store::Gog.account().is_some());
             let games: Vec<_> = all.into_iter().filter(|g| g.store == crate::stores::Store::Epic.name()).collect();
+            if let (Some(g), true) = (gog, games.is_empty() || crate::stores::Store::Epic.account().is_none()) {
+                return u.claim_gog(g);
+            }
             if games.is_empty() || crate::stores::Store::Epic.account().is_none() {
                 u.free_games();
             } else {
@@ -2744,11 +2748,9 @@ impl Ui {
             }
             body.append(&button);
             let (u, d, game) = (self.clone(), dialog.clone(), g.clone());
-            button.connect_clicked(move |b| match &game.claim {
+            button.connect_clicked(move |_| match &game.claim {
                 Claim::Browser(url) => gtk::UriLauncher::new(url).launch(Some(&u.window), gio::Cancellable::NONE, |_| {}),
                 Claim::GogGiveaway(_) if gog => {
-                    b.set_sensitive(false);
-                    b.set_label("Claiming…");
                     d.close();
                     u.claim_gog(game.clone());
                 }
@@ -2762,24 +2764,76 @@ impl Ui {
         gtk::FlowBoxChild::builder().child(&body).tooltip_text(&g.title).build()
     }
 
-    /// Claims GOG's giveaway with Lobby's GOG sign-in (no page: GOG's own claim, as its button
-    /// does), fetches the owned list so it shows in the library, and says so.
+    /// GOG's giveaway: gog.com's front page in Lobby's window, signed in with Lobby's GOG
+    /// sign-in (the cookies GOG gives for its token), scrolled to the giveaway, whose button the
+    /// user presses (GOG refuses its claim from anything but a browser; Lobby presses nothing on
+    /// GOG's pages). Lobby asks GOG every 2 s whether it's claimed; then it fetches the owned
+    /// list, says so and closes.
     fn claim_gog(self: &Rc<Self>, game: crate::free::FreeGame) {
+        if !self.web_allowed() {
+            return;
+        }
         let u = self.clone();
         glib::spawn_future_local(async move {
-            let done = gio::spawn_blocking(|| {
-                crate::stores::gog::claim_giveaway()?;
-                crate::stores::Store::Gog.refresh_owned().map(|_| ())
-            })
-            .await
-            .unwrap_or_else(|_| Err("it stopped with an error".into()));
-            crate::log::line(&format!("claim: GOG's giveaway {}: {}", game.title, done.as_ref().map_or_else(|e| e.as_str(), |()| "claimed")));
-            match done {
-                Ok(()) => u.toast(&format!("{} is in your GOG library.", game.title)),
-                Err(e) => u.alert(&format!("{} wasn't claimed", game.title), &e),
+            let cookies = match gio::spawn_blocking(crate::stores::gog::web_cookies).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                Ok(c) => c,
+                Err(e) => return u.alert(&format!("{} can't be claimed from here", game.title), &e),
+            };
+            let session = webkit6::NetworkSession::new_ephemeral();
+            let web = webkit6::WebView::builder().network_session(&session).vexpand(true).hexpand(true).build();
+            if let Some(jar) = session.cookie_manager() {
+                for (name, value) in &cookies {
+                    let mut c = webkit6::soup::Cookie::new(name, value, ".gog.com", "/", -1);
+                    c.set_secure(true);
+                    c.set_http_only(name == "gog-al" || name == "gog_us");
+                    let _ = jar.add_cookie_future(&c).await;
+                }
             }
-            u.check_free();
-            u.rescan();
+            let header = adw::HeaderBar::new();
+            let status = gtk::Label::builder().label(format!("Press the giveaway's button to add {} to your library", game.title)).ellipsize(gtk::pango::EllipsizeMode::End).build();
+            status.add_css_class("dim-label");
+            header.set_title_widget(Some(&status));
+            let view = adw::ToolbarView::new();
+            view.add_top_bar(&header);
+            view.set_content(Some(&web));
+            let dialog = adw::Dialog::builder().title(format!("Claim {} on GOG", game.title)).content_width(1100).content_height(800).child(&view).build();
+            // The giveaway is on the front page, below the top banners.
+            web.connect_load_changed(|web, event| {
+                if event == webkit6::LoadEvent::Finished && web.uri().is_some_and(|u| u.starts_with("https://www.gog.com/")) {
+                    web.evaluate_javascript("document.getElementById('giveaway')?.scrollIntoView({block: 'center'})", None, None, gio::Cancellable::NONE, |_| {});
+                }
+            });
+            web.load_uri("https://www.gog.com/en/");
+            let open = Rc::new(Cell::new(true));
+            let o = open.clone();
+            let (u2, title) = (u.clone(), game.title.clone());
+            dialog.connect_closed(move |_| {
+                o.set(false);
+                let u3 = u2.clone();
+                glib::spawn_future_local(async move {
+                    let _ = gio::spawn_blocking(|| crate::stores::Store::Gog.refresh_owned()).await;
+                    u3.check_free();
+                    u3.rescan();
+                });
+                crate::log::line(&format!("claim: GOG's giveaway {title}: window closed"));
+            });
+            dialog.present(Some(&u.window));
+            let (d, s, title) = (dialog.clone(), status.clone(), game.title.clone());
+            glib::spawn_future_local(async move {
+                while open.get() {
+                    glib::timeout_future(std::time::Duration::from_secs(2)).await;
+                    if gio::spawn_blocking(crate::stores::gog::giveaway_claimed).await.ok().and_then(Result::ok) == Some(true) {
+                        s.set_label(&format!("{title} is in your GOG library"));
+                        crate::log::line(&format!("claim: GOG's giveaway {title}: claimed"));
+                        glib::timeout_future(std::time::Duration::from_secs(3)).await;
+                        if open.get() {
+                            d.close();
+                        }
+                        u.toast(&format!("{title} is in your GOG library."));
+                        break;
+                    }
+                }
+            });
         });
     }
 
