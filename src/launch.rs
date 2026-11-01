@@ -178,7 +178,7 @@ pub fn hands_over(command: &[String]) -> Option<String> {
         let which = command.iter().skip_while(|w| name(w) != c).nth(2).filter(|_| c.starts_with("distrobox") || c == "toolbox").map(|b| format!(" {b}")).unwrap_or_default();
         return Some(format!("It runs in a container ({c}{which}), which Lobby can't put in a sandbox: a container of your own shares your home with it."));
     }
-    if command.iter().any(|w| ["steam://", "heroic://", "lutris:", "itch://"].iter().any(|s| w.starts_with(s))) || command.first().map(name).is_some_and(|n| ["steam", "xdg-open", "gtk-launch", "kioclient", "kioclient5", "kde-open", "lutris", "heroic"].contains(&n.as_str())) {
+    if command.iter().any(|w| ["steam://", "heroic://", "lutris:", "itch://"].iter().any(|s| w.starts_with(s))) || command.first().map(name).is_some_and(|n| ["steam", "xdg-open", "gtk-launch", "kioclient", "kioclient5", "kde-open", "lutris", "heroic", "mira"].contains(&n.as_str())) {
         return Some("It hands the game to another program, which starts it outside Lobby's protection.".into());
     }
     None

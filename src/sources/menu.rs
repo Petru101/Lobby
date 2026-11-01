@@ -43,6 +43,7 @@ fn entries_in(home: &Home, dirs: &[PathBuf]) -> Vec<Entry> {
     // An entry's id is its path under applications/: the first folder's wins, as in app menus
     // (the home's copy of a Flatpak's entry, NoDisplay or Hidden, hides it).
     let mut seen = std::collections::HashSet::new();
+    let mut launchers = Vec::new();
     for dir in dirs {
         let apps = dir.join("applications");
         let mut files = Vec::new();
@@ -53,12 +54,37 @@ fn entries_in(home: &Home, dirs: &[PathBuf]) -> Vec<Entry> {
                 continue;
             }
             entries.extend(read(&file, dirs));
+            launchers.extend(launcher_program(&file));
         }
     }
     let mut desktop = Vec::new();
     find(&home.join("Desktop"), 0, &mut desktop);
     entries.extend(desktop.iter().filter_map(|f| read(f, dirs)));
+    // A launcher's own shortcut to one of its games (Mira's "mira launch lapidary") isn't a
+    // game beside the one found on its own: it was a second LAPIDARY card, with no cover.
+    entries.retain(|e| !e.program.as_deref().is_some_and(|p| launchers.iter().any(|l| beside(p, l))));
     entries
+}
+
+/// The program a launcher's own entry runs (NOT_GAME_APPS).
+fn launcher_program(file: &Path) -> Option<PathBuf> {
+    let stem = file.file_stem()?.to_string_lossy().into_owned();
+    NOT_GAME_APPS.contains(&stem.as_str()).then_some(())?;
+    program(&fs::read_to_string(file).ok()?)
+}
+
+/// Whether a program is a launcher's, or in the launcher's own folder (Mira's mira-gui and
+/// mira); not a folder of everyone's programs (/usr/bin).
+fn beside(program: &Path, launcher: &Path) -> bool {
+    let (p, l) = (fs::canonicalize(program).unwrap_or(program.to_path_buf()), fs::canonicalize(launcher).unwrap_or(launcher.to_path_buf()));
+    p == l || (p.parent() == l.parent() && l.parent().and_then(Path::file_name).is_some_and(|n| !["bin", "sbin", "games"].contains(&n.to_string_lossy().as_ref())))
+}
+
+/// The last file the command names: the game's program, or what a runner opens. Not
+/// flatpak itself: a Flatpak app's entry names no file of its own, and every one would be
+/// the same game (and /usr/bin its folder).
+fn program(text: &str) -> Option<PathBuf> {
+    crate::launch::desktop_exec(text).map(|(w, _)| w).unwrap_or_default().into_iter().rev().map(|w| PathBuf::from(w.rsplit_once('=').map_or(w.as_str(), |(_, v)| v))).find(|p| p.is_absolute() && p.is_file() && p.file_name().is_none_or(|n| n != "flatpak"))
 }
 
 /// Programs that call themselves games but start other games or set them up: launchers and
@@ -67,6 +93,7 @@ fn entries_in(home: &Home, dirs: &[PathBuf]) -> Vec<Entry> {
 const NOT_GAME_APPS: &[&str] = &[
     "io.github.Faugus.faugus-launcher", "faugus-launcher", "io.itch.itch", "itch", "io.github.sharkwouter.Minigalaxy", "minigalaxy", "page.kramo.Cartridges", "cartridges",
     "io.github.dummerle.rare", "rare", "com.github.tkashkin.gamehub", "gamehub", "com.vysp3r.ProtonPlus", "protonplus", "net.davidotek.pupgui2", "com.github.Matoking.protontricks",
+    "mira",
 ];
 const NOT_GAMES: &[&str] = &["Emulator", "PackageManager", "Utility", "FileTransfer"];
 
@@ -105,10 +132,7 @@ fn read(file: &Path, dirs: &[PathBuf]) -> Option<Entry> {
         // A non-Steam game's run id is its shortcut id shifted up (with 0x02000000 below).
         e.keys.push(if id > u32::MAX as u64 { Key::SteamShortcut((id >> 32) as u32) } else { Key::SteamApp(id as u32) });
     }
-    // The last file the command names: the game's program, or what a runner opens. Not
-    // flatpak itself: a Flatpak app's entry names no file of its own, and every one would be
-    // the same game (and /usr/bin its folder).
-    e.program = crate::launch::desktop_exec(&text).map(|(w, _)| w).unwrap_or_default().into_iter().rev().map(|w| PathBuf::from(w.rsplit_once('=').map_or(w.as_str(), |(_, v)| v))).find(|p| p.is_absolute() && p.is_file() && p.file_name().is_none_or(|n| n != "flatpak"));
+    e.program = program(&text);
     // Its working folder is the game's when the program is in it, or when no program could be
     // found (a runner's command naming a folder that was since deleted).
     e.folder = get("Path").filter(|p| !p.is_empty()).map(PathBuf::from).filter(|p| e.program.as_ref().is_none_or(|prog| prog.starts_with(p)));
@@ -200,6 +224,14 @@ mod tests {
         fs::write(flatpak.join("icons/hicolor/scalable/apps/org.supertuxproject.SuperTux.svg"), "<svg/>").unwrap();
         fs::create_dir_all(system.join("pixmaps")).unwrap();
         fs::write(system.join("pixmaps/tux-racer.png"), "").unwrap();
+        // Mira, and its own shortcut to a game it knows.
+        let opt = dir.join("home/.local/opt/mira");
+        fs::create_dir_all(&opt).unwrap();
+        for f in ["mira", "mira-gui"] {
+            fs::write(opt.join(f), "").unwrap();
+        }
+        write(&local, "mira", &format!("Name=Mira\nExec={}\nCategories=Game;", opt.join("mira-gui").display()));
+        write(&local, "mira-lapidary", &format!("Name=LAPIDARY\nExec={} launch lapidary\nIcon=applications-games\nCategories=Game;", opt.join("mira").display()));
 
         let found = entries_in(&home, &[local, flatpak.clone(), system.clone()]);
         let names: Vec<&str> = found.iter().map(|e| e.name.as_str()).collect();

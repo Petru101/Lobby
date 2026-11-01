@@ -243,6 +243,32 @@ pub fn sync_shortcuts(games: &[Game]) {
             Err(e) => crate::log::line(&format!("protection: {}'s app-menu entry: {e}", g.name)),
         }
     }
+    unwrap_others(games);
+}
+
+/// Entries Lobby put its wrapper in that are no game's now (a launcher's, taken for a game
+/// before: Mira's own and its shortcut to LAPIDARY) get their own command back.
+fn unwrap_others(games: &[Game]) {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let listed: Vec<PathBuf> = games.iter().filter(|g| !g.gone).flat_map(|g| &g.entries).flat_map(|e| &e.keys).filter_map(|k| if let Key::Desktop(p) = k { Some(real(p)) } else { None }).collect();
+    let mut files = Vec::new();
+    for dir in [home.join(".local/share/applications"), home.join("Desktop")] {
+        files.extend(fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "desktop")));
+    }
+    let mut changed = false;
+    for file in files.iter().filter(|f| !listed.contains(&real(f)) && !fs::symlink_metadata(f).is_ok_and(|m| m.file_type().is_symlink())) {
+        let Ok(text) = fs::read_to_string(file) else { continue };
+        if !text.lines().any(|l| l.starts_with(&format!("{ORIGINAL}="))) {
+            continue;
+        }
+        if fs::write(file, entry_text(&text, None)).is_ok() {
+            crate::log::line(&format!("protection: {} is no game's now, its own command is back", file.display()));
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = Command::new("kbuildsycoca6").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
 }
 
 /// A command ready to run in the game's sandbox; the D-Bus proxy lives as long as it.
