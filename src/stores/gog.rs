@@ -120,8 +120,9 @@ pub fn owned(old: &[Owned]) -> Result<Vec<Owned>, String> {
             let (Some(id), Some(title)) = (p.get("id").and_then(|i| i.as_u64()), p.get("title").and_then(|t| t.as_str())) else { continue };
             let id = id.to_string();
             let before = old.iter().find(|o| o.id == id);
-            let cover = before.and_then(|o| o.cover.clone());
-            let wide = p.get("image").and_then(|i| i.as_str()).filter(|i| !i.is_empty()).map(|i| format!("https:{i}_784.jpg"));
+            // GOG turns away its images' _784 size now (400): looked up again.
+            let cover = before.and_then(|o| o.cover.clone()).filter(|c| !c.ends_with("_784.jpg"));
+            let wide = p.get("image").and_then(|i| i.as_str()).filter(|i| !i.is_empty()).map(|i| format!("https:{i}.jpg"));
             let demo = p.get("slug").and_then(|s| s.as_str()).is_some_and(|s| s.split('_').any(|w| crate::library::DEMO_WORDS.contains(&w)));
             games.push((Owned { id, title: title.to_string(), cover, installable: before.and_then(|o| o.installable), dlc: Vec::new(), demo }, wide));
         }
