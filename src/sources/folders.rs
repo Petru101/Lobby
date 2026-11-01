@@ -82,7 +82,21 @@ fn steam_api_near(game: &scan::Game) -> bool {
 fn skipped(name: &str) -> bool {
     let n = name.to_lowercase();
     // Hidden folders, lobby's and gamefix's half-done unpacks and installs among them.
-    name.starts_with('.') || n.contains("backup") || ["steamlibrary", "prefixes", "jre", "jdk", "tools", "shots", "screenshots", "saves", "umu", "lost+found", "$recycle.bin", "system volume information"].contains(&n.as_str())
+    name.starts_with('.') || n.contains("backup") || ["steamlibrary", "prefixes", "jre", "jdk", "tools", "shots", "screenshots", "saves", "umu", "lost+found", "$recycle.bin", "system volume information", "vms", "virtual machines", "virtualbox vms"].contains(&n.as_str())
+}
+
+/// Virtual machines' disks in the folder or one folder down (GNOME Boxes', virt-manager's,
+/// VirtualBox's, VMware's, Hyper-V's): a folder of VMs, whatever scripts and tools are beside.
+fn holds_vms(dir: &Path) -> bool {
+    let disk = |p: &Path| p.extension().is_some_and(|x| ["qcow2", "vdi", "vmdk", "vhd", "vhdx", "ova"].iter().any(|d| x.eq_ignore_ascii_case(d)));
+    let files = |d: &Path| fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path()).collect::<Vec<_>>();
+    files(dir).iter().any(|p| disk(p) || (p.is_dir() && files(p).iter().any(|q| disk(q))))
+}
+
+/// Lobby's own AppImage (a copy kept to test it, its self-update's download).
+fn lobby_itself(program: &Path) -> bool {
+    let file = program.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    file.starts_with("lobby") && file.ends_with(".appimage")
 }
 
 enum Found {
@@ -275,7 +289,7 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
     }
     // Unreal Engine itself (Epic's launcher puts it in "Epic Games" beside its games): tens of
     // thousands of source files, and no game.
-    if unreal_engine(dir) {
+    if unreal_engine(dir) || holds_vms(dir) {
         return vec![Found::Nothing];
     }
     if let Some(pfx) = library::prefix_in(dir) {
@@ -338,7 +352,7 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
     }
     let program = gog.or_else(|| game.main.or(game.windows).or(game.portable).map(|i| game.full(&game.files[i])));
     // A store app's own program (a Wine setup with Epic's launcher in it): no game here.
-    if program.as_deref().is_some_and(library::in_store_app) {
+    if program.as_deref().is_some_and(|p| library::in_store_app(p) || lobby_itself(p)) {
         return vec![Found::Nothing];
     }
     let download = [game.cd_installer, game.linux_installer, game.packed, game.disc, game.archive].into_iter().flatten().next();
@@ -690,7 +704,16 @@ mod tests {
             fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
             fs::write(dir.join(f), "").unwrap();
         }
-        let found: Vec<Found> = ["Flashpoint", "parking"].iter().flat_map(|d| look(&dir.join(d), &[], 0, false)).collect();
+        // Virtual machines, and Lobby's own AppImage kept beside them to test it.
+        for f in ["Machines/boxes/win11.qcow2", "Machines/test/build.sh", "Machines/test/Lobby-x86_64.AppImage"] {
+            fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            fs::write(dir.join(f), "").unwrap();
+        }
+        assert!(holds_vms(&dir.join("Machines")));
+        assert!(!holds_vms(&dir.join("Flashpoint")));
+        assert!(lobby_itself(&dir.join("Machines/test/Lobby-x86_64.AppImage")));
+        assert!(skipped("VirtualBox VMs"));
+        let found: Vec<Found> = ["Flashpoint", "parking", "Machines"].iter().flat_map(|d| look(&dir.join(d), &[], 0, false)).collect();
         let names: Vec<&str> = found.iter().filter_map(|f| if let Found::Game(e) = f { Some(e.name.as_str()) } else { None }).collect();
         assert!(!names.iter().any(|n| ["Downloads", "parking", "Data", "FPSoftware", "Launcher"].contains(n)), "{names:?}");
         fs::remove_dir_all(&dir).unwrap();
