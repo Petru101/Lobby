@@ -309,14 +309,23 @@ fn look(dir: &Path, known: &[PathBuf], depth: usize, strict: bool) -> Vec<Found>
     // their own. Not Unreal's layout (Engine beside the game's folder). One named like a folder
     // of games or downloads is one even with a single game in it (Downloaded Games/Games held
     // only Minecraft Dungeons II, and became a game called "Games").
+    // Not one whose shortcut names it either (Flashpoint.lnk -> Launcher\Flashpoint.exe, beside
+    // Data and FPSoftware, which were taken for games of their own).
+    // A folder holding a Downloads folder (one parked on a drive while another was formatted)
+    // isn't a game either, whatever program is in there.
     let unreal = subs.iter().any(|d| d.file_name().is_some_and(|n| n == "Engine"));
     let named = dir.file_name().is_some_and(|n| crate::places::games_or_downloads(&n.to_string_lossy()));
-    if (depth == 0 || named) && depth < 3 && !unreal && !has_program_at_top(dir) {
+    if (depth == 0 || named) && depth < 3 && !unreal && !has_program_at_top(dir) && !own_shortcut(dir) {
         let inner: Vec<Found> = subs.iter().flat_map(|d| look(d, known, depth + 1, strict)).collect();
         let games = inner.iter().filter(|f| !matches!(f, Found::Nothing)).count();
-        if games >= 2 || (named && games == 1) {
+        if games >= 2 || (named && games == 1) || subs.iter().any(|d| collection(d)) {
             return inner;
         }
+    }
+    // Downloads found inside another folder (Lobby only looks into those it was pointed at or
+    // that sit right in a games folder): a copy or a backup, and no game, though it holds some.
+    if collection(dir) {
+        return vec![Found::Nothing];
     }
     let Some(game) = scan::scan(dir) else { return vec![Found::Nothing] };
     // GOG's own idea of what starts the game, over a guess.
@@ -569,6 +578,36 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// A Windows shortcut at the folder's top named like the folder and pointing to a program in
+/// it: the folder is that one program's, however many folders it has.
+fn own_shortcut(dir: &Path) -> bool {
+    let plain = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let name = dir.file_name().map(|n| plain(&n.to_string_lossy())).unwrap_or_default();
+    fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+        let p = e.path();
+        p.extension().is_some_and(|x| x.eq_ignore_ascii_case("lnk"))
+            && p.file_stem().is_some_and(|s| !name.is_empty() && plain(&s.to_string_lossy()) == name)
+            && fs::read(&p).is_ok_and(|data| link_paths(&data).iter().any(|target| {
+                // E:\Flashpoint\Launcher\Flashpoint.exe or .\Launcher\Flashpoint.exe: any end of
+                // it found in the folder.
+                let parts: Vec<&str> = target.split(['\\', '/']).filter(|p| !p.is_empty() && *p != ".").collect();
+                (0..parts.len()).any(|i| parts[i..].iter().fold(dir.to_path_buf(), |d, p| d.join(p)).is_file())
+            }))
+    })
+}
+
+/// The .exe paths in a shortcut's data, written in single bytes or in UTF-16.
+fn link_paths(data: &[u8]) -> Vec<String> {
+    let wide: Vec<char> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).map(|u| char::from_u32(u as u32).unwrap_or('\0')).collect();
+    let wide_odd: Vec<char> = data.get(1..).unwrap_or_default().chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).map(|u| char::from_u32(u as u32).unwrap_or('\0')).collect();
+    let narrow: Vec<char> = data.iter().map(|&b| b as char).collect();
+    [narrow, wide, wide_odd]
+        .iter()
+        .flat_map(|chars| chars.split(|c| c.is_control() || !(c.is_ascii_graphic() || *c == ' ' || c.is_alphabetic())).map(|run| run.iter().collect::<String>()).collect::<Vec<_>>())
+        .filter(|s| s.to_lowercase().ends_with(".exe"))
+        .collect()
+}
+
 fn has_program_at_top(dir: &Path) -> bool {
     fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
         let p = e.path();
@@ -625,6 +664,35 @@ mod tests {
         assert!(!collection(&dir.join("UE_5.8")));
         assert_eq!(without_tags("Some Game (DODI Repack) v1.2"), "Some Game v1.2");
         assert_eq!(without_tags("[tags only]"), "[tags only]");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn not_games() {
+        let dir = std::env::temp_dir().join(format!("lobby-notgames-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // Flashpoint: its launcher one folder down, a shortcut to it at the top.
+        for f in ["Flashpoint/Launcher/Flashpoint.exe", "Flashpoint/FPSoftware/FlashpointSecurePlayer.exe", "Flashpoint/Data/Ruffle/ruffle.exe"] {
+            fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            fs::write(dir.join(f), "").unwrap();
+        }
+        let mut lnk = b"L\0\0\0".to_vec();
+        lnk.extend(".\\Launcher\\Flashpoint.exe".encode_utf16().flat_map(u16::to_le_bytes));
+        lnk.extend(b"\0\0E:\\Flashpoint\\Launcher\\Flashpoint.exe\0");
+        fs::write(dir.join("Flashpoint/Flashpoint.lnk"), &lnk).unwrap();
+        assert!(own_shortcut(&dir.join("Flashpoint")));
+        // A shortcut to one game, in a folder of games, isn't the folder's.
+        fs::rename(dir.join("Flashpoint/Flashpoint.lnk"), dir.join("Flashpoint/Ruffle.lnk")).unwrap();
+        assert!(!own_shortcut(&dir.join("Flashpoint")));
+        fs::rename(dir.join("Flashpoint/Ruffle.lnk"), dir.join("Flashpoint/Flashpoint.lnk")).unwrap();
+        // A Downloads folder parked in another folder: no game called "Downloads".
+        for f in ["parking/Downloads/rufus.exe", "parking/Downloads/a.zip", "parking/Downloads/Some Game/game.x86_64"] {
+            fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            fs::write(dir.join(f), "").unwrap();
+        }
+        let found: Vec<Found> = ["Flashpoint", "parking"].iter().flat_map(|d| look(&dir.join(d), &[], 0, false)).collect();
+        let names: Vec<&str> = found.iter().filter_map(|f| if let Found::Game(e) = f { Some(e.name.as_str()) } else { None }).collect();
+        assert!(!names.iter().any(|n| ["Downloads", "parking", "Data", "FPSoftware", "Launcher"].contains(n)), "{names:?}");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
