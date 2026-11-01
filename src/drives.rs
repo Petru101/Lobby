@@ -184,6 +184,21 @@ fn closed_drives() -> Vec<Closed> {
         .collect()
 }
 
+/// The names (label, else UUID) of the drives plugged in but not opened.
+pub fn closed_names() -> Vec<String> {
+    closed_drives().into_iter().map(|d| d.name).collect()
+}
+
+/// Whether a path is on one of these closed drives (the folder the desktop opens it into).
+pub fn on_closed(path: &Path, closed: &[String]) -> bool {
+    let parts: Vec<_> = path.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let name = match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["/", "run", "media", _, name, ..] | ["/", "media", _, name, ..] => Some(name.to_string()),
+        _ => None,
+    };
+    name.is_some_and(|n| closed.contains(&n))
+}
+
 /// The closed drives the paths are on, each with how many of the paths are.
 fn holding<'a>(paths: &[&Path], user: &str, drives: &'a [Closed]) -> Vec<(&'a Closed, usize)> {
     let mut out: Vec<(&Closed, usize)> = Vec::new();

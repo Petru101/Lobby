@@ -1591,13 +1591,16 @@ impl Ui {
         let u = self.clone();
         glib::spawn_future_local(async move {
             crate::log::line("scan starts");
-            let found = gio::spawn_blocking(|| crate::log::timed("scan", crate::find_games)).await;
+            let found = gio::spawn_blocking(|| crate::log::timed("scan", crate::find_games).map(|games| (games, crate::drives::closed_names()))).await;
             u.scanning.set(false);
             u.show_busy();
             u.rescan_button.set_sensitive(true);
             match found {
-                Ok(Ok(games)) => {
-                    if let Err(e) = u.change_lib(|lib| crate::log::timed("scan: matching the saved library", || lib.update(games))) {
+                Ok(Ok((games, closed))) => {
+                    if let Err(e) = u.change_lib(|lib| crate::log::timed("scan: matching the saved library", || {
+                        lib.update(games);
+                        lib.forget_missing(&closed);
+                    })) {
                         u.toast(&format!("Couldn't save the library: {e}"));
                     }
                     let games = u.lib.borrow().games.clone();

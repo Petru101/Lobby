@@ -142,6 +142,19 @@ impl Library {
         self.scanned = now;
     }
 
+    /// Forgets missing games with nothing to keep: never played, nothing set (launch options,
+    /// protection, a cover, hidden, a favourite, frame rate, a Proton). Not those on a drive
+    /// plugged in but not opened (`closed`: its banner counts them). Once found again they're
+    /// new. (Hundreds built up: old Epic marketplace assets, the files of a drive since
+    /// formatted, tools once taken for games.)
+    pub fn forget_missing(&mut self, closed: &[String]) {
+        self.games.retain(|g| {
+            let kept = g.played.is_some() || g.launch_options.is_some() || !g.protection.is_default() || g.chosen_cover.is_some() || g.hidden || g.favourite || g.frame_rate || g.proton.is_some();
+            let closed_drive = g.entries.iter().flat_map(|e| [e.folder.as_deref(), e.program.as_deref()]).flatten().any(|p| crate::drives::on_closed(p, closed));
+            !g.gone || kept || closed_drive
+        });
+    }
+
     /// A game by its id, else by its name (ignoring case), else the only one whose name holds
     /// the words given.
     pub fn find(&self, query: &str) -> Result<&Game, String> {
@@ -237,6 +250,12 @@ mod tests {
         assert_eq!((v.id.as_str(), v.played, v.gone), ("valheim", Some(5), false));
         assert_eq!(v.cover(), Some("/covers/valheim.png"));
         assert!(lib.games.iter().any(|g| g.name == "Brotato" && g.gone));
+        // Brotato, never played nor set up, is forgotten, unless its drive is only closed.
+        lib.get_mut("brotato").unwrap().entries[0].folder = Some("/run/media/u/Games/Brotato".into());
+        lib.forget_missing(&["Games".into()]);
+        assert!(lib.games.iter().any(|g| g.name == "Brotato"));
+        lib.forget_missing(&[]);
+        assert!(!lib.games.iter().any(|g| g.name == "Brotato"));
         // Its kept cover stays when no source gives one, and is replaced by a new one.
         lib.get_mut("valheim").unwrap().kept_cover = Some("/kept/a.jpg".into());
         lib.update(vec![game("Valheim", Key::SteamApp(892970))]);

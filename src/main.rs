@@ -564,6 +564,7 @@ fn scan() -> Result<Library, String> {
     let games = find_games()?;
     let mut lib = Library::load().unwrap_or_default();
     log::timed("scan: matching the saved library", || lib.update(games));
+    lib.forget_missing(&drives::closed_names());
     lib.save()?;
     playtime::take_in(&lib.games);
     // Lutris's, Faugus's and Steam shortcuts' games become Lobby's own: looked at again so they
