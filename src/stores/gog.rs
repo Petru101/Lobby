@@ -4,7 +4,7 @@
 //! (each install's manifest, which updates patch from) go in ~/.config/lobby/heroic_gogdl
 //! (GOGDL_CONFIG_PATH), not the ~/.config/heroic_gogdl it uses by default.
 
-use super::{config_dir, config_home, get_json, output, read_json, run_with_progress, tools, Dlc, Installed, Owned, Update};
+use super::{config_dir, config_home, get_json, output, post_json, read_json, run_with_progress, tools, Dlc, Installed, Owned, Update};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,6 +55,23 @@ pub fn sign_in(code: &str) -> Result<(), String> {
     let user = get_json("https://embed.gog.com/userData.json", Some(&token()?))?;
     let name = user.get("username").and_then(|n| n.as_str()).unwrap_or_default();
     fs::write(account_file(), serde_json::json!({ "username": name }).to_string()).map_err(|e| e.to_string())
+}
+
+/// Whether the signed-in account has claimed GOG's current giveaway (the one on its front page).
+pub fn giveaway_claimed() -> Result<bool, String> {
+    let v = get_json("https://www.gog.com/giveaway/status", Some(&token()?))?;
+    v.get("isClaimed").and_then(|c| c.as_bool()).ok_or_else(|| "GOG didn't say whether it's claimed".to_string())
+}
+
+/// Claims GOG's current giveaway for the signed-in account, as gog.com's own button does: a POST
+/// with the account's token (Lobby's GOG sign-in is accepted), then GOG asked again to be sure.
+pub fn claim_giveaway() -> Result<(), String> {
+    post_json("https://www.gog.com/giveaway/claim", &token()?, "{}").map_err(|e| format!("GOG didn't take the claim: {e}"))?;
+    match giveaway_claimed() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("GOG took the claim but doesn't show it as claimed yet.".into()),
+        Err(e) => Err(e),
+    }
 }
 
 pub fn sign_out() -> Result<(), String> {

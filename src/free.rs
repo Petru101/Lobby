@@ -17,6 +17,9 @@ pub enum Claim {
     EpicPage(String),
     /// A page for the browser (Steam's, GOG's, a giveaway site's).
     Browser(String),
+    /// GOG's own giveaway (its front page has one at a time), claimed with Lobby's GOG sign-in:
+    /// no page. The game's page on GOG.
+    GogGiveaway(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -55,14 +58,25 @@ pub fn list() -> Result<Vec<FreeGame>, String> {
         return Ok(cached.games);
     }
     let mut games = crate::log::timed("free games: Epic's list", epic)?;
-    // GamerPower's are extra: its failing leaves Epic's.
-    match crate::log::timed("free games: GamerPower", gamerpower) {
-        Ok(more) => {
-            let new: Vec<FreeGame> = more.into_iter().filter(|g| !games.iter().any(|e| same_title(&e.title, &g.title))).collect();
-            games.extend(new);
+    // GOG's giveaway and GamerPower's are extra: their failing leaves Epic's.
+    let giveaway = crate::log::timed("free games: GOG's giveaway", gog_giveaway).unwrap_or_else(|e| {
+        crate::log::line(&format!("free games: GOG's giveaway: {e}"));
+        None
+    });
+    let more = crate::log::timed("free games: GamerPower", gamerpower).unwrap_or_else(|e| {
+        crate::log::line(&format!("free games: GamerPower: {e}"));
+        Vec::new()
+    });
+    if let Some(mut g) = giveaway {
+        // GamerPower knows when it ends, and has a cover of the shape the window shows.
+        if let Some(theirs) = more.iter().find(|m| m.store == "GOG" && same_title(&m.title, &g.title)) {
+            g.until = g.until.or(theirs.until);
+            g.cover = theirs.cover.clone().or(g.cover);
         }
-        Err(e) => crate::log::line(&format!("free games: GamerPower: {e}")),
+        games.push(g);
     }
+    let new: Vec<FreeGame> = more.into_iter().filter(|g| !games.iter().any(|e| same_title(&e.title, &g.title))).collect();
+    games.extend(new);
     let _ = fs::create_dir_all(stores::cache_dir());
     let _ = fs::write(cache_file(), serde_json::to_string(&Cached { when: crate::store::now(), games: games.clone() }).unwrap());
     Ok(games)
@@ -121,6 +135,27 @@ fn parse_epic(v: &serde_json::Value) -> Vec<FreeGame> {
 
 /// GamerPower's free-to-keep games on Epic, Steam and GOG (key giveaways from other sites
 /// left out: they're not the stores' own).
+/// GOG's giveaway, from its front page: a section with the game's picture (alt "<title>
+/// giveaway") and a link to its page. None when there's none.
+fn gog_giveaway() -> Result<Option<FreeGame>, String> {
+    let out = std::process::Command::new("curl").args(["-sSfL", "--max-time", "20", "-A", "Mozilla/5.0", "https://www.gog.com/en/"]).stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(parse_gog_giveaway(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn parse_gog_giveaway(html: &str) -> Option<FreeGame> {
+    let start = html.find("<giveaway ")?;
+    let section = &html[start..];
+    let section = &section[..section.find("</giveaway>").unwrap_or(section.len())];
+    let title = section.split(" alt=\"").skip(1).find_map(|a| a.split('"').next()?.strip_suffix(" giveaway"))?;
+    let title = title.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">");
+    let page = section.split("giveaway__overlay-link").nth(1).and_then(|r| r.split("href=\"").nth(1)).and_then(|r| r.split('"').next()).unwrap_or("https://www.gog.com/en/").to_string();
+    let cover = section.split("srcset=\"").skip(1).find_map(|r| r.split([',', ' ', '"']).next().filter(|u| u.ends_with(".jpg"))).map(String::from);
+    Some(FreeGame { title, store: Store::Gog.name().into(), until: None, from: None, cover, claim: Claim::GogGiveaway(page), items: Vec::new(), offer_type: String::new() })
+}
+
 fn gamerpower() -> Result<Vec<FreeGame>, String> {
     let v = stores::get_json("https://www.gamerpower.com/api/filter?platform=epic-games-store.steam.gog&type=game", None)?;
     Ok(parse_gamerpower(&v))
@@ -395,6 +430,12 @@ mod tests {
         assert_eq!(games.len(), 2);
         assert_eq!((games[0].title.as_str(), games[0].store.as_str()), ("Home", "Epic Games"));
         assert_eq!(games[0].claim, Claim::EpicPage("https://www.gamerpower.com/open/home".into()));
+        let html = r#"<div><giveaway _nghost-x=""><div id="giveaway"><a _ngcontent-x="" class="giveaway__overlay-link" href="https://www.gog.com/en/game/a_new_beginning"></a><picture><source srcset="https://images.gog-statics.com/x_giveaway_465w.webp, https://images.gog-statics.com/x_giveaway_465w_2x.webp 2x" type="image/webp"><source srcset="https://images.gog-statics.com/x_giveaway_465w.jpg, https://images.gog-statics.com/x_giveaway_465w_2x.jpg 2x" type="image/jpeg"><img alt="A New Beginning: Final Cut &amp; More giveaway"></picture></div></giveaway></div>"#;
+        let g = parse_gog_giveaway(html).unwrap();
+        assert_eq!(g.title, "A New Beginning: Final Cut & More");
+        assert_eq!(g.claim, Claim::GogGiveaway("https://www.gog.com/en/game/a_new_beginning".into()));
+        assert_eq!(g.cover.as_deref(), Some("https://images.gog-statics.com/x_giveaway_465w.jpg"));
+        assert_eq!(parse_gog_giveaway("<html>no giveaway today</html>"), None);
         assert_eq!((games[1].title.as_str(), games[1].store.as_str(), games[1].until), ("Some Game", "GOG", None));
     }
 }

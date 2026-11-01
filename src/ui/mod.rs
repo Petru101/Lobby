@@ -2663,12 +2663,19 @@ impl Ui {
         self.window.present();
         let u = self.clone();
         glib::spawn_future_local(async move {
-            let games = gio::spawn_blocking(|| {
+            let all = gio::spawn_blocking(|| {
                 let epic = crate::stores::epic::owned_items();
-                crate::free::list().unwrap_or_default().into_iter().filter(|g| g.from.is_none() && g.store == crate::stores::Store::Epic.name() && !crate::free::owned(g, &epic)).collect::<Vec<_>>()
+                crate::free::list().unwrap_or_default().into_iter().filter(|g| g.from.is_none() && !crate::free::owned(g, &epic)).collect::<Vec<_>>()
             })
             .await
             .unwrap_or_default();
+            // GOG's giveaway needs no page: claimed at once.
+            if crate::stores::Store::Gog.account().is_some() {
+                if let Some(g) = all.iter().find(|g| matches!(g.claim, crate::free::Claim::GogGiveaway(_))) {
+                    u.claim_gog(g.clone());
+                }
+            }
+            let games: Vec<_> = all.into_iter().filter(|g| g.store == crate::stores::Store::Epic.name()).collect();
             if games.is_empty() || crate::stores::Store::Epic.account().is_none() {
                 u.free_games();
             } else {
@@ -2724,20 +2731,28 @@ impl Ui {
         body.append(&title);
         body.append(&when);
         let epic = matches!(g.claim, Claim::EpicCheckout { .. } | Claim::EpicPage(_));
+        let gog = matches!(g.claim, Claim::GogGiveaway(_)) && crate::stores::Store::Gog.account().is_some();
         // Owned or coming games' group says it all: only games to claim get a button.
         // Epic's giveaway can be another store item of a game the account already has (Sker
         // Ritual, Home): its checkout still adds it, but it's the same game, so it isn't offered.
         if !owned && g.from.is_none() {
-            let label = if epic && signed_in { "Claim" } else if epic { "Sign in to Epic to claim" } else { "Open in browser" };
+            let label = if (epic && signed_in) || gog { "Claim" } else if epic { "Sign in to Epic to claim" } else { "Open in browser" };
             let button = gtk::Button::builder().label(label).margin_top(4).sensitive(!epic || signed_in).build();
             button.add_css_class("pill");
-            if epic {
+            if epic || gog {
                 button.add_css_class("suggested-action");
             }
             body.append(&button);
             let (u, d, game) = (self.clone(), dialog.clone(), g.clone());
-            button.connect_clicked(move |_| match &game.claim {
+            button.connect_clicked(move |b| match &game.claim {
                 Claim::Browser(url) => gtk::UriLauncher::new(url).launch(Some(&u.window), gio::Cancellable::NONE, |_| {}),
+                Claim::GogGiveaway(_) if gog => {
+                    b.set_sensitive(false);
+                    b.set_label("Claiming…");
+                    d.close();
+                    u.claim_gog(game.clone());
+                }
+                Claim::GogGiveaway(page) => gtk::UriLauncher::new(page).launch(Some(&u.window), gio::Cancellable::NONE, |_| {}),
                 _ => {
                     d.close();
                     u.claim(vec![game.clone()]);
@@ -2745,6 +2760,27 @@ impl Ui {
             });
         }
         gtk::FlowBoxChild::builder().child(&body).tooltip_text(&g.title).build()
+    }
+
+    /// Claims GOG's giveaway with Lobby's GOG sign-in (no page: GOG's own claim, as its button
+    /// does), fetches the owned list so it shows in the library, and says so.
+    fn claim_gog(self: &Rc<Self>, game: crate::free::FreeGame) {
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let done = gio::spawn_blocking(|| {
+                crate::stores::gog::claim_giveaway()?;
+                crate::stores::Store::Gog.refresh_owned().map(|_| ())
+            })
+            .await
+            .unwrap_or_else(|_| Err("it stopped with an error".into()));
+            crate::log::line(&format!("claim: GOG's giveaway {}: {}", game.title, done.as_ref().map_or_else(|e| e.as_str(), |()| "claimed")));
+            match done {
+                Ok(()) => u.toast(&format!("{} is in your GOG library.", game.title)),
+                Err(e) => u.alert(&format!("{} wasn't claimed", game.title), &e),
+            }
+            u.check_free();
+            u.rescan();
+        });
     }
 
     /// Claims Epic's free games in lobby's window, signed in to Epic's site with lobby's Epic
@@ -2809,6 +2845,7 @@ impl Ui {
                             offers.push((namespace.clone(), offer.clone()));
                             in_checkout.push(g.clone());
                         }
+                        Claim::GogGiveaway(_) => {}
                         Claim::EpicPage(url) | Claim::Browser(url) => {
                             s.set_label(&format!("Finding {}…", g.title));
                             let found = search_store(&web, &crate::free::epic_search_js(&g.title)).await.and_then(|r| crate::free::free_offer(&g.title, &r));

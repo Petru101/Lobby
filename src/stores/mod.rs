@@ -452,6 +452,26 @@ pub(crate) fn get_json(url: &str, token: Option<&str>) -> Result<serde_json::Val
     serde_json::from_slice(&out.stdout).map_err(|e| format!("{url}: {e}"))
 }
 
+/// POSTs a JSON body with the token (given on curl's standard input, not its command line),
+/// and returns what came back.
+pub(crate) fn post_json(url: &str, token: &str, body: &str) -> Result<String, String> {
+    let mut child = Command::new("curl")
+        .args(["-sSf", "--max-time", "30", "-A", "lobby", "-X", "POST", "-H", "Content-Type: application/json", "-H", "@-", "--data", body, url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().unwrap();
+    let _ = writeln!(stdin, "Authorization: Bearer {token}");
+    drop(stdin);
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("{url}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// The value of a URL's query parameter.
 fn query_param(url: &str, name: &str) -> Option<String> {
     let query = url.split_once('?')?.1.split('#').next()?;
