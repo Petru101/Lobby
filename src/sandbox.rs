@@ -598,6 +598,16 @@ fn args_for(s: &Spec) -> Vec<String> {
             if let Some(private) = &s.private {
                 push(&["--bind", &p(private), &p(&s.home)]);
             }
+            // Steam's links (~/.steam/root, ~/.steam/steam) to its folder, whose Proton builds
+            // are there below: setups name Proton through them (Broken Reflections' PROTONPATH
+            // was ~/.steam/root/compatibilitytools.d/…, not found). In a folder of their own,
+            // not written into the game's home.
+            if let Some(root) = s.steam.first() {
+                push(&["--tmpfs", &p(&at_home(Path::new(".steam")))]);
+                for link in ["root", "steam"] {
+                    push(&["--symlink", &p(&at_home(root)), &p(&at_home(&Path::new(".steam").join(link)))]);
+                }
+            }
             for look in LOOKS.iter().filter(|l| has(l).is_some()) {
                 push(&["--ro-bind", &p(&at_home(Path::new(look))), &p(&at_home(Path::new(look)))]);
             }
@@ -910,6 +920,11 @@ mod tests {
         // The X server's key in the real home (LightDM's) is there in its own.
         let xauth = a.windows(3).position(|w| w == ["--ro-bind", "/home/p/.Xauthority", "/home/p/.Xauthority"]).unwrap();
         assert!(home < xauth);
+        // Steam's links, in a folder of their own, before the client libraries bound into it.
+        let links = a.windows(2).position(|w| w == ["--tmpfs", "/home/p/.steam"]).unwrap();
+        assert!(a.windows(3).any(|w| w == ["--symlink", "/home/p/.local/share/Steam", "/home/p/.steam/root"]));
+        let sdk = a.windows(3).position(|w| w[2] == "/home/p/.steam/sdk64").unwrap();
+        assert!(home < links && links < sdk);
     }
 
     #[test]
