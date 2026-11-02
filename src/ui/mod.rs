@@ -760,6 +760,18 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
             u.just_installed.replace(Some((id, None)));
             u.fill();
         }
+        // LOBBY_SNAPSHOT_REFILL=<px>: the library scrolled down that far, then filled again as
+        // after a scan; where it ends up goes to stderr.
+        if let Some(px) = std::env::var("LOBBY_SNAPSHOT_REFILL").ok().and_then(|p| p.parse::<f64>().ok()) {
+            if let Some(adj) = u.flow.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>().map(|s| s.vadjustment()) {
+                adj.set_value(px);
+                glib::timeout_future(std::time::Duration::from_millis(500)).await;
+                eprintln!("refill: scrolled to {:.0} before", adj.value());
+                u.fill();
+                glib::timeout_future(std::time::Duration::from_millis(1500)).await;
+                eprintln!("refill: scrolled to {:.0} after", adj.value());
+            }
+        }
         if std::env::var_os("LOBBY_SNAPSHOT_ACCOUNTS").is_some() {
             u.accounts();
         }
@@ -1167,6 +1179,10 @@ impl Ui {
         let focused = gtk::prelude::GtkWindowExt::focus(&self.window)
             .and_then(|f| if f.is::<gtk::FlowBoxChild>() { Some(f) } else { f.ancestor(gtk::FlowBoxChild::static_type()) })
             .map(|c| (c.widget_name().to_string(), c.parent().is_some_and(|p| &p == self.recent.upcast_ref::<gtk::Widget>())));
+        // Where the library was scrolled to: emptied and filled again, it went back to the top
+        // after every scan.
+        let scrolled = self.flow.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>();
+        let at = scrolled.as_ref().map_or(0.0, |s| s.vadjustment().value());
         self.flow.remove_all();
         self.recent.remove_all();
         self.bars.borrow_mut().clear();
@@ -1180,6 +1196,23 @@ impl Ui {
         drop(lib);
         self.fill_recent();
         self.refilter();
+        if let Some(scrolled) = scrolled.filter(|_| at > 0.0) {
+            // The new cards are laid out over the next frames, the area shorter until then: the
+            // place is put back each frame until it holds (a second at most).
+            let adj = scrolled.vadjustment();
+            adj.set_value(at);
+            let (frames, held) = (Cell::new(0), Cell::new(0));
+            scrolled.add_tick_callback(move |_, _| {
+                frames.set(frames.get() + 1);
+                if (adj.value() - at).abs() < 1.0 {
+                    held.set(held.get() + 1);
+                } else {
+                    held.set(0);
+                    adj.set_value(at);
+                }
+                if held.get() >= 5 || frames.get() >= 60 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+            });
+        }
         if let Some((id, recent)) = focused {
             let flow = if recent { self.recent.clone() } else { self.flow.clone() };
             glib::idle_add_local_once(move || {
