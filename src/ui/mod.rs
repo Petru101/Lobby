@@ -986,7 +986,9 @@ impl Ui {
         let card = focus.as_ref().and_then(|f| if f.is::<gtk::FlowBoxChild>() { Some(f.clone()) } else { f.ancestor(gtk::FlowBoxChild::static_type()) });
         match action {
             Action::Move(dir) => {
-                let next = match &focus {
+                // From something a controller can't use (an opened dialog keeps focus on its
+                // own frame): where it starts there.
+                let next = match focus.as_ref().filter(|f| pad::usable(f)) {
                     Some(f) => pad::spatial(&root, f, dir),
                     None => pad::first(&root),
                 };

@@ -376,14 +376,7 @@ fn walk(w: &gtk::Widget, root: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
     if !w.is_visible() || !w.is_mapped() || !w.is_sensitive() || !w.can_focus() || (w != root && w.is::<gtk::Popover>()) {
         return;
     }
-    let usable = w.is::<gtk::FlowBoxChild>()
-        || w.is::<gtk::Button>()
-        || w.is::<gtk::CheckButton>()
-        || w.is::<gtk::Switch>()
-        || w.is::<gtk::Text>()
-        || w.downcast_ref::<gtk::ListBoxRow>().is_some_and(|r| r.is_activatable())
-        || w.type_().name() == "GtkListItemWidget";
-    if usable && w.is_focusable() && w.width() > 0 && w.height() > 0 {
+    if usable(w) && w.is_focusable() && w.width() > 0 && w.height() > 0 {
         out.push(w.clone());
     }
     if w.is::<gtk::FlowBoxChild>() {
@@ -394,6 +387,17 @@ fn walk(w: &gtk::Widget, root: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
         walk(&c, root, out);
         child = c.next_sibling();
     }
+}
+
+/// Whether a controller can move to and press a widget of this kind (or type in it).
+pub fn usable(w: &gtk::Widget) -> bool {
+    w.is::<gtk::FlowBoxChild>()
+        || w.is::<gtk::Button>()
+        || w.is::<gtk::CheckButton>()
+        || w.is::<gtk::Switch>()
+        || w.is::<gtk::Text>()
+        || w.downcast_ref::<gtk::ListBoxRow>().is_some_and(|r| r.is_activatable())
+        || w.type_().name() == "GtkListItemWidget"
 }
 
 /// An open popover under `root` (a card's menu, the Show menu, a drop-down's list).
@@ -415,13 +419,15 @@ pub fn open_popover(root: &gtk::Widget) -> Option<gtk::Popover> {
 }
 
 /// Where a controller starts under `root`: the first game card, else the main button (Play on a
-/// game's page), else the widget nearest the top left.
+/// game's page), else a list's first row (App Menu Shortcuts'), else the widget nearest the
+/// top left.
 pub fn first(root: &gtk::Widget) -> Option<gtk::Widget> {
     let all = focusables(root);
     let place = |w: &gtk::Widget| w.compute_bounds(root).map_or((f32::MAX, f32::MAX), |b| (b.y(), b.x()));
     let top_left = |ws: Vec<&gtk::Widget>| ws.into_iter().min_by(|a, b| place(a).partial_cmp(&place(b)).unwrap_or(std::cmp::Ordering::Equal)).cloned();
     top_left(all.iter().filter(|w| w.is::<gtk::FlowBoxChild>()).collect())
         .or_else(|| top_left(all.iter().filter(|w| w.has_css_class("suggested-action")).collect()))
+        .or_else(|| top_left(all.iter().filter(|w| w.is::<gtk::ListBoxRow>()).collect()))
         .or_else(|| top_left(all.iter().collect()))
 }
 
