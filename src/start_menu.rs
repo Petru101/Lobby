@@ -336,6 +336,115 @@ fn hidden_text(text: &str, hide: bool) -> String {
     out
 }
 
+/// The picture an entry had before Lobby gave it one from the game's cover.
+const ORIGINAL_ICON: &str = "X-Lobby-Original-Icon";
+/// The cover that picture was made from: made again when the game's cover changes.
+const ICON_FROM: &str = "X-Lobby-Icon-From";
+/// Icon names that say nothing about the game (gamefix's when the program had none).
+const PLAIN_ICONS: &[&str] = &["", "applications-games", "application-x-executable", "wine"];
+
+fn menu_icons() -> PathBuf {
+    crate::store::dir().join("menu-icons")
+}
+
+/// Gives the games' own app-menu entries a picture made from the game's cover where theirs says
+/// nothing about the game: none, or the same picture as another game's (an engine's own icon:
+/// 14 of the Unreal games here had Unreal's, the developers never set one). The picture they
+/// had is kept beside it. After every scan.
+pub fn sync_icons(games: &[library::Game]) {
+    let apps = library::norm(&applications());
+    let mut entries: Vec<(&library::Game, PathBuf, String, String)> = Vec::new();
+    for g in games.iter().filter(|g| g.kind == Kind::Game && !g.gone) {
+        let mut own: Vec<PathBuf> = g.entries.iter().flat_map(|e| &e.keys).filter_map(|k| if let library::Key::Desktop(p) = k { Some(p.clone()) } else { None }).filter(|p| own_entry(p, &apps)).collect();
+        own.sort();
+        own.dedup();
+        for entry in own {
+            let Ok(text) = fs::read_to_string(&entry) else { continue };
+            let get = |k: &str| main_group(&text).find_map(|l| l.strip_prefix(k)?.strip_prefix('=')).map(str::to_string);
+            let original = get(ORIGINAL_ICON).or_else(|| get("Icon")).unwrap_or_default();
+            let content = fs::read(&original).ok().filter(|_| original.starts_with('/')).map(|b| format!("{:x}", content_hash(&b))).unwrap_or_default();
+            entries.push((g, entry, original, content));
+        }
+    }
+    let mut changed = false;
+    for (g, entry, original, content) in &entries {
+        let shared = !content.is_empty() && entries.iter().any(|(o, _, _, c)| c == content && o.id != g.id);
+        let plain = content.is_empty() && PLAIN_ICONS.contains(&original.as_str());
+        if !(shared || plain) {
+            continue;
+        }
+        let Some(cover) = g.cover().map(str::to_string) else { continue };
+        match game_icon(&g.id, &cover, entry, original) {
+            Ok(true) => {
+                changed = true;
+                crate::log::line(&format!("menu icons: {}'s entry shows its cover now ({})", g.name, if shared { "its program's icon is another game's too" } else { "it had none" }));
+            }
+            Ok(false) => {}
+            Err(e) => crate::log::line(&format!("menu icons: {}: {e}", g.name)),
+        }
+    }
+    if changed {
+        refresh();
+    }
+}
+
+/// Points the entry at a square picture cut from the cover (made when it's missing or the
+/// cover changed). Whether the entry changed.
+fn game_icon(id: &str, cover: &str, entry: &Path, original: &str) -> Result<bool, String> {
+    let text = fs::read_to_string(entry).map_err(|e| e.to_string())?;
+    let file = menu_icons().join(format!("{id}.png"));
+    let from = main_group(&text).find_map(|l| l.strip_prefix(ICON_FROM)?.strip_prefix('=')).map(str::to_string);
+    if from.as_deref() != Some(cover) || !file.is_file() {
+        let source = if cover.starts_with("https://") { crate::covers::web_copy(cover).ok_or("its cover isn't downloaded")? } else { PathBuf::from(cover) };
+        let img = image::ImageReader::open(&source).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?.decode().map_err(|e| e.to_string())?;
+        fs::create_dir_all(menu_icons()).map_err(|e| e.to_string())?;
+        square(&img).save_with_format(&file, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    }
+    let rewritten = with_keys(&text, &[("Icon", &file.display().to_string()), (ORIGINAL_ICON, original), (ICON_FROM, cover)]);
+    if rewritten == text {
+        return Ok(false);
+    }
+    fs::write(entry, rewritten).map_err(|e| format!("{}: {e}", entry.display()))?;
+    Ok(true)
+}
+
+/// The middle square of a picture (a cover's 315x250 loses its sides), at most 256 px.
+fn square(img: &image::DynamicImage) -> image::DynamicImage {
+    let side = img.width().min(img.height());
+    let cut = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side);
+    if side > 256 { cut.resize_exact(256, 256, image::imageops::FilterType::Lanczos3) } else { cut }
+}
+
+/// An entry's text with these keys set in its main group: replaced where they are, else added
+/// after the group's first line.
+fn with_keys(text: &str, keys: &[(&str, &str)]) -> String {
+    let mut main = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with('[') {
+            main = line.trim() == "[Desktop Entry]";
+        }
+        if main && keys.iter().any(|(k, _)| line.split_once('=').is_some_and(|(key, _)| key.trim() == *k)) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if line.trim() == "[Desktop Entry]" {
+            for (k, v) in keys {
+                out.push_str(&format!("{k}={}\n", one_line(v)));
+            }
+        }
+    }
+    out
+}
+
+fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
 /// Has the app menu read its entries again (KDE's; others watch the folder themselves).
 pub fn refresh() {
     let _ = std::process::Command::new("kbuildsycoca6").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
@@ -393,6 +502,22 @@ mod tests {
         assert_eq!(hidden, "[Desktop Entry]\nNoDisplay=true\nX-Lobby-Hidden=true\nName=Mycopunk\nExec=x\n\n[Desktop Action a]\nNoDisplay=true\n");
         assert_eq!(hidden_text(&hidden, true), hidden);
         assert_eq!(hidden_text(&hidden, false), text);
+    }
+
+    #[test]
+    fn keys_are_set_in_the_main_group() {
+        let text = "[Desktop Entry]\nName=Restore\nIcon=/g/restore.png\n[Desktop Action a]\nIcon=x\n";
+        let set = with_keys(text, &[("Icon", "/l/restore.png"), (ORIGINAL_ICON, "/g/restore.png")]);
+        assert_eq!(set, "[Desktop Entry]\nIcon=/l/restore.png\nX-Lobby-Original-Icon=/g/restore.png\nName=Restore\n[Desktop Action a]\nIcon=x\n");
+        assert_eq!(with_keys(&set, &[("Icon", "/l/restore.png"), (ORIGINAL_ICON, "/g/restore.png")]), set);
+    }
+
+    #[test]
+    fn icons_are_the_covers_middle() {
+        let wide = image::DynamicImage::new_rgba8(315, 250);
+        let icon = square(&wide);
+        assert_eq!((icon.width(), icon.height()), (250, 250));
+        assert_eq!((square(&image::DynamicImage::new_rgba8(600, 900)).width(), square(&image::DynamicImage::new_rgba8(600, 900)).height()), (256, 256));
     }
 
     #[test]
