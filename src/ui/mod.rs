@@ -71,7 +71,7 @@ pub fn run(claim: bool) -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
-/// `lobby shortcuts`: Windows programs' Start Menu shortcuts, picked for the app menu.
+/// `lobby shortcuts`: games' and Windows programs' shortcuts, picked for the app menu.
 pub fn shortcuts_window() -> glib::ExitCode {
     shortcuts::window()
 }
@@ -414,7 +414,7 @@ fn build(app: &adw::Application) {
     };
     let accounts_button = menu_item("Store Accounts");
     let places_button = menu_item("Where Lobby Looks");
-    let shortcuts_button = menu_item("Windows Shortcuts");
+    let shortcuts_button = menu_item("App Menu Shortcuts");
     header.pack_end(&main_menu);
     let search = gtk::SearchEntry::builder().placeholder_text("Search games").width_chars(28).build();
     header.pack_end(&search);
@@ -2413,9 +2413,9 @@ impl Ui {
         }
     }
 
-    /// Windows Shortcuts, as a dialog over the window.
+    /// App Menu Shortcuts, as a dialog over the window.
     fn windows_shortcuts(&self) {
-        let dialog = adw::Dialog::builder().title("Windows Shortcuts").content_width(600).content_height(720).child(&shortcuts::content()).build();
+        let dialog = adw::Dialog::builder().title("App Menu Shortcuts").content_width(600).content_height(720).child(&shortcuts::content()).build();
         dialog.present(Some(&self.window));
     }
 

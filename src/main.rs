@@ -83,8 +83,9 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby import [--dry]    move imported games' Wine setups into Lobby's folders (a link left
                                behind) and copy launchers' Proton builds (each scan does)
        lobby own-wine-setup <game>  give a game in a shared Wine setup a copy of its own
-       lobby shortcuts [list|add <name>|remove <name>]  Windows programs' Start Menu shortcuts
-                               (Proton keeps them out of the app menu): pick which go in it
+       lobby shortcuts [list|add <name>|remove <name>]  what's in the app menu: games with an entry
+                               there, and Windows programs' Start Menu shortcuts (Proton keeps
+                               them out of it); pick which show
        lobby shortcut <slug>   what such an app-menu entry runs: starts its program
        lobby proton <game> [<name> | default] [--anyway]  the Proton it starts with; pick another
                                of Steam's (default: the one it was set up with)
@@ -236,42 +237,41 @@ fn stop_game(query: &str) -> Result<(), String> {
 
 /// Hides a game or brings it back, makes it a favourite or not (the window's star and Hide).
 fn list_shortcuts(json: bool) -> Result<(), String> {
-    let all = start_menu::all(&Library::load().unwrap_or_default());
+    let items = start_menu::items(&Library::load().unwrap_or_default());
     if json {
-        let list: Vec<_> = all.iter().map(|s| serde_json::json!({ "name": s.name, "program": s.program, "prefix": s.prefix, "place": s.place, "entry": s.entry, "gone": s.gone() })).collect();
+        let list: Vec<_> = items.iter().map(|i| serde_json::json!({ "name": i.name, "group": i.group, "game": i.game, "shown": i.shown(), "own": i.own, "made": i.made, "program": i.shortcut.as_ref().map(|s| &s.program) })).collect();
         println!("{}", serde_json::Value::Array(list));
         return Ok(());
     }
-    for s in &all {
-        let state = match (&s.entry, s.gone()) {
-            (Some(_), true) => "in the app menu, program gone",
-            (Some(_), false) => "in the app menu",
-            (None, _) => "",
-        };
-        println!("{}  ({}){}{state}", s.name, s.place, if state.is_empty() { "" } else { ": " });
+    for i in &items {
+        println!("{}  ({}){}", i.name, i.group, if i.shown() { ": in the app menu" } else { "" });
     }
     Ok(())
 }
 
-/// One shortcut, by its name (or "name (place)" when two share it), in the app menu or out.
-fn change_shortcut(add: bool, query: &str) -> Result<(), String> {
-    let all = start_menu::all(&Library::load().unwrap_or_default());
+/// One game or program, by its name (or "name (group)" when two share it), in the app menu or out.
+fn change_shortcut(show: bool, query: &str) -> Result<(), String> {
+    let mut items = start_menu::items(&Library::load().unwrap_or_default());
     let q = query.to_lowercase();
-    let found: Vec<&start_menu::Shortcut> = all.iter().filter(|s| format!("{} ({})", s.name, s.place).to_lowercase() == q || s.name.to_lowercase() == q).collect();
-    let s = match found.as_slice() {
-        [one] => *one,
-        [] => return Err(format!("No shortcut called \"{query}\": lobby shortcuts list shows them.")),
-        _ => return Err(format!("Several are called \"{query}\": name one as \"{} ({})\".", found[0].name, found[0].place)),
+    let found: Vec<usize> = (0..items.len()).filter(|&n| format!("{} ({})", items[n].name, items[n].group).to_lowercase() == q || items[n].name.to_lowercase() == q).collect();
+    let item = match found.as_slice() {
+        [one] => &mut items[*one],
+        [] => return Err(format!("Nothing called \"{query}\": lobby shortcuts list shows them.")),
+        [first, ..] => return Err(format!("Several are called \"{query}\": name one as \"{} ({})\".", items[*first].name, items[*first].group)),
     };
-    match (add, &s.entry) {
-        (true, Some(_)) => println!("{} is in the app menu already.", s.name),
-        (true, None) => println!("{} is in the app menu now ({}).", s.name, start_menu::add(s)?.display()),
-        (false, Some(entry)) => {
-            start_menu::remove(entry)?;
-            println!("{} is out of the app menu.", s.name);
+    match (show, item.shown()) {
+        (true, true) => println!("{} is in the app menu already.", item.name),
+        (false, false) => println!("{} isn't in the app menu.", item.name),
+        (true, false) => {
+            item.show()?;
+            println!("{} is in the app menu now.", item.name);
         }
-        (false, None) => println!("{} isn't in the app menu.", s.name),
+        (false, true) => {
+            item.hide()?;
+            println!("{} is out of the app menu.", item.name);
+        }
     }
+    start_menu::refresh();
     Ok(())
 }
 
@@ -284,7 +284,7 @@ fn open_shortcut(slug: &str) -> Result<(), String> {
         why
     };
     if s.gone() {
-        return Err(failed(format!("{} isn't there any more: the program was uninstalled or its drive isn't open. Take it out of the app menu in Lobby's Windows Shortcuts.", s.program.display())));
+        return Err(failed(format!("{} isn't there any more: the program was uninstalled or its drive isn't open. Take it out of the app menu in Lobby's App Menu Shortcuts.", s.program.display())));
     }
     if apparmor::blocked() {
         return Err(failed(format!("{} Allow Lobby first: run `lobby allow-sandbox`, or press Play in Lobby's window.", apparmor::WHY)));

@@ -123,7 +123,7 @@ fn read(file: &Path, dirs: &[PathBuf]) -> Option<Entry> {
     // lobby's own entries are in Games too: its window, its Windows shortcuts picker and the
     // shortcuts picked there (the prefix source finds those programs already).
     let lobby = file.file_stem().is_some_and(|s| s.to_string_lossy().starts_with("io.github.Petru101.Lobby")) || crate::start_menu::is_entry(file);
-    if !game || lobby || get("Type").is_some_and(|t| t != "Application") || get("NoDisplay") == Some("true") || get("Hidden") == Some("true") {
+    if !game || lobby || get("Type").is_some_and(|t| t != "Application") || (get("NoDisplay") == Some("true") && !text.lines().any(|l| l.trim() == crate::start_menu::HIDDEN_BY_LOBBY)) || get("Hidden") == Some("true") {
         return None;
     }
     let mut e = Entry::new(Source::AppMenu, name);

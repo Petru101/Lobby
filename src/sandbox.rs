@@ -161,10 +161,48 @@ pub fn sync_shortcut(game: &Game) -> Result<bool, String> {
     let entry = text.lines().filter_map(|l| l.strip_prefix("created\t")).filter(|p| p.ends_with(".desktop")).find_map(|p| crate::launch::desktop_exec(&fs::read_to_string(p).ok()?));
     let Some((words, _)) = entry else { return Ok(changed) };
     let wanted = (shortcut_wrapped(game) && crate::launch::hands_over(&words).is_none()).then(|| wrapper(game));
+    // What the app menu says it is: started through Lobby while Lobby is in its Exec.
+    for file in text.lines().filter_map(|l| l.strip_prefix("created\t")).filter(|p| p.ends_with(".desktop")) {
+        changed |= sync_comment(Path::new(file), wanted.is_some())?;
+    }
     if current == wanted {
         return Ok(changed);
     }
     gamefix::setup::set_wrapper(&record, wanted.as_deref()).map(|()| true)
+}
+
+const GAMEFIX_COMMENT: &str = "Set up by gamefix";
+const LOBBY_COMMENT: &str = "Starts through Lobby";
+
+/// gamefix's entry says "Set up by gamefix", which read as if gamefix were something to know
+/// about; while the entry starts the game through Lobby it says that. A comment of anyone
+/// else's stays. Whether it changed.
+fn sync_comment(file: &Path, through_lobby: bool) -> Result<bool, String> {
+    let Ok(text) = fs::read_to_string(file) else { return Ok(false) };
+    let rewritten = comment_text(&text, if through_lobby { LOBBY_COMMENT } else { GAMEFIX_COMMENT });
+    if rewritten == text {
+        return Ok(false);
+    }
+    fs::write(file, rewritten).map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok(true)
+}
+
+fn comment_text(text: &str, comment: &str) -> String {
+    let mut main = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with('[') {
+            main = line.trim() == "[Desktop Entry]";
+        }
+        match line.strip_prefix("Comment=") {
+            Some(c) if main && [GAMEFIX_COMMENT, LOBBY_COMMENT].contains(&c) => out.push_str(&format!("Comment={comment}\n")),
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// Whether the game's shortcuts start it through `lobby sandbox`: unless it's Off, and then too
@@ -845,6 +883,16 @@ pub fn summary(game: &Game) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn entries_lobby_starts_say_so() {
+        let text = "[Desktop Entry]\nName=Mycopunk\nComment=Set up by gamefix\n[Desktop Action x]\nComment=Set up by gamefix\n";
+        let ours = comment_text(text, LOBBY_COMMENT);
+        assert_eq!(ours, "[Desktop Entry]\nName=Mycopunk\nComment=Starts through Lobby\n[Desktop Action x]\nComment=Set up by gamefix\n");
+        assert_eq!(comment_text(&ours, GAMEFIX_COMMENT), text);
+        let own = "[Desktop Entry]\nComment=My favourite\n";
+        assert_eq!(comment_text(own, LOBBY_COMMENT), own);
+    }
     use super::*;
 
     #[test]

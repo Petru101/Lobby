@@ -46,7 +46,7 @@ pub fn let_webkit_in() {
     }
 }
 
-/// Lobby in the app menu, started from the AppImage file, with its Windows Shortcuts picker:
+/// Lobby in the app menu, started from the AppImage file, with its App Menu Shortcuts picker:
 /// each written when there's no entry, or one starting a program that's gone or another
 /// AppImage (an older download). An entry for another Lobby install (~/.local/bin/lobby) is
 /// left alone.
@@ -70,9 +70,9 @@ fn entry_text(lobby: &str) -> String {
     format!("[Desktop Entry]\nType=Application\nName=Lobby\nGenericName=Game library\nComment=Every game on this computer in one place\nExec=\"{lobby}\"\nIcon=applications-games\nCategories=Game;\nKeywords=games;launcher;steam;heroic;lutris;\nStartupWMClass=io.github.Petru101.Lobby\n")
 }
 
-/// The Windows Shortcuts picker's own entry (run/install.sh writes the same).
+/// The App Menu Shortcuts picker's own entry (run/install.sh writes the same).
 fn shortcuts_entry_text(lobby: &str) -> String {
-    format!("[Desktop Entry]\nType=Application\nName=Windows Shortcuts\nGenericName=Windows programs for the app menu\nComment=Put the Start Menu shortcuts Windows programs made (Battle.net ...) in the app menu\nExec=\"{lobby}\" shortcuts\nIcon=applications-games\nCategories=Game;\nKeywords=wine;proton;windows;start menu;shortcut;battle.net;\nStartupWMClass=io.github.Petru101.Lobby.Shortcuts\n")
+    format!("[Desktop Entry]\nType=Application\nName=App Menu Shortcuts\nGenericName=Pick what the app menu shows\nComment=Games and Windows programs (Battle.net ...) in the app menu or out\nExec=\"{lobby}\" shortcuts\nIcon=applications-games\nCategories=Game;\nKeywords=wine;proton;windows;start menu;shortcut;battle.net;games;menu;\nStartupWMClass=io.github.Petru101.Lobby.Shortcuts\n")
 }
 
 /// Where the latest release is described (LOBBY_UPDATE_URL instead, to try updating against a

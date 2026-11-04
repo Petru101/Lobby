@@ -2,7 +2,10 @@
 //! Proton writes the menu entries Wine would make into the prefix (`C:\proton_shortcuts`)
 //! instead of the app menu, so a Windows program installed through it (Battle.net, a GOG
 //! installer's game) never shows there. Lobby lists the shortcuts of every prefix it knows and
-//! writes an entry for the ones picked, which starts the program through Lobby.
+//! writes an entry for the ones picked, which starts the program through Lobby. Games that
+//! already have an entry in the home's app menu (gamefix's, made when Lobby set them up) are
+//! listed with it, once: switching one off hides that entry (Play still starts the game
+//! through it), on shows it again.
 
 use crate::library::{self, Kind};
 use crate::store::Library;
@@ -161,7 +164,7 @@ fn entry_text(s: &Shortcut, slug: &str, lobby: &str, icon: Option<&str>) -> Stri
     // Wine names a program's windows after its file, which the taskbar matches to the entry.
     let class = s.program.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
     format!(
-        "[Desktop Entry]\nType=Application\nName={}\nComment=Windows program, in {}'s Wine prefix\nExec=\"{lobby}\" shortcut {slug}\nIcon={}\nCategories=Game;\nStartupWMClass={class}\nX-Lobby-Program={}\nX-Lobby-Prefix={}\nX-Lobby-Place={}\n",
+        "[Desktop Entry]\nType=Application\nName={}\nComment=Windows program in {}'s Wine prefix, started through Lobby\nExec=\"{lobby}\" shortcut {slug}\nIcon={}\nCategories=Game;\nStartupWMClass={class}\nX-Lobby-Program={}\nX-Lobby-Prefix={}\nX-Lobby-Place={}\n",
         one_line(&s.name),
         one_line(&s.place),
         icon.unwrap_or("applications-games"),
@@ -184,6 +187,158 @@ pub fn remove(entry: &Path) -> Result<(), String> {
         let _ = fs::remove_file(icons().join(format!("{stem}.png")));
     }
     fs::remove_file(entry).map_err(|e| format!("{}: {e}", entry.display()))
+}
+
+/// A row of the picker: a game with its own app-menu entries in the home and Windows shortcuts,
+/// or a Windows program that's no game in the library (`game` None, one shortcut).
+#[derive(Debug, Clone)]
+pub struct Item {
+    pub name: String,
+    /// The program's file, or for a game none.
+    pub detail: String,
+    /// "Games", whose prefix the program is in, or that it's gone.
+    pub group: String,
+    /// A picture file: an entry's icon, else the program (its .exe icon).
+    pub icon: Option<PathBuf>,
+    pub game: Option<String>,
+    /// The game's entries not made here (gamefix's ...), shown or hidden.
+    pub own: Vec<PathBuf>,
+    /// The entry made here for its shortcut.
+    pub made: Option<PathBuf>,
+    pub shortcut: Option<Shortcut>,
+}
+
+pub const GAMES: &str = "Games";
+pub const GONE: &str = "No longer on this computer";
+
+impl Item {
+    pub fn shown(&self) -> bool {
+        self.made.is_some() || self.own.iter().any(|e| !hidden(e))
+    }
+
+    /// Into the app menu: its own entry shown again, else one made for its shortcut.
+    pub fn show(&mut self) -> Result<(), String> {
+        if let Some(entry) = self.own.first() {
+            set_hidden(entry, false)?;
+        } else if self.made.is_none() {
+            let s = self.shortcut.as_ref().ok_or("Nothing to put in the app menu.")?;
+            self.made = Some(add(s)?);
+        }
+        Ok(())
+    }
+
+    /// Out of the app menu: the entry made here goes, its own entries are hidden (kept: Play
+    /// starts gamefix's games through theirs).
+    pub fn hide(&mut self) -> Result<(), String> {
+        if let Some(made) = self.made.take() {
+            remove(&made)?;
+        }
+        for entry in self.own.iter().filter(|e| !hidden(e)) {
+            set_hidden(entry, true)?;
+        }
+        Ok(())
+    }
+}
+
+/// What the picker lists: every game with an entry of its own in the home's app menu or a
+/// Windows shortcut (one row each, whatever made them), then the Windows programs that are
+/// no game, by prefix.
+pub fn items(lib: &Library) -> Vec<Item> {
+    let apps = library::norm(&applications());
+    let shortcuts = all(lib);
+    let mut used = vec![false; shortcuts.len()];
+    // Each game's programs, their paths resolved once (game_of for each pair took a minute).
+    let mut programs: std::collections::HashMap<PathBuf, &str> = std::collections::HashMap::new();
+    for g in lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone) {
+        for p in g.entries.iter().filter_map(|e| e.program.as_deref()) {
+            programs.entry(library::norm(p)).or_insert(&g.id);
+        }
+    }
+    let owner: Vec<Option<&str>> = shortcuts.iter().map(|s| programs.get(&library::norm(&s.program)).copied()).collect();
+    let mut out = Vec::new();
+    for g in lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone) {
+        let mut own: Vec<PathBuf> = g.entries.iter().flat_map(|e| &e.keys).filter_map(|k| if let library::Key::Desktop(p) = k { Some(p.clone()) } else { None }).filter(|p| own_entry(p, &apps)).collect();
+        own.sort();
+        own.dedup();
+        let mine: Vec<usize> = (0..shortcuts.len()).filter(|&i| !used[i] && owner[i] == Some(g.id.as_str())).collect();
+        if own.is_empty() && mine.is_empty() {
+            continue;
+        }
+        mine.iter().for_each(|&i| used[i] = true);
+        let made = mine.iter().find_map(|&i| shortcuts[i].entry.clone());
+        // An entry's own picture (gamefix's .exe icon, a launcher's), else the program's.
+        let icon = own.iter().find_map(|e| entry_icon(e)).or_else(|| mine.first().map(|&i| shortcuts[i].program.clone())).or_else(|| g.entries.iter().find_map(|e| e.program.clone()));
+        let shortcut = mine.first().map(|&i| Shortcut { name: g.name.clone(), ..shortcuts[i].clone() });
+        out.push(Item { name: g.name.clone(), detail: String::new(), group: GAMES.into(), icon, game: Some(g.id.clone()), own, made, shortcut });
+    }
+    for (s, _) in shortcuts.into_iter().zip(used).filter(|(_, used)| !used) {
+        let group = if s.gone() { GONE.into() } else { s.place.clone() };
+        let detail = s.program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        out.push(Item { name: s.name.clone(), detail, group, icon: Some(s.program.clone()), game: None, own: Vec::new(), made: s.entry.clone(), shortcut: Some(s) });
+    }
+    out.sort_by_key(|i| (i.group != GAMES, i.group == GONE, i.group.to_lowercase(), i.name.to_lowercase()));
+    out
+}
+
+/// A game's entry this picker may show and hide: a file of the home's app-menu folder, not a
+/// link (a Flatpak's) and not one made here.
+fn own_entry(p: &Path, apps: &Path) -> bool {
+    library::norm(p).starts_with(apps) && p.is_file() && !is_entry(p) && !fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("io.github.Petru101.Lobby"))
+}
+
+fn main_group(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().skip_while(|l| l.trim() != "[Desktop Entry]").skip(1).take_while(|l| !l.starts_with('['))
+}
+
+fn entry_icon(entry: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(entry).ok()?;
+    let icon = main_group(&text).find_map(|l| l.strip_prefix("Icon=")).map(PathBuf::from);
+    icon.filter(|p| p.is_absolute() && p.is_file())
+}
+
+/// Whether an entry is kept out of the app menu (NoDisplay).
+pub fn hidden(entry: &Path) -> bool {
+    fs::read_to_string(entry).is_ok_and(|t| main_group(&t).any(|l| l.trim() == "NoDisplay=true"))
+}
+
+/// Marks Lobby's hiding of an entry (NoDisplay), so the app-menu source still reads it: the
+/// game still starts through it.
+pub const HIDDEN_BY_LOBBY: &str = "X-Lobby-Hidden=true";
+
+fn set_hidden(entry: &Path, hide: bool) -> Result<(), String> {
+    let text = fs::read_to_string(entry).map_err(|e| format!("{}: {e}", entry.display()))?;
+    let rewritten = hidden_text(&text, hide);
+    if rewritten != text {
+        fs::write(entry, rewritten).map_err(|e| format!("{}: {e}", entry.display()))?;
+    }
+    Ok(())
+}
+
+/// An entry's text with NoDisplay (and Lobby's mark) set or taken out, in its main group only.
+fn hidden_text(text: &str, hide: bool) -> String {
+    let mut main = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with('[') {
+            main = line.trim() == "[Desktop Entry]";
+        }
+        if main && (line.trim().starts_with("NoDisplay=") || line.trim() == HIDDEN_BY_LOBBY) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if hide && line.trim() == "[Desktop Entry]" {
+            out.push_str("NoDisplay=true\n");
+            out.push_str(HIDDEN_BY_LOBBY);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Has the app menu read its entries again (KDE's; others watch the folder themselves).
+pub fn refresh() {
+    let _ = std::process::Command::new("kbuildsycoca6").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
 }
 
 /// The shortcut an entry's `lobby shortcut <slug>` names.
@@ -229,6 +384,15 @@ mod tests {
         assert_eq!(read(&file), Some(Shortcut { entry: Some(file.clone()), ..s }));
         assert!(!is_entry(&dir.join("gamefix-battle-net.desktop")));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hiding_keeps_the_entry() {
+        let text = "[Desktop Entry]\nName=Mycopunk\nExec=x\n\n[Desktop Action a]\nNoDisplay=true\n";
+        let hidden = hidden_text(text, true);
+        assert_eq!(hidden, "[Desktop Entry]\nNoDisplay=true\nX-Lobby-Hidden=true\nName=Mycopunk\nExec=x\n\n[Desktop Action a]\nNoDisplay=true\n");
+        assert_eq!(hidden_text(&hidden, true), hidden);
+        assert_eq!(hidden_text(&hidden, false), text);
     }
 
     #[test]

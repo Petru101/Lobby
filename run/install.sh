@@ -23,14 +23,14 @@ EOF
 cat > "$HOME/.local/share/applications/io.github.Petru101.Lobby.Shortcuts.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Windows Shortcuts
-GenericName=Windows programs for the app menu
-Comment=Put the Start Menu shortcuts Windows programs made (Battle.net ...) in the app menu
+Name=App Menu Shortcuts
+GenericName=Pick what the app menu shows
+Comment=Games and Windows programs (Battle.net ...) in the app menu or out
 Exec=$HOME/.local/bin/lobby shortcuts
 Icon=applications-games
 Categories=Game;
-Keywords=wine;proton;windows;start menu;shortcut;battle.net;
+Keywords=wine;proton;windows;start menu;shortcut;battle.net;games;menu;
 StartupWMClass=io.github.Petru101.Lobby.Shortcuts
 EOF
 host-spawn update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-echo "Lobby and its Windows Shortcuts are in the app menu (Games)."
+echo "Lobby and its App Menu Shortcuts are in the app menu (Games)."
