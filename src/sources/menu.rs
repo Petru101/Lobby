@@ -120,8 +120,9 @@ fn read(file: &Path, dirs: &[PathBuf]) -> Option<Entry> {
         || file.file_name().is_some_and(|n| n.to_string_lossy().starts_with("gamefix-"))
         || exec.contains("steam://rungameid/")
         || wine;
-    // lobby's own entry is in Games too.
-    let lobby = file.file_stem().is_some_and(|s| s == "io.github.Petru101.Lobby");
+    // lobby's own entries are in Games too: its window, its Windows shortcuts picker and the
+    // shortcuts picked there (the prefix source finds those programs already).
+    let lobby = file.file_stem().is_some_and(|s| s.to_string_lossy().starts_with("io.github.Petru101.Lobby")) || crate::start_menu::is_entry(file);
     if !game || lobby || get("Type").is_some_and(|t| t != "Application") || get("NoDisplay") == Some("true") || get("Hidden") == Some("true") {
         return None;
     }

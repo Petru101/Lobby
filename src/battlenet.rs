@@ -102,10 +102,17 @@ fn umu(verb: &str) -> Command {
 /// The command starting the game through Battle.net. Proton's `run`, not its default
 /// `waitforexitandrun`: Battle.net stays open, and the default would wait for it to close.
 pub fn command(launch: &str) -> Vec<String> {
+    let mut words = app_command(&program());
+    words.push(format!("--exec=launch {launch}"));
+    words
+}
+
+/// The command opening Battle.net itself (or another program of its prefix), no game asked for.
+pub fn app_command(program: &Path) -> Vec<String> {
     let mut words = vec!["env".to_string()];
     let c = umu("run");
     words.extend(c.get_envs().filter_map(|(k, v)| Some(format!("{}={}", k.to_string_lossy(), v?.to_string_lossy()))));
-    words.extend(["umu-run".into(), program().display().to_string(), format!("--exec=launch {launch}")]);
+    words.extend(["umu-run".into(), program.display().to_string()]);
     words
 }
 

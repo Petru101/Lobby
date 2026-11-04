@@ -20,5 +20,17 @@ Categories=Game;
 Keywords=games;launcher;steam;heroic;lutris;
 StartupWMClass=io.github.Petru101.Lobby
 EOF
+cat > "$HOME/.local/share/applications/io.github.Petru101.Lobby.Shortcuts.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Windows Shortcuts
+GenericName=Windows programs for the app menu
+Comment=Put the Start Menu shortcuts Windows programs made (Battle.net ...) in the app menu
+Exec=$HOME/.local/bin/lobby shortcuts
+Icon=applications-games
+Categories=Game;
+Keywords=wine;proton;windows;start menu;shortcut;battle.net;
+StartupWMClass=io.github.Petru101.Lobby.Shortcuts
+EOF
 host-spawn update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-echo "Lobby is in the app menu (Games)."
+echo "Lobby and its Windows Shortcuts are in the app menu (Games)."

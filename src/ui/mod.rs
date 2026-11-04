@@ -3,6 +3,7 @@
 
 mod covers;
 mod pad;
+mod shortcuts;
 
 use crate::battlenet;
 use crate::launch::{self, Plan};
@@ -68,6 +69,11 @@ pub fn run(claim: bool) -> glib::ExitCode {
     app.set_accels_for_action("win.rescan", &["<Control>r", "F5"]);
     app.set_accels_for_action("window.close", &["<Control>w", "<Control>q"]);
     app.run_with_args::<&str>(&[])
+}
+
+/// `lobby shortcuts`: Windows programs' Start Menu shortcuts, picked for the app menu.
+pub fn shortcuts_window() -> glib::ExitCode {
+    shortcuts::window()
 }
 
 /// Asked by `lobby run` when a game's saves changed both here and in the store's cloud since
@@ -408,6 +414,7 @@ fn build(app: &adw::Application) {
     };
     let accounts_button = menu_item("Store Accounts");
     let places_button = menu_item("Where Lobby Looks");
+    let shortcuts_button = menu_item("Windows Shortcuts");
     header.pack_end(&main_menu);
     let search = gtk::SearchEntry::builder().placeholder_text("Search games").width_chars(28).build();
     header.pack_end(&search);
@@ -655,6 +662,11 @@ fn build(app: &adw::Application) {
         m.popdown();
         u.places();
     });
+    let (u, m) = (ui.clone(), main_menu.clone());
+    shortcuts_button.connect_clicked(move |_| {
+        m.popdown();
+        u.windows_shortcuts();
+    });
     let u = ui.clone();
     add_button.connect_clicked(move |_| u.pick_game());
     // A folder dropped on the window: looked in from now on; a file: added as a game.
@@ -859,6 +871,9 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         }
         if std::env::var_os("LOBBY_SNAPSHOT_PLACES").is_some() {
             u.places();
+        }
+        if std::env::var_os("LOBBY_SNAPSHOT_SHORTCUTS").is_some() {
+            u.windows_shortcuts();
         }
         let searching = std::env::var_os("LOBBY_SNAPSHOT_DRIVES").is_some();
         if searching {
@@ -2396,6 +2411,12 @@ impl Ui {
             }
             Err(e) => self.alert("Couldn't add the game", &e),
         }
+    }
+
+    /// Windows Shortcuts, as a dialog over the window.
+    fn windows_shortcuts(&self) {
+        let dialog = adw::Dialog::builder().title("Windows Shortcuts").content_width(600).content_height(720).child(&shortcuts::content()).build();
+        dialog.present(Some(&self.window));
     }
 
     /// Where lobby looks: the folders it looks in by itself, the ones added, the games taken

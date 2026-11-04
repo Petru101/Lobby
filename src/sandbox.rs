@@ -131,12 +131,17 @@ pub fn wrap(game: &Game, command: Vec<String>) -> Vec<String> {
     if lobby_run || unwrapped(&command).is_some() {
         return command;
     }
-    [vec![lobby_exe(), "sandbox".into(), game.id.clone(), "--".into()], command].concat()
+    wrap_id(&game.id, command)
+}
+
+/// `lobby sandbox <id> --` before a command; an id the library lacks runs at Standard.
+pub fn wrap_id(id: &str, command: Vec<String>) -> Vec<String> {
+    [vec![lobby_exe(), "sandbox".into(), id.to_string(), "--".into()], command].concat()
 }
 
 /// The installed lobby (run/install.sh's), which app-menu entries name: not a build being tried.
 /// An AppImage names itself.
-fn installed_lobby() -> String {
+pub fn installed_lobby() -> String {
     let installed = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/bin/lobby");
     if installed.is_file() && std::env::var_os("APPIMAGE").is_none() { installed.display().to_string() } else { lobby_exe() }
 }

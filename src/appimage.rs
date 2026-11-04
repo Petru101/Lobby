@@ -46,24 +46,33 @@ pub fn let_webkit_in() {
     }
 }
 
-/// Lobby in the app menu, started from the AppImage file: written when there's no entry, or
-/// one starting a program that's gone or another AppImage (an older download). An entry for
-/// another Lobby install (~/.local/bin/lobby) is left alone.
+/// Lobby in the app menu, started from the AppImage file, with its Windows Shortcuts picker:
+/// each written when there's no entry, or one starting a program that's gone or another
+/// AppImage (an older download). An entry for another Lobby install (~/.local/bin/lobby) is
+/// left alone.
 pub fn menu_entry() {
     let Some(file) = std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file()) else { return };
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
-    let entry = home.join(".local/share/applications/io.github.Petru101.Lobby.desktop");
-    let exec = fs::read_to_string(&entry).ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix("Exec=").map(|e| e.trim_matches('"').to_string())));
-    let keep = exec.as_deref().is_some_and(|e| e == file.to_string_lossy() || (PathBuf::from(e).is_file() && !e.to_lowercase().ends_with(".appimage")));
-    if keep {
-        return;
+    let apps = home.join(".local/share/applications");
+    let lobby = file.display().to_string();
+    for (name, text) in [("io.github.Petru101.Lobby.desktop", entry_text(&lobby)), ("io.github.Petru101.Lobby.Shortcuts.desktop", shortcuts_entry_text(&lobby))] {
+        let entry = apps.join(name);
+        let exec = fs::read_to_string(&entry).ok().and_then(|t| t.lines().find_map(|l| l.strip_prefix("Exec=").map(|e| e.trim_start_matches('"').split('"').next().unwrap_or_default().split(" shortcuts").next().unwrap_or_default().to_string())));
+        let keep = exec.as_deref().is_some_and(|e| e == lobby || (PathBuf::from(e).is_file() && !e.to_lowercase().ends_with(".appimage")));
+        if !keep {
+            let _ = fs::create_dir_all(&apps);
+            let _ = fs::write(&entry, text);
+        }
     }
-    let text = format!(
-        "[Desktop Entry]\nType=Application\nName=Lobby\nGenericName=Game library\nComment=Every game on this computer in one place\nExec=\"{}\"\nIcon=applications-games\nCategories=Game;\nKeywords=games;launcher;steam;heroic;lutris;\nStartupWMClass=io.github.Petru101.Lobby\n",
-        file.display()
-    );
-    let _ = fs::create_dir_all(entry.parent().unwrap());
-    let _ = fs::write(&entry, text);
+}
+
+fn entry_text(lobby: &str) -> String {
+    format!("[Desktop Entry]\nType=Application\nName=Lobby\nGenericName=Game library\nComment=Every game on this computer in one place\nExec=\"{lobby}\"\nIcon=applications-games\nCategories=Game;\nKeywords=games;launcher;steam;heroic;lutris;\nStartupWMClass=io.github.Petru101.Lobby\n")
+}
+
+/// The Windows Shortcuts picker's own entry (run/install.sh writes the same).
+fn shortcuts_entry_text(lobby: &str) -> String {
+    format!("[Desktop Entry]\nType=Application\nName=Windows Shortcuts\nGenericName=Windows programs for the app menu\nComment=Put the Start Menu shortcuts Windows programs made (Battle.net ...) in the app menu\nExec=\"{lobby}\" shortcuts\nIcon=applications-games\nCategories=Game;\nKeywords=wine;proton;windows;start menu;shortcut;battle.net;\nStartupWMClass=io.github.Petru101.Lobby.Shortcuts\n")
 }
 
 /// Where the latest release is described (LOBBY_UPDATE_URL instead, to try updating against a

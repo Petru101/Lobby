@@ -18,6 +18,7 @@ use crate::library::{self, Entry};
 
 pub use faugus::plain_settings as faugus_plain_settings;
 pub use menu::flatpak_app;
+pub use prefixes::usual as usual_prefixes;
 use std::path::{Path, PathBuf};
 
 pub struct Home {

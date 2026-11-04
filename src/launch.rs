@@ -346,6 +346,11 @@ fn umu_plan(program: &Path, prefix: &Path, args: &str, how: &str) -> Plan {
     own(how, umu_command(program, prefix, &[], &args, None), program.parent().map(Path::to_path_buf))
 }
 
+/// A program in a prefix, as `umu_command` runs it with nothing else known.
+pub fn in_prefix(program: &Path, prefix: &Path) -> Vec<String> {
+    umu_command(program, prefix, &[], &[], None)
+}
+
 /// `env WINEPREFIX=.. PROTONPATH=.. GAMEID=.. <env> umu-run <program> <args>`: the Proton the
 /// launcher picked for the game (`chosen`: Faugus's runner, Lutris's wine version, the tool
 /// forced on a Steam shortcut; the launcher always uses it, so it's the prefix's own), else the
