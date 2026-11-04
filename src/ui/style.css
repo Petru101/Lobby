@@ -1,5 +1,23 @@
 .filters {
-  padding: 0 12px;
+  padding: 0 24px;
+}
+
+/* The pages in the header: a little wider than plain buttons, so they read as a switch. */
+.pages > button {
+  padding-left: 18px;
+  padding-right: 18px;
+}
+
+/* The sources under the header: smaller than the pages above them. */
+button.source {
+  min-height: 28px;
+  padding: 2px 12px;
+  border-radius: 99px;
+  font-weight: normal;
+}
+
+button.source:checked {
+  font-weight: bold;
 }
 
 flowboxchild.game-card {
@@ -16,21 +34,24 @@ flowboxchild.game-card {
   border-radius: 12px;
 }
 
+/* Made bigger than the card so the blur's faded edges fall outside it. */
 .cover-backdrop {
-  filter: blur(14px) brightness(0.55) saturate(1.2);
+  filter: blur(18px) brightness(0.6) saturate(1.5);
+  transform: scale(1.4);
 }
 
 .cover-name {
   color: white;
-  font-weight: 800;
-  font-size: 15pt;
+  font-weight: 700;
+  font-size: 14pt;
 }
 
-.tint-0 { background: linear-gradient(160deg, #3c6ebd, #1c3a70); }
-.tint-1 { background: linear-gradient(160deg, #c64600, #6b2400); }
-.tint-2 { background: linear-gradient(160deg, #26a269, #10502f); }
-.tint-3 { background: linear-gradient(160deg, #813d9c, #3e1a4d); }
-.tint-4 { background: linear-gradient(160deg, #a51d2d, #4d0a12); }
+/* Deep and muted, so a card without art doesn't outshine the covers around it. */
+.tint-0 { background: linear-gradient(160deg, #36557f, #1b2a42); }
+.tint-1 { background: linear-gradient(160deg, #8a4b2c, #3d2013); }
+.tint-2 { background: linear-gradient(160deg, #2e6e53, #142f24); }
+.tint-3 { background: linear-gradient(160deg, #604a80, #2a2039); }
+.tint-4 { background: linear-gradient(160deg, #803944, #36161b); }
 .tint-5 { background: linear-gradient(160deg, #5e5c64, #241f31); }
 
 .card-name {

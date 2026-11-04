@@ -384,43 +384,57 @@ struct Ui {
 
 fn build(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder().application(app).title("Lobby").default_width(1280).default_height(860).build();
-    // The pages, in the middle of the header.
-    let pages = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
+    // The pages, in the middle of the header, as one switch of joined buttons.
+    let pages = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).build();
+    pages.add_css_class("linked");
+    pages.add_css_class("pages");
     let header = adw::HeaderBar::builder().title_widget(&pages).build();
     let add_button = gtk::Button::builder().icon_name("list-add-symbolic").tooltip_text("Add a game: pick the program that starts it").build();
     header.pack_start(&add_button);
     let rescan_button = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Look for games again (F5)").build();
     header.pack_start(&rescan_button);
-    let accounts_button = gtk::Button::builder().icon_name("avatar-default-symbolic").tooltip_text("Store accounts: Epic Games and GOG").build();
-    header.pack_start(&accounts_button);
-    let places_button = gtk::Button::builder().icon_name("folder-symbolic").tooltip_text("Where Lobby looks for games").build();
-    header.pack_start(&places_button);
     let free_button = gtk::Button::builder().label("Free games").tooltip_text("Games free to keep right now on Epic, GOG and Steam").build();
+    free_button.add_css_class("flat");
     header.pack_start(&free_button);
+    // The main menu: what's set up once rather than used every day.
+    let menu_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
+    let main_menu = gtk::MenuButton::builder().icon_name("open-menu-symbolic").tooltip_text("Main menu").popover(&gtk::Popover::builder().child(&menu_box).build()).build();
+    let menu_item = |label: &str| {
+        let b = gtk::Button::builder().label(label).build();
+        b.add_css_class("flat");
+        b.child().and_downcast::<gtk::Label>().inspect(|l| l.set_xalign(0.0));
+        menu_box.append(&b);
+        b
+    };
+    let accounts_button = menu_item("Store Accounts");
+    let places_button = menu_item("Where Lobby Looks");
+    header.pack_end(&main_menu);
     let search = gtk::SearchEntry::builder().placeholder_text("Search games").width_chars(28).build();
     header.pack_end(&search);
 
-    // Sources, as a row of toggle buttons, and how many games show.
-    let sources = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(6).build();
-    let count = gtk::Label::builder().margin_end(12).build();
+    // Sources, as a row of toggle buttons from the left edge; the order, the Show menu and how
+    // many games show at the other end.
+    let sources = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(4).valign(gtk::Align::Center).build();
+    let count = gtk::Label::builder().margin_end(6).build();
     count.add_css_class("dim-label");
     let sort_names: Vec<&str> = Sort::ALL.iter().map(|(_, _, label)| *label).collect();
     let sort = gtk::DropDown::from_strings(&sort_names);
     sort.set_tooltip_text(Some("Order of the games"));
-    sort.set_margin_start(12);
     sort.set_valign(gtk::Align::Center);
     sort.add_css_class("flat");
     let show_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).margin_top(6).margin_bottom(6).margin_start(6).margin_end(6).build();
     let show_menu = gtk::MenuButton::builder().label("Show").tooltip_text("Demos, favourites and hidden games").popover(&gtk::Popover::builder().child(&show_box).build()).build();
     show_menu.add_css_class("flat");
-    let start = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).build();
-    start.append(&sort);
-    start.append(&show_menu);
-    let filters = gtk::CenterBox::builder().start_widget(&start).center_widget(&sources).end_widget(&count).margin_top(6).margin_bottom(6).build();
+    let end = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).build();
+    end.append(&count);
+    end.append(&sort);
+    end.append(&show_menu);
+    let filters = gtk::CenterBox::builder().start_widget(&sources).end_widget(&end).margin_top(6).margin_bottom(6).build();
     filters.add_css_class("filters");
     // Under the header while a scan or the store check runs: the first scan after a restart
     // walks every drive's game folders (75 s here), and new games show only after it.
     let busy_label = gtk::Label::new(None);
+    busy_label.add_css_class("dim-label");
     let busy_box = gtk::Box::builder().spacing(10).halign(gtk::Align::Center).margin_top(6).margin_bottom(6).build();
     busy_box.append(&gtk::Spinner::builder().spinning(true).build());
     busy_box.append(&busy_label);
@@ -437,8 +451,9 @@ fn build(app: &adw::Application) {
         .activate_on_single_click(true)
         .margin_top(12)
         .margin_bottom(24)
-        .margin_start(24)
-        .margin_end(24)
+        .margin_start(18)
+        .margin_end(18)
+        .halign(gtk::Align::Start)
         .build();
     // Continue playing: one row of cards, scrolling sideways when there are more.
     let recent = gtk::FlowBox::builder()
@@ -450,11 +465,12 @@ fn build(app: &adw::Application) {
         .halign(gtk::Align::Start)
         .build();
     let recent_scroll = gtk::ScrolledWindow::builder().child(&recent).vscrollbar_policy(gtk::PolicyType::Never).hscrollbar_policy(gtk::PolicyType::Automatic).propagate_natural_height(true).build();
-    let recent_title = gtk::Label::builder().label("Continue playing").xalign(0.0).build();
+    // The headings start where the covers do: the cards have 6 px of padding.
+    let recent_title = gtk::Label::builder().label("Continue playing").xalign(0.0).margin_start(6).build();
     recent_title.add_css_class("title-4");
-    let all_title = gtk::Label::builder().label("All games").xalign(0.0).margin_top(12).build();
+    let all_title = gtk::Label::builder().label("All games").xalign(0.0).margin_top(12).margin_start(6).build();
     all_title.add_css_class("title-4");
-    let recent_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(12).margin_start(24).margin_end(24).visible(false).build();
+    let recent_box = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).margin_top(18).margin_start(18).margin_end(18).visible(false).build();
     recent_box.append(&recent_title);
     recent_box.append(&recent_scroll);
     recent_box.append(&all_title);
@@ -462,6 +478,17 @@ fn build(app: &adw::Application) {
     column.append(&recent_box);
     column.append(&flow);
     let scrolled = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&column).vexpand(true).build();
+    // As many columns as fit, packed from the left like Continue playing above: a FlowBox
+    // allowed more columns than fit spreads the space left over between them.
+    let fit = flow.clone();
+    scrolled.hadjustment().connect_page_size_notify(move |a| {
+        // A card is 180 px plus 6 px padding each side, then the spacing; the margins are 18.
+        let columns = ((a.page_size() as i32 - 36 + 18) / (192 + 18)).max(2) as u32;
+        if fit.max_children_per_line() != columns {
+            let fit = fit.clone();
+            glib::idle_add_local_once(move || fit.set_max_children_per_line(columns));
+        }
+    });
 
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();
     let loading = adw::StatusPage::builder().title("Looking for your games").description("Steam, Heroic, Lutris, Faugus, your app menu, and the games folders on every drive.").build();
@@ -500,7 +527,6 @@ fn build(app: &adw::Application) {
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
         let button = gtk::ToggleButton::builder().label(label).tooltip_text(tip).name(name).build();
-        button.add_css_class("pill");
         if let Some(first) = &group {
             button.set_group(Some(first));
         } else {
@@ -523,8 +549,8 @@ fn build(app: &adw::Application) {
     let mut group: Option<gtk::ToggleButton> = None;
     for (origin, name, label, tip) in Origin::ALL {
         let button = gtk::ToggleButton::builder().label(label).tooltip_text(tip).name(name).build();
-        button.add_css_class("pill");
         button.add_css_class("flat");
+        button.add_css_class("source");
         if let Some(first) = &group {
             button.set_group(Some(first));
         } else {
@@ -617,12 +643,18 @@ fn build(app: &adw::Application) {
         }
         glib::ControlFlow::Continue
     });
-    let u = ui.clone();
-    accounts_button.connect_clicked(move |_| u.accounts());
+    let (u, m) = (ui.clone(), main_menu.clone());
+    accounts_button.connect_clicked(move |_| {
+        m.popdown();
+        u.accounts();
+    });
     let u = ui.clone();
     free_button.connect_clicked(move |_| u.free_games());
-    let u = ui.clone();
-    places_button.connect_clicked(move |_| u.places());
+    let (u, m) = (ui.clone(), main_menu.clone());
+    places_button.connect_clicked(move |_| {
+        m.popdown();
+        u.places();
+    });
     let u = ui.clone();
     add_button.connect_clicked(move |_| u.pick_game());
     // A folder dropped on the window: looked in from now on; a file: added as a game.
@@ -3589,7 +3621,8 @@ impl Ui {
         }
 
         let view = adw::ToolbarView::new();
-        view.add_top_bar(&adw::HeaderBar::new());
+        // The name is the page's own big heading: not again in the bar.
+        view.add_top_bar(&adw::HeaderBar::builder().show_title(false).build());
         let scrolled = gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build();
         view.set_content(Some(&scrolled));
         // A checking run's snapshot of the page further down (LOBBY_SNAPSHOT_SCROLL=proton|protection|saves).
@@ -4326,7 +4359,10 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     body.append(&cover);
     body.append(&name);
     body.append(&line);
-    let child = gtk::FlowBoxChild::builder().child(&body).name(&g.id).tooltip_text(&g.name).build();
+    // No wider than the cover: a long name made its card wider than the rest, and Continue
+    // playing's cards unevenly spaced.
+    let clamp = adw::Clamp::builder().child(&body).maximum_size(180).tightening_threshold(180).build();
+    let child = gtk::FlowBoxChild::builder().child(&clamp).name(&g.id).tooltip_text(&g.name).build();
     child.add_css_class("game-card");
     if g.hidden {
         child.add_css_class("is-hidden");
