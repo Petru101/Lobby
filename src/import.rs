@@ -1,5 +1,5 @@
-//! Making imported games Lobby's own. Another launcher's files are read once, when a game is
-//! imported; what the game needs is Lobby's from then on, and the launcher keeps working:
+//! Making imported games Lobby's own: what a game needs to start is Lobby's from then on, so it
+//! keeps starting once its launcher is gone, and the launcher keeps working:
 //! - each Wine prefix an imported game runs in (Heroic's, Lutris's, Faugus's) is moved into
 //!   Lobby's folder on the same drive (~/.local/share/lobby/prefixes, else
 //!   <drive>/Lobby/prefixes) with a link left where it was, so the launcher finds it there and

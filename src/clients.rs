@@ -4,7 +4,7 @@
 //! into their own Proton setup themselves), Lobby keeps one copy of each app in a Wine prefix of
 //! its own (~/.local/share/lobby/clients/<id>), installed with the app's official installer the
 //! first time such a game is played, and runs the game in that prefix, where its check finds the
-//! app. Nothing of another launcher is used (the standing rule).
+//! app. Games don't need another launcher's copy of the app (the standing rule).
 //!
 //! A game that ran in another prefix before (Lutris's EA app setup) has its saves brought over
 //! once, by its Ludusavi save paths (`windows_saves::look`), unless the store keeps them in its
