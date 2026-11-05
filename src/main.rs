@@ -99,6 +99,13 @@ pub fn me() -> std::path::PathBuf {
     std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).filter(|p| p.is_file()).or_else(|| std::env::current_exe().ok()).unwrap_or_else(|| "lobby".into())
 }
 
+/// Whether this runs in gaming mode: Steam's own screen in gamescope's session (Bazzite, SteamOS
+/// and the like), with no desktop around the window. By the session, not XDG_CURRENT_DESKTOP:
+/// gamescope sets that for whatever it runs, on a desktop too.
+pub fn gaming_mode() -> bool {
+    std::env::var("XDG_SESSION_DESKTOP").is_ok_and(|d| d.eq_ignore_ascii_case("gamescope"))
+}
+
 fn main() -> ExitCode {
     stores::tools::provide();
     let args: Vec<String> = std::env::args().skip(1).collect();

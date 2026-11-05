@@ -45,6 +45,8 @@ pub enum Action {
 const FIRST_REPEAT: Duration = Duration::from_millis(400);
 const REPEAT: Duration = Duration::from_millis(120);
 const SCROLL_TICK: Duration = Duration::from_millis(16);
+/// How long Steam's virtual controller gets to pass on a press of the real one it hides.
+const STEAM_PASSES_ON: Duration = Duration::from_millis(100);
 
 const EV_KEY: u16 = 0x01;
 const EV_ABS: u16 = 0x03;
@@ -108,6 +110,8 @@ fn abs_range(fd: i32, code: u16) -> Option<(i32, i32)> {
 struct Pad {
     fd: OwnedFd,
     path: PathBuf,
+    /// One Steam says to leave alone (`ignored_by_steam`): used only if Steam passes nothing on.
+    hidden: bool,
     ranges: HashMap<u16, (i32, i32)>,
     /// A right stick on RX/RY: then Z/RZ are the triggers (on some generic pads Z/RZ are the
     /// right stick).
@@ -142,7 +146,9 @@ fn ids(fd: i32) -> Option<(u16, u16)> {
 impl Pad {
     fn open(path: &Path) -> Option<Pad> {
         let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
-        let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        // The system call itself: Steam's overlay, loaded into what Steam starts, refuses the C
+        // library's open of a controller it hides.
+        let fd = unsafe { libc::syscall(libc::SYS_openat, libc::AT_FDCWD, name.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC, 0) } as i32;
         if fd < 0 {
             return None;
         }
@@ -151,12 +157,10 @@ impl Pad {
             return None;
         }
         let ignored = std::env::var("SDL_GAMECONTROLLER_IGNORE_DEVICES").map(|l| ignored_by_steam(&l)).unwrap_or_default();
-        if ids(fd.as_raw_fd()).is_some_and(|id| ignored.contains(&id)) {
-            return None;
-        }
+        let hidden = ids(fd.as_raw_fd()).is_some_and(|id| ignored.contains(&id));
         let abs = bits(fd.as_raw_fd(), EV_ABS);
         let ranges = [ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ].into_iter().filter(|&c| has(&abs, c)).filter_map(|c| Some((c, abs_range(fd.as_raw_fd(), c)?))).collect();
-        Some(Pad { fd, path: path.to_path_buf(), ranges, triggers_on_z: has(&abs, ABS_RX), stick: (0.0, 0.0), stick_dir: None, hat: (0, 0), dpad: [false; 4], right_y: 0.0, triggers: [false; 2] })
+        Some(Pad { fd, path: path.to_path_buf(), hidden, ranges, triggers_on_z: has(&abs, ABS_RX), stick: (0.0, 0.0), stick_dir: None, hat: (0, 0), dpad: [false; 4], right_y: 0.0, triggers: [false; 2] })
     }
 
     /// An axis's value from -1 to 1 (a trigger's from 0 to 1 when its range starts at 0).
@@ -271,8 +275,17 @@ fn read(send: impl Fn(Action)) {
     let mut next_repeat = Instant::now();
     let mut next_scroll = Instant::now();
     let mut last_press: Option<(Action, PathBuf, Instant)> = None;
+    // Started by Steam, the controller comes as Steam's virtual one, and the real one is hidden:
+    // it would act twice. But Steam doesn't always pass presses on (it stayed silent when Lobby
+    // was opened a second time in a Steam session), which left no controller at all. So a press
+    // of a hidden one waits a moment for the virtual one: heard, the hidden ones stay out of it
+    // for good; not heard, they are used, until the virtual one speaks.
+    let mut steam_heard = false;
+    let mut use_hidden = false;
+    let mut waiting: Vec<Action> = Vec::new();
+    let mut waiting_since: Option<Instant> = None;
     loop {
-        let scrolling = pads.iter().map(|p| p.right_y).find(|v| v.abs() > 0.25);
+        let scrolling = pads.iter().filter(|p| !p.hidden || use_hidden).map(|p| p.right_y).find(|v| v.abs() > 0.25);
         let now = Instant::now();
         let wait = match (held, scrolling) {
             (Some(_), Some(_)) => SCROLL_TICK.min(next_repeat.saturating_duration_since(now)),
@@ -280,6 +293,7 @@ fn read(send: impl Fn(Action)) {
             (Some(_), None) => next_repeat.saturating_duration_since(now),
             (None, None) => Duration::from_secs(3600),
         };
+        let wait = waiting_since.map_or(wait, |t| wait.min((t + STEAM_PASSES_ON).saturating_duration_since(now)));
         let mut fds: Vec<libc::pollfd> = pads.iter().map(|p| libc::pollfd { fd: p.fd.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
         if let Some(w) = &watch {
             fds.push(libc::pollfd { fd: w.as_raw_fd(), events: libc::POLLIN, revents: 0 });
@@ -309,7 +323,22 @@ fn read(send: impl Fn(Action)) {
                     let kind = u16::from_ne_bytes([e[16], e[17]]);
                     let code = u16::from_ne_bytes([e[18], e[19]]);
                     let value = i32::from_ne_bytes([e[20], e[21], e[22], e[23]]);
-                    if let Some(a) = p.event(kind, code, value) {
+                    let was_held = p.held();
+                    let action = p.event(kind, code, value);
+                    let moved = p.held().filter(|d| was_held != Some(*d)).map(Action::Move);
+                    if !p.hidden && (action.is_some() || moved.is_some()) {
+                        steam_heard = true;
+                        use_hidden = false;
+                        waiting.clear();
+                        waiting_since = None;
+                    }
+                    if p.hidden && !use_hidden {
+                        if !steam_heard && keep_for_later(action, moved, &mut waiting) {
+                            waiting_since.get_or_insert_with(Instant::now);
+                        }
+                        continue;
+                    }
+                    if let Some(a) = action {
                         // The same press from two devices (one controller seen twice): once.
                         let twice = last_press.as_ref().is_some_and(|(la, lp, at): &(Action, PathBuf, Instant)| *la == a && *lp != p.path && at.elapsed() < Duration::from_millis(40));
                         if !twice {
@@ -340,8 +369,21 @@ fn read(send: impl Fn(Action)) {
                 }
             }
         }
+        // Steam passed nothing on: the hidden controllers from now on, what was pressed first.
+        if waiting_since.is_some_and(|t| t.elapsed() >= STEAM_PASSES_ON) {
+            crate::log::line("controller: Steam passes nothing on, using the real one");
+            use_hidden = true;
+            waiting_since = None;
+            for a in waiting.drain(..) {
+                if let Action::Move(d) = a {
+                    held = Some(d);
+                    next_repeat = Instant::now() + FIRST_REPEAT;
+                }
+                send(a);
+            }
+        }
         // A direction pressed, or still held.
-        let now_held = pads.iter().find_map(Pad::held);
+        let now_held = pads.iter().filter(|p| !p.hidden || use_hidden).find_map(Pad::held);
         let now = Instant::now();
         if now_held != held {
             held = now_held;
@@ -354,13 +396,19 @@ fn read(send: impl Fn(Action)) {
             next_repeat = now + REPEAT;
         }
         // Scrolling: a step per tick, not per event (a stick reports many a second).
-        if let Some(v) = pads.iter().map(|p| p.right_y).find(|v| v.abs() > 0.25) {
+        if let Some(v) = pads.iter().filter(|p| !p.hidden || use_hidden).map(|p| p.right_y).find(|v| v.abs() > 0.25) {
             if now >= next_scroll {
                 send(Action::Scroll(v));
                 next_scroll = now + SCROLL_TICK;
             }
         }
     }
+}
+
+/// Keeps what a hidden controller just pressed for when Steam turns out not to pass it on.
+fn keep_for_later(action: Option<Action>, moved: Option<Action>, waiting: &mut Vec<Action>) -> bool {
+    waiting.extend(action.into_iter().chain(moved));
+    !waiting.is_empty()
 }
 
 /// The widgets a controller can move to under `root`: cards, buttons, switches, entries and
@@ -431,17 +479,41 @@ pub fn first(root: &gtk::Widget) -> Option<gtk::Widget> {
         .or_else(|| top_left(all.iter().collect()))
 }
 
+/// The nearest area around a widget that scrolls up and down.
+fn scrolling_area(w: &gtk::Widget) -> Option<gtk::ScrolledWindow> {
+    let mut at = w.parent();
+    while let Some(p) = at {
+        if let Some(s) = p.downcast_ref::<gtk::ScrolledWindow>().filter(|s| s.vscrollbar_policy() != gtk::PolicyType::Never) {
+            return Some(s.clone());
+        }
+        at = p.parent();
+    }
+    None
+}
+
 /// The nearest widget from `from` in direction `dir`: ahead of it, preferring ones in its line
-/// (overlapping it across the direction), then the closest.
+/// (overlapping it across the direction), then the closest. Up and down stay in the scrolling
+/// area `from` is in while it has something there, even scrolled out of sight (the filter bar
+/// can be nearer than the row above); from outside an area, only what shows of it counts (the
+/// cards scrolled away above the filter bar aren't "up" from it).
 pub fn spatial(root: &gtk::Widget, from: &gtk::Widget, dir: Dir) -> Option<gtk::Widget> {
     let f = from.compute_bounds(root)?;
+    let area = scrolling_area(from);
     let gap = |a: f32, al: f32, b: f32, bl: f32| if a + al <= b { b - (a + al) } else if b + bl <= a { a - (b + bl) } else { 0.0 };
     let mut best: Option<(f32, gtk::Widget)> = None;
+    let mut best_inside: Option<(f32, gtk::Widget)> = None;
     for w in focusables(root) {
         if &w == from || w.is_ancestor(from) {
             continue;
         }
         let Some(c) = w.compute_bounds(root) else { continue };
+        let its_area = scrolling_area(&w);
+        if let Some(a) = its_area.as_ref().filter(|a| Some(*a) != area.as_ref()) {
+            let shows = a.compute_bounds(root).is_some_and(|b| c.y() < b.y() + b.height() && c.y() + c.height() > b.y());
+            if !shows {
+                continue;
+            }
+        }
         let (fc, cc) = ((f.x() + f.width() / 2.0, f.y() + f.height() / 2.0), (c.x() + c.width() / 2.0, c.y() + c.height() / 2.0));
         let (beyond, ahead, off) = match dir {
             Dir::Right => (cc.0 > fc.0 + 1.0, c.x() - (f.x() + f.width()), gap(c.y(), c.height(), f.y(), f.height())),
@@ -463,11 +535,14 @@ pub fn spatial(root: &gtk::Widget, from: &gtk::Widget, dir: Dir) -> Option<gtk::
         if std::env::var("LOBBY_DEBUG_PAD").is_ok_and(|v| v == "2") {
             eprintln!("  {score:.0}: {}", describe(&w));
         }
+        if area.is_some() && its_area == area && matches!(dir, Dir::Up | Dir::Down) && best_inside.as_ref().is_none_or(|(s, _)| score < *s) {
+            best_inside = Some((score, w.clone()));
+        }
         if best.as_ref().is_none_or(|(s, _)| score < *s) {
             best = Some((score, w));
         }
     }
-    best.map(|(_, w)| w)
+    best_inside.or(best).map(|(_, w)| w)
 }
 
 /// What a widget is, for the log (LOBBY_DEBUG_PAD).
@@ -490,7 +565,7 @@ mod tests {
     fn pad() -> Pad {
         let fd = unsafe { OwnedFd::from_raw_fd(libc::dup(0)) };
         let ranges = [(ABS_X, (-32768, 32767)), (ABS_Y, (-32768, 32767)), (ABS_RY, (-32768, 32767)), (ABS_Z, (0, 255)), (ABS_RZ, (0, 255))].into_iter().collect();
-        Pad { fd, path: PathBuf::new(), ranges, triggers_on_z: true, stick: (0.0, 0.0), stick_dir: None, hat: (0, 0), dpad: [false; 4], right_y: 0.0, triggers: [false; 2] }
+        Pad { hidden: false, fd, path: PathBuf::new(), ranges, triggers_on_z: true, stick: (0.0, 0.0), stick_dir: None, hat: (0, 0), dpad: [false; 4], right_y: 0.0, triggers: [false; 2] }
     }
 
     #[test]

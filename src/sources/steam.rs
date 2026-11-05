@@ -58,6 +58,11 @@ fn library_apps(lib: &Path) -> Vec<(u32, String, PathBuf, Option<u64>)> {
             _ => None,
         };
         let (Some(name), Some(installdir)) = (get("name"), get("installdir")) else { continue };
+        // Still downloading for the first time: nothing to play yet.
+        let installed = get("StateFlags").and_then(|f| f.parse::<u32>().ok()).is_none_or(|f| f & 4 != 0);
+        if !installed && get("buildid").is_none_or(|b| b == "0") {
+            continue;
+        }
         let folder = apps.join("common").join(&installdir);
         if !tool(appid, &name, &folder) {
             out.push((appid, name, folder, get("SizeOnDisk").and_then(|s| s.parse().ok()).filter(|&s| s > 0)));
@@ -78,6 +83,11 @@ pub fn known_libraries(home: &Home) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The games installed in Steam's libraries now.
+pub fn installed_ids(home: &Home) -> std::collections::BTreeSet<u32> {
+    known_libraries(home).iter().flat_map(|lib| library_apps(lib)).map(|(appid, ..)| appid).collect()
 }
 
 pub fn apps(home: &Home) -> Vec<Entry> {
@@ -236,6 +246,10 @@ pub fn shortcuts(home: &Home) -> Vec<Entry> {
                 let steam::Node::Map(fields) = item else { continue };
                 let field = |name: &str| fields.iter().find(|(k, _)| k.eq_ignore_ascii_case(name.as_bytes())).map(|(_, v)| v);
                 let Some(name) = field("AppName").and_then(text) else { continue };
+                // Lobby itself, added to Steam to open it in gaming mode: not a game.
+                if field("Exe").and_then(text).is_some_and(|exe| crate::sandbox::is_lobby(&exe)) {
+                    continue;
+                }
                 let mut e = Entry::new(Source::SteamShortcut, name);
                 if let Some(steam::Node::Int(id)) = field("appid") {
                     e.keys.push(Key::SteamShortcut(*id));

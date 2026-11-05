@@ -170,6 +170,21 @@ impl Plan {
     }
 }
 
+/// Gaming mode: the link that picks a Steam game's first launch option. On a game with several
+/// (Play or Editor), the plain link's question opens under the running "game", Lobby's window,
+/// and doesn't answer the controller even once Lobby is gone, which left nothing to do but
+/// reboot; the game's other options are in Steam's own library. A non-Steam game has no such
+/// link, and launch options go by another (`with_options`).
+fn without_launch_menu(command: Vec<String>) -> Vec<String> {
+    match command.as_slice() {
+        [steam, link] if steam == "steam" => match link.strip_prefix("steam://rungameid/").and_then(|id| id.parse::<u32>().ok()) {
+            Some(id) => vec![steam.clone(), format!("steam://launch/{id}/option0")],
+            None => command,
+        },
+        _ => command,
+    }
+}
+
 /// Why a command can't be protected: it hands the game to something else (another launcher,
 /// a container), which starts it outside whatever Lobby wraps it in.
 pub fn hands_over(command: &[String]) -> Option<String> {
@@ -205,7 +220,7 @@ pub fn final_command(game: &Game, command: Vec<String>, protect: bool) -> Result
             return Ok(wrapped);
         }
     }
-    Ok(with_extras)
+    Ok(if crate::gaming_mode() { without_launch_menu(with_extras) } else { with_extras })
 }
 
 /// The game's launch options and, when it's on, MangoHud: what Play and its shortcuts add to
@@ -969,6 +984,15 @@ mod tests {
         let mut e = Entry::new(source, "G");
         e.keys.push(key);
         e
+    }
+
+    #[test]
+    fn gaming_mode_skips_steams_launch_menu() {
+        let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(without_launch_menu(cmd(&["steam", "steam://rungameid/785890"])), cmd(&["steam", "steam://launch/785890/option0"]));
+        // A non-Steam game's id is too long; launch options are another form.
+        assert_eq!(without_launch_menu(cmd(&["steam", "steam://rungameid/11407130652252831744"])), cmd(&["steam", "steam://rungameid/11407130652252831744"]));
+        assert_eq!(without_launch_menu(cmd(&["steam", "-applaunch", "785890", "-novid"])), cmd(&["steam", "-applaunch", "785890", "-novid"]));
     }
 
     #[test]

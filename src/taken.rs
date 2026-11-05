@@ -79,6 +79,8 @@ pub fn entries() -> Vec<Entry> {
     load()
         .into_iter()
         .filter(|t| t.program.as_ref().or(t.prefix.as_ref()).is_some_and(|p| p.exists()))
+        // Lobby's own Steam shortcut, taken over before shortcuts to Lobby were left out.
+        .filter(|t| !t.program.as_ref().is_some_and(|p| crate::sandbox::is_lobby(&p.to_string_lossy())))
         .map(|t| {
             let mut e = Entry::new(Source::Lobby, t.name);
             e.keys.push(t.key);

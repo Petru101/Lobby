@@ -32,6 +32,8 @@ thread_local! {
 /// The window; with `claim`, straight at the checkout for the free games not claimed yet (the
 /// notification's Claim button). Lobby already open gets the request.
 pub fn run(claim: bool) -> glib::ExitCode {
+    // X11's name for the window, which an AppImage's would make "AppRun.wrapped".
+    glib::set_prgname(Some(APP_ID));
     crate::appimage::enter();
     crate::appimage::menu_entry();
     // A checking run (LOBBY_SNAPSHOT) is a copy of its own: otherwise it would hand over to the
@@ -49,6 +51,10 @@ pub fn run(claim: bool) -> glib::ExitCode {
         let css = gtk::CssProvider::new();
         css.load_from_string(include_str!("style.css"));
         gtk::style_context_add_provider_for_display(&gdk::Display::default().expect("a display"), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        // Gaming mode's screens are all dark, and nothing there says which the user prefers.
+        if crate::gaming_mode() {
+            adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        }
     });
     // Opened again while running: the window there is, brought forward.
     app.connect_activate(|app| match app.active_window() {
@@ -311,6 +317,8 @@ impl Facts {
 }
 
 const SCANNING: &str = "Looking for new games…";
+/// How many cards Continue playing shows.
+const RECENT_SHOWN: usize = 8;
 
 struct Ui {
     window: adw::ApplicationWindow,
@@ -386,6 +394,11 @@ struct Ui {
     just_installed: RefCell<Option<(String, Option<gtk::Widget>)>>,
     /// Asked this time whether Lobby may allow itself sandboxes (Ubuntu's AppArmor: `apparmor`).
     asked_apparmor: Cell<bool>,
+    /// Steam's library folders being watched (`watch_steam`), the games installed in them at
+    /// the last look, and whether a look is due.
+    steam_watch: RefCell<HashMap<std::path::PathBuf, gio::FileMonitor>>,
+    steam_installed: RefCell<std::collections::BTreeSet<u32>>,
+    steam_looking: Cell<bool>,
 }
 
 fn build(app: &adw::Application) {
@@ -415,6 +428,14 @@ fn build(app: &adw::Application) {
     let accounts_button = menu_item("Store Accounts");
     let places_button = menu_item("Where Lobby Looks");
     let shortcuts_button = menu_item("App Menu Shortcuts");
+    // Gaming mode: the window fills the screen and no desktop answers its window buttons, which
+    // a controller can't reach either. Closing it is in the menu instead.
+    if crate::gaming_mode() {
+        header.set_show_start_title_buttons(false);
+        header.set_show_end_title_buttons(false);
+        let w = window.clone();
+        menu_item("Close Lobby").connect_clicked(move |_| w.close());
+    }
     header.pack_end(&main_menu);
     let search = gtk::SearchEntry::builder().placeholder_text("Search games").width_chars(28).build();
     header.pack_end(&search);
@@ -464,8 +485,8 @@ fn build(app: &adw::Application) {
         .build();
     // Continue playing: one row of cards, scrolling sideways when there are more.
     let recent = gtk::FlowBox::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .max_children_per_line(1)
+        .min_children_per_line(RECENT_SHOWN as u32)
+        .max_children_per_line(RECENT_SHOWN as u32)
         .column_spacing(18)
         .selection_mode(gtk::SelectionMode::None)
         .activate_on_single_click(true)
@@ -529,7 +550,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), asked_apparmor: Cell::new(false), busy, busy_label });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -1204,7 +1225,7 @@ impl Ui {
                 }
                 child = c.next_sibling();
             }
-            ids.truncate(8);
+            ids.truncate(RECENT_SHOWN);
             ids
         };
         self.recent_box.set_visible(!recent.is_empty());
@@ -1293,6 +1314,12 @@ impl Ui {
             let found: std::collections::HashSet<String> = gio::spawn_blocking(move || crate::running::find(&games).into_keys().collect()).await.unwrap_or_default();
             u.looking_for_running.set(false);
             if *u.running.borrow() != found {
+                // Seen running: played. Steam's games are only asked for on Play, and may not
+                // start.
+                let newly: Vec<String> = found.iter().filter(|id| !u.running.borrow().contains(*id)).cloned().collect();
+                for id in newly {
+                    u.played(&id, None);
+                }
                 u.running.replace(found);
                 u.show_running();
             }
@@ -1668,6 +1695,8 @@ impl Ui {
             self.scan_again.set(true);
             return;
         }
+        // Disabled, it loses the focus: a controller's place, given back after.
+        let had_focus = gtk::prelude::GtkWindowExt::focus(&self.window).is_some_and(|f| &f == self.rescan_button.upcast_ref::<gtk::Widget>());
         self.rescan_button.set_sensitive(false);
         self.show_busy();
         let u = self.clone();
@@ -1677,6 +1706,9 @@ impl Ui {
             u.scanning.set(false);
             u.show_busy();
             u.rescan_button.set_sensitive(true);
+            if had_focus && gtk::prelude::GtkWindowExt::focus(&u.window).is_none_or(|f| !pad::usable(&f)) {
+                u.rescan_button.grab_focus();
+            }
             match found {
                 Ok(Ok((games, closed))) => {
                     if let Err(e) = u.change_lib(|lib| crate::log::timed("scan: matching the saved library", || {
@@ -1689,6 +1721,7 @@ impl Ui {
                     let played = games.clone();
                     gio::spawn_blocking(move || crate::playtime::take_in(&played)).await.ok();
                     u.fill();
+                    u.watch_steam();
                     u.find_leftovers();
                     // Lutris's, Faugus's and Steam shortcuts' games become Lobby's own (shown as
                     // such after a rescan), and app-menu entries start games as Play does.
@@ -1715,6 +1748,45 @@ impl Ui {
             } else {
                 u.refresh_stores();
                 u.check_free();
+            }
+        });
+    }
+
+    /// Steam installing or removing a game, from this window or not: the library is looked at
+    /// again once the list of installed games has changed (manifests change all through a
+    /// download). Each scan adds libraries Steam has got since.
+    fn watch_steam(self: &Rc<Self>) {
+        let Some(home) = crate::sources::Home::find() else { return };
+        self.steam_installed.replace(crate::sources::steam::installed_ids(&home));
+        for lib in crate::sources::steam::known_libraries(&home) {
+            let dir = lib.join("steamapps");
+            if self.steam_watch.borrow().contains_key(&dir) {
+                continue;
+            }
+            let Ok(monitor) = gio::File::for_path(&dir).monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE) else { continue };
+            let u = Rc::downgrade(self);
+            monitor.connect_changed(move |_, file, _, _| {
+                if file.basename().is_some_and(|n| n.to_string_lossy().starts_with("appmanifest_")) {
+                    if let Some(u) = u.upgrade() {
+                        u.steam_changed();
+                    }
+                }
+            });
+            self.steam_watch.borrow_mut().insert(dir, monitor);
+        }
+    }
+
+    fn steam_changed(self: &Rc<Self>) {
+        if self.steam_looking.replace(true) {
+            return;
+        }
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            glib::timeout_future_seconds(3).await;
+            u.steam_looking.set(false);
+            let now = gio::spawn_blocking(|| crate::sources::Home::find().map(|h| crate::sources::steam::installed_ids(&h))).await.ok().flatten();
+            if now.is_some_and(|now| now != *u.steam_installed.borrow()) {
+                u.rescan();
             }
         });
     }
@@ -1799,7 +1871,7 @@ impl Ui {
         }
         if let Some(appid) = crate::install::steam_owned(&game) {
             match crate::install::install_with_steam(&game, appid) {
-                Ok(()) => self.toast(&format!("Steam's install window for {} is opening. Once Steam has installed it, it shows here as installed (F5 looks again).", game.name)),
+                Ok(()) => self.toast(&format!("Steam's install window for {} is opening. Once Steam has installed it, it shows here as installed.", game.name)),
                 Err(e) => self.alert(&format!("Steam couldn't be opened for {}", game.name), &e),
             }
             return;
@@ -3319,10 +3391,15 @@ impl Ui {
                         Err(e) => self.toast(&format!("Its saves couldn't be brought over: {e}")),
                     }
                 }
-                match launch::final_command(&game, command, protect).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
+                let final_command = launch::final_command(&game, command, protect);
+                // Steam may not start it: played once it's seen running (`look_for_running`).
+                let steam = final_command.as_ref().is_ok_and(|c| c.first().is_some_and(|w| w == "steam"));
+                match final_command.and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
                     Ok(()) => {
                         self.toast(&format!("Starting {}…", game.name));
-                        self.played(&game.id, None);
+                        if !steam {
+                            self.played(&game.id, None);
+                        }
                     }
                     Err(e) => self.alert(&format!("{} didn't start", game.name), &e),
                 }
