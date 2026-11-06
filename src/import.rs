@@ -415,6 +415,7 @@ mod tests {
     #[test]
     fn a_launchers_flatpak_folder_and_lobby_share_one_set_of_saves() {
         let dir = std::env::temp_dir().join(format!("lobby-launcher-saves-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
         let flatpak = dir.join(".var/app/com.heroicgameslauncher.hgl");
         let (data, config, kept) = (dir.join("share"), dir.join("config"), dir.join("kept"));
         for f in ["data/Terraria/Players", "data/Terraria/Worlds", "config/unity3d/Co/Game", "data/comet", "config/heroic", "data/Empty"] {
@@ -464,6 +465,7 @@ mod tests {
     #[test]
     fn a_launcher_that_cant_follow_the_link_keeps_its_folder() {
         let dir = std::env::temp_dir().join(format!("lobby-launcher-saves-refused-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
         let from = dir.join(".var/app/net.lutris.Lutris/data/Game");
         fs::create_dir_all(&from).unwrap();
         fs::write(from.join("save"), b"s").unwrap();
