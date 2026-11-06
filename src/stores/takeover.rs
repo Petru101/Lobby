@@ -1,8 +1,9 @@
 //! Taking over the Epic and GOG games Heroic installed, so Heroic can be removed: lobby copies
 //! Heroic's records of them into its own (legendary's installed.json and manifests, gogdl's
 //! manifests, lobby's GOG record), and keeps each game's Wine prefix and the Proton it runs
-//! with (its settings and saves are there). Nothing of Heroic's is changed or used afterwards:
-//! Heroic keeps working until it's removed.
+//! with (its settings and saves are there). A native game's saves are in Heroic's Flatpak folder
+//! when Heroic is a Flatpak: `import` moves those. Nothing of Heroic's is changed or used
+//! afterwards: Heroic keeps working until it's removed.
 
 use super::{epic, gog, read_json, save_wine_setup, Installed, Store, WineSetup};
 use crate::sources::Home;

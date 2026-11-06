@@ -6,7 +6,10 @@
 //!   there's one set of saves;
 //! - a Wine or Proton build of the launcher's own (Lutris's runners/wine/...) is copied into
 //!   ~/.local/share/lobby/tools;
-//! - Lobby's records are pointed at the new places.
+//! - Lobby's records are pointed at the new places;
+//! - what a game saved inside a launcher's Flatpak folder moves to the normal folder, where it
+//!   looks when Lobby starts it, with a link left behind that the Flatpak is allowed to follow:
+//!   one set of saves again, safe when the launcher and its folder are removed.
 //!
 //! Runs after each scan's take-over; a prefix something runs in is left for the next time.
 //! `own_prefix` gives a game in a prefix other games share a copy of its own.
@@ -201,10 +204,112 @@ fn let_launchers_see(prefix: &Path, folder: &Path) {
     }
 }
 
+/// The launchers Lobby takes games from, as Flatpaks: a game they run saves in their folder.
+const LAUNCHER_FLATPAKS: [&str; 3] = ["com.heroicgameslauncher.hgl", "net.lutris.Lutris", "io.github.Faugus.faugus-launcher"];
+
+/// What's in those folders that no game saved: the launcher's own and Flatpak's.
+const NOT_GAMES: [&str; 35] = [
+    "applications", "comet", "dconf", "desktop-directories", "faugus-launcher", "flatpak", "fontconfig", "fonts", "gamemode", "glib-2.0", "gtk-2.0", "gtk-3.0", "gtk-4.0", "gvfs-metadata", "heroic", "heroic_gogdl", "icons", "keyrings", "kwalletd", "legendary", "lobby", "lutris", "MangoHud", "menus", "mime", "nile", "pki", "pulse", "ShaderCache", "Steam", "themes", "Trash", "umu", "vkBasalt", "xdg-desktop-portal",
+];
+
+/// Bigger than this, a folder there isn't saves.
+const SAVES_LIMIT: u64 = 5 << 30;
+
+/// Each folder a game saved in a launcher's Flatpak folder, and where it belongs: (the
+/// launcher's app id, from, to). A link Lobby left there already isn't a folder.
+fn saves_left(home: &Path, data: &Path, config: &Path) -> Vec<(&'static str, PathBuf, PathBuf)> {
+    let mut out = Vec::new();
+    for app in LAUNCHER_FLATPAKS {
+        let base = home.join(".var/app").join(app);
+        for (inside, real) in [("data", data), (".local/share", data), ("config", config), (".config", config)] {
+            for e in fs::read_dir(base.join(inside)).into_iter().flatten().flatten() {
+                let own = NOT_GAMES.iter().any(|n| e.file_name().to_string_lossy().eq_ignore_ascii_case(n));
+                if !own && e.file_type().is_ok_and(|t| t.is_dir()) {
+                    out.push((app, e.path(), real.join(e.file_name())));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What of a folder to copy: only files missing or older where the game looks now.
+fn saves_in(from: &Path, to: &Path) -> crate::windows_saves::Found {
+    let mut found = crate::windows_saves::Found { windows: from.to_path_buf(), ..Default::default() };
+    let mut files = Vec::new();
+    crate::windows_saves::files_under(from, &mut files);
+    for file in files {
+        let target = to.join(file.strip_prefix(from).unwrap());
+        found.consider(file, target);
+    }
+    found
+}
+
+/// Lets a launcher's Flatpak reach a folder of the home (also one not installed now: its folder
+/// and the link stay, and it may come back).
+fn let_flatpak_see(app: &str, folder: &Path) -> bool {
+    let ok = Command::new("flatpak").args(["override", "--user", &format!("--filesystem={}", folder.display()), app]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    crate::log::line(&format!("import: {app} {} {}", if ok { "may use" } else { "couldn't be given" }, folder.display()));
+    ok
+}
+
+/// Makes each game's saves in a launcher's Flatpak folder one set, in the normal folder: what's
+/// missing or older there comes over, the launcher's folder is kept in `kept` and a link takes
+/// its place, so the game finds the same saves from Lobby and from the launcher.
+fn bring_saves(left: &[(&str, PathBuf, PathBuf)], kept: &Path, allow: &dyn Fn(&str, &Path) -> bool, dry: bool) -> Vec<String> {
+    let mut done = Vec::new();
+    for (app, from, to) in left {
+        let found = saves_in(from, to);
+        if found.files == 0 {
+            continue;
+        }
+        if found.bytes > SAVES_LIMIT {
+            done.push(format!("{} is too big to be a game's saves: left there.", from.display()));
+            continue;
+        }
+        if dry {
+            done.push(format!("{} moves to {} ({} files new there), with a link left behind.", from.display(), to.display(), found.copies.len()));
+            continue;
+        }
+        if in_use(from) {
+            done.push(format!("{} is in use; it moves next time.", from.display()));
+            continue;
+        }
+        let name = from.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let aside = kept.join(&name).join(format!("{}-{app}", crate::store::now()));
+        let moved = crate::windows_saves::bring_over(&name, &found).and_then(|_| {
+            fs::create_dir_all(to).map_err(|e| e.to_string())?;
+            // Before the link: without it, the link would leave the launcher's game with nothing.
+            if !allow(app, to) {
+                return Err(format!("{app} couldn't be allowed to use it"));
+            }
+            fs::create_dir_all(aside.parent().unwrap()).map_err(|e| e.to_string())?;
+            fs::rename(from, &aside).map_err(|e| e.to_string())?;
+            std::os::unix::fs::symlink(to, from).map_err(|e| {
+                let _ = fs::rename(&aside, from);
+                e.to_string()
+            })
+        });
+        match moved {
+            Ok(()) => {
+                crate::log::line(&format!("import: saves {} → {} ({} files new there; the old folder kept in {})", from.display(), to.display(), found.copies.len(), aside.display()));
+                done.push(format!("✓ {} moved to {} (a link stays there; the old folder is kept in {}).", from.display(), to.display(), aside.display()));
+            }
+            Err(e) => {
+                crate::log::line(&format!("import: saves in {} not moved: {e}", from.display()));
+                done.push(format!("{} couldn't be moved: {e}", from.display()));
+            }
+        }
+    }
+    done
+}
+
 /// Makes what imported games need Lobby's own. Returns what it did (or would do, `dry`), a
 /// line each.
 pub fn run(games: &[Game], dry: bool) -> Vec<String> {
-    let mut done = Vec::new();
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let config = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from);
+    let mut done = bring_saves(&saves_left(&home, &crate::store::data_home(), &config), &crate::store::dir().join("save-backups"), &let_flatpak_see, dry);
     for (from, to, names) in prefix_moves(games) {
         let who = match names.as_slice() {
             [one] => one.clone(),
@@ -306,6 +411,69 @@ pub fn own_prefix(game: &Game, all: &[Game]) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_launchers_flatpak_folder_and_lobby_share_one_set_of_saves() {
+        let dir = std::env::temp_dir().join(format!("lobby-launcher-saves-{}", std::process::id()));
+        let flatpak = dir.join(".var/app/com.heroicgameslauncher.hgl");
+        let (data, config, kept) = (dir.join("share"), dir.join("config"), dir.join("kept"));
+        for f in ["data/Terraria/Players", "data/Terraria/Worlds", "config/unity3d/Co/Game", "data/comet", "config/heroic", "data/Empty"] {
+            fs::create_dir_all(flatpak.join(f)).unwrap();
+        }
+        fs::write(flatpak.join("data/Terraria/Players/Petru.plr"), b"character").unwrap();
+        fs::write(flatpak.join("data/Terraria/Worlds/w.wld"), b"from the launcher").unwrap();
+        fs::write(flatpak.join("config/unity3d/Co/Game/prefs"), b"prefs").unwrap();
+        fs::write(flatpak.join("data/comet/tool"), b"launcher's").unwrap();
+        fs::write(flatpak.join("config/heroic/config.json"), b"launcher's").unwrap();
+        // Played through Lobby since, so newer here: left alone.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::create_dir_all(data.join("Terraria/Worlds")).unwrap();
+        fs::write(data.join("Terraria/Worlds/w.wld"), b"played here").unwrap();
+
+        let left = saves_left(&dir, &data, &config);
+        assert_eq!(left.len(), 3, "{left:?}");
+        let allowed = std::cell::RefCell::new(Vec::new());
+        let allow = |app: &str, to: &Path| {
+            allowed.borrow_mut().push((app.to_string(), to.to_path_buf()));
+            true
+        };
+        assert_eq!(bring_saves(&left, &kept, &allow, true).len(), 2);
+        assert!(!data.join("Terraria/Players").exists() && !flatpak.join("data/Terraria").is_symlink(), "a dry run changes nothing");
+
+        assert_eq!(bring_saves(&left, &kept, &allow, false).iter().filter(|l| l.starts_with('✓')).count(), 2);
+        assert_eq!(fs::read(data.join("Terraria/Players/Petru.plr")).unwrap(), b"character");
+        assert_eq!(fs::read(data.join("Terraria/Worlds/w.wld")).unwrap(), b"played here");
+        assert_eq!(fs::read(config.join("unity3d/Co/Game/prefs")).unwrap(), b"prefs");
+        assert!(!data.join("comet").exists() && !config.join("heroic").exists() && flatpak.join("data/comet/tool").is_file());
+        assert_eq!(allowed.borrow().len(), 2);
+        assert!(allowed.borrow().iter().any(|(a, t)| a == "com.heroicgameslauncher.hgl" && *t == data.join("Terraria")));
+
+        // One set: what's saved through the launcher's folder is what Lobby's game finds.
+        assert!(flatpak.join("data/Terraria").is_symlink());
+        fs::write(flatpak.join("data/Terraria/Players/Other.plr"), b"new").unwrap();
+        assert_eq!(fs::read(data.join("Terraria/Players/Other.plr")).unwrap(), b"new");
+        // The launcher's own folder is kept, older world included.
+        let old = fs::read_dir(kept.join("Terraria")).unwrap().next().unwrap().unwrap().path();
+        assert_eq!(fs::read(old.join("Worlds/w.wld")).unwrap(), b"from the launcher");
+        // Nothing to do the next time; a save deleted since stays deleted.
+        fs::remove_file(data.join("Terraria/Players/Other.plr")).unwrap();
+        assert!(saves_left(&dir, &data, &config).iter().all(|(_, from, _)| from.ends_with("data/Empty")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_launcher_that_cant_follow_the_link_keeps_its_folder() {
+        let dir = std::env::temp_dir().join(format!("lobby-launcher-saves-refused-{}", std::process::id()));
+        let from = dir.join(".var/app/net.lutris.Lutris/data/Game");
+        fs::create_dir_all(&from).unwrap();
+        fs::write(from.join("save"), b"s").unwrap();
+        let left = saves_left(&dir, &dir.join("share"), &dir.join("config"));
+        let done = bring_saves(&left, &dir.join("kept"), &|_, _| false, false);
+        assert!(done[0].contains("couldn't be moved"), "{done:?}");
+        assert!(from.is_dir() && !from.is_symlink() && from.join("save").is_file());
+        assert!(dir.join("share/Game/save").is_file(), "Lobby's game still gets a copy");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_prefix_is_its_folder() {

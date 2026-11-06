@@ -257,7 +257,7 @@ pub(crate) fn expand(dir: &Path, parts: &[&str], out: &mut Vec<PathBuf>) {
 }
 
 /// Every file under a path (itself when it's a file).
-fn files_under(path: &Path, out: &mut Vec<PathBuf>) {
+pub(crate) fn files_under(path: &Path, out: &mut Vec<PathBuf>) {
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => {
             for e in fs::read_dir(path).into_iter().flatten().flatten() {
@@ -280,7 +280,7 @@ pub struct Copy {
 
 #[derive(Debug, Default)]
 pub struct Found {
-    /// The Windows user folder they're in.
+    /// The Windows user folder they're in (a launcher's folder for `import`'s).
     pub windows: PathBuf,
     /// Files found there.
     pub files: usize,
@@ -288,6 +288,24 @@ pub struct Found {
     pub newest: Option<SystemTime>,
     /// What isn't here yet, or is older here.
     pub copies: Vec<Copy>,
+}
+
+impl Found {
+    /// Counts a file found, and copies it when `to` lacks it or has an older one.
+    pub(crate) fn consider(&mut self, file: PathBuf, to: PathBuf) {
+        let Ok(meta) = fs::metadata(&file) else { return };
+        let modified = meta.modified().ok();
+        self.files += 1;
+        self.bytes += meta.len();
+        self.newest = self.newest.max(modified);
+        let here = fs::metadata(&to).ok().and_then(|m| m.modified().ok());
+        match (here, modified) {
+            (None, _) => self.copies.push(Copy { from: file, to, replaces: false }),
+            // Older here by more than FAT's 2 s rounding.
+            (Some(h), Some(m)) if m.duration_since(h).is_ok_and(|d| d.as_secs() > 2) => self.copies.push(Copy { from: file, to, replaces: true }),
+            _ => {}
+        }
+    }
 }
 
 pub enum Saves {
@@ -352,19 +370,8 @@ pub(crate) fn look(paths: &SavePaths, windows: &Path, prefix_user: &Path) -> Fou
                 if !seen.insert(file.clone()) {
                     continue;
                 }
-                let Ok(meta) = fs::metadata(&file) else { continue };
-                let modified = meta.modified().ok();
-                found.files += 1;
-                found.bytes += meta.len();
-                found.newest = found.newest.max(modified);
                 let to = to_base.join(file.strip_prefix(&from_base).unwrap());
-                let here = fs::metadata(&to).ok().and_then(|m| m.modified().ok());
-                match (here, modified) {
-                    (None, _) => found.copies.push(Copy { from: file, to, replaces: false }),
-                    // Older here by more than FAT's 2 s rounding.
-                    (Some(h), Some(m)) if m.duration_since(h).is_ok_and(|d| d.as_secs() > 2) => found.copies.push(Copy { from: file, to, replaces: true }),
-                    _ => {}
-                }
+                found.consider(file, to);
             }
         }
     }
@@ -436,7 +443,7 @@ pub fn bring_over(game_id: &str, found: &Found) -> Result<(usize, usize), String
         }
         copied += 1;
     }
-    crate::log::line(&format!("windows saves: {game_id}: copied {copied} from {}, {replaced} replaced (kept in {})", found.windows.display(), backup.display()));
+    crate::log::line(&format!("saves: {game_id}: copied {copied} from {}, {replaced} replaced (kept in {})", found.windows.display(), backup.display()));
     Ok((copied, replaced))
 }
 

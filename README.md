@@ -31,7 +31,8 @@ Fedora 44 and Arch.
   in Lobby's own copies). Your Steam library comes from the Steam app signed in on the
   computer; Steam still installs and starts Steam games.
 - **Takes games over** from Lutris, Faugus and Steam shortcuts, and Epic and GOG installs from
-  Heroic, so those launchers can be removed.
+  Heroic, saves included, so those launchers can be removed. While they're installed, they and
+  Lobby use the same saves.
 - **Protects your computer.** Every game Lobby starts runs in a sandbox (bubblewrap): it can't
   read your passwords, keys, browser profiles or sign-ins, or make itself start with the
   computer. Untrusted downloads start isolated, without the internet, until you say otherwise.
