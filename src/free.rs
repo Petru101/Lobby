@@ -82,10 +82,18 @@ pub fn list() -> Result<Vec<FreeGame>, String> {
     Ok(games)
 }
 
+/// The name without its initials in front: GamerPower's "GMH - Good Morning Human" is "Good
+/// Morning Human" to Epic, whose search finds nothing for the longer name.
+fn without_initials(title: &str) -> &str {
+    let Some((front, rest)) = [" - ", ": "].iter().find_map(|sep| title.split_once(*sep)) else { return title };
+    let initials: String = rest.split_whitespace().filter_map(|w| w.chars().next()).flat_map(char::to_lowercase).collect();
+    if initials.chars().count() > 1 && front.to_lowercase() == initials { rest } else { title }
+}
+
 /// The same game's names: equal, or one is the other with a subtitle ("Home" and "Home - A
-/// Unique Horror Adventure").
+/// Unique Horror Adventure") or initials in front.
 fn same_title(a: &str, b: &str) -> bool {
-    let words = |s: &str| s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>();
+    let words = |s: &str| without_initials(s).to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>();
     let (a, b) = (words(a), words(b));
     !a.is_empty() && !b.is_empty() && (a.starts_with(&b) || b.starts_with(&a))
 }
@@ -319,7 +327,7 @@ pub fn epic_checkout(offers: &[(String, String)]) -> String {
 pub fn epic_search_js(title: &str) -> String {
     let vars = serde_json::json!({
         "allowCountries": country(), "category": "games/edition/base|bundles/games|editors|software/edition/base",
-        "count": 10, "country": country(), "keywords": title, "locale": "en-US",
+        "count": 10, "country": country(), "keywords": without_initials(title), "locale": "en-US",
         "sortBy": "relevancy", "sortDir": "DESC", "start": 0, "withPrice": true,
     });
     let ext = serde_json::json!({"persistedQuery": {"version": 1, "sha256Hash": "7d58e12d9dd8cb14c84a3ff18d360bf9f0caa96bf218f2c5fda68ba88d68a437"}});
@@ -345,6 +353,7 @@ pub fn order_done(text: &str) -> bool {
 
 /// The free offer for the game among the search's results (same name, price 0).
 pub fn free_offer(title: &str, results: &str) -> Option<(String, String)> {
+    let title = without_initials(title);
     let v: serde_json::Value = serde_json::from_str(results).ok()?;
     let free = v.as_array()?.iter().filter(|e| e.get("price").and_then(|p| p.as_u64()) == Some(0));
     let offer = |e: &serde_json::Value| Some((e.get("namespace")?.as_str()?.to_string(), e.get("id")?.as_str()?.to_string()));
@@ -409,6 +418,11 @@ mod tests {
         assert!(!owned(&games[0], &items(&["x"], &["ns9"])));
         assert!(same_title("Home - A Unique Horror Adventure", "Home"));
         assert!(!same_title("Homeworld", "Home"));
+        assert!(same_title("GMH - Good Morning Human", "Good Morning Human"));
+        assert!(same_title("Good Morning Human", "GMH: Good Morning Human"));
+        assert!(!same_title("Cossacks - Art Of War", "Art Of War"));
+        assert!(!same_title("GMH - Something Else", "Something Else"));
+        assert!(epic_search_js("GMH - Good Morning Human").contains("\\\"keywords\\\":\\\"Good Morning Human\\\""));
     }
 
     #[test]
@@ -416,6 +430,9 @@ mod tests {
         let results = r#"[{"title":"Terraspace Soundtrack","namespace":"a","id":"1","price":0},{"title":"Terraspace","namespace":"n","id":"o","price":0},{"title":"Terraspace","namespace":"n","id":"p","price":599}]"#;
         assert_eq!(free_offer("Terraspace", results), Some(("n".into(), "o".into())));
         assert_eq!(free_offer("Other", results), None);
+        assert_eq!(free_offer("T - Terraspace", results), None);
+        let results = r#"[{"title":"Good Morning Human Soundtrack","namespace":"a","id":"1","price":0},{"title":"Good Morning Human","namespace":"n","id":"o","price":0}]"#;
+        assert_eq!(free_offer("GMH - Good Morning Human", results), Some(("n".into(), "o".into())));
         assert_eq!(epic_checkout(&[("n".into(), "o".into()), ("m".into(), "q".into())]), "https://www.epicgames.com/store/purchase?highlightColor=0078f2&offers=1-n-o&offers=1-m-q&orderId&purchaseToken&showNavigation=true");
     }
 
