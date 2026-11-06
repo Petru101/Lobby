@@ -97,15 +97,15 @@ pub fn entries() -> Vec<Entry> {
         .collect()
 }
 
-/// Takes over every game that Lobby starts from Lutris's, Faugus's, Heroic's or a Steam
-/// shortcut's settings (not one a gamefix entry, a store install or Steam itself starts):
+/// Takes over every game or store app that Lobby starts from Lutris's, Faugus's, Heroic's or a
+/// Steam shortcut's settings (not one a gamefix entry, a store install or Steam itself starts):
 /// records how, and copies its cover and icon. Heroic's Epic and GOG installs become Lobby's
 /// store installs (`stores::takeover`). Returns the names taken over.
 pub fn take_over(games: &[Game]) -> Vec<String> {
     let mut taken = heroic_installs();
     let mut list = load();
     let mut changed = false;
-    for game in games.iter().filter(|g| g.kind == Kind::Game && !g.gone) {
+    for game in games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::StoreApp) && !g.gone) {
         if let Some(t) = list.iter_mut().find(|t| game.entries.iter().any(|e| e.keys.contains(&t.key))) {
             // Where it is, for records that took it from an entry without it (gamefix's record
             // of a Steam shortcut it made has the shortcut's id but no program).
