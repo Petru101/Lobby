@@ -6,8 +6,11 @@ into a Wine prefix: Lobby finds them all and shows them in one window, and start
 meant for people coming from Windows, with games scattered over several drives.
 
 Lobby is a game launcher for Linux (GTK 4 and libadwaita), written in Rust. It's early: it's
-used daily on one computer (Bazzite, KDE Plasma, NVIDIA), tested on Ubuntu 24.04 and 26.04,
-Fedora 44 and Arch, and isn't packaged yet.
+used daily on one computer (Bazzite, KDE Plasma, NVIDIA) and tested on Ubuntu 24.04 and 26.04,
+Fedora 44 and Arch.
+
+**[Download the AppImage](https://github.com/Petru101/Lobby/releases/latest/download/Lobby-x86_64.AppImage)**
+([how to install](#installing)). It updates itself.
 
 <img width="1330" height="910" alt="image" src="https://github.com/user-attachments/assets/4305bbb6-d44b-4ae6-9443-d20a8a249725" />
 
