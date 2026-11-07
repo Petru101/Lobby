@@ -17,6 +17,23 @@ pub fn download(game: &Game) -> Option<PathBuf> {
     game.entries.iter().filter(|e| e.kind == Kind::Download).find_map(|e| e.program.clone()).filter(|p| p.is_file())
 }
 
+/// The download's files, for gamefix to tell whether it has finished. None when Install wouldn't
+/// use them (Steam's install).
+fn download_parts(game: &Game) -> Option<Vec<PathBuf>> {
+    if game.kind != Kind::Download || steam_owned(game).is_some() {
+        return None;
+    }
+    let file = download(game)?;
+    let folder = game.entries.iter().find(|e| e.kind == Kind::Download && e.program.as_deref() == Some(file.as_path())).and_then(|e| e.folder.as_deref());
+    Some(gamefix::download::parts(&file, folder))
+}
+
+/// Whether the download looks like it's still coming, from names and sizes: for the card, which
+/// asks often. Install looks closer (`place`).
+pub fn still_downloading(game: &Game) -> bool {
+    download_parts(game).is_some_and(|parts| parts.iter().any(|f| gamefix::download::looks_unfinished(f)))
+}
+
 fn archive_kind(file: &Path) -> Option<&'static str> {
     let name = file.file_name()?.to_string_lossy().to_lowercase();
     if [".tar.gz", ".tar.xz", ".tar.bz2", ".tgz"].iter().any(|e| name.ends_with(e)) {
@@ -120,6 +137,9 @@ pub fn place(game: &Game, progress: &dyn Fn(f64)) -> Result<Placed, String> {
         return Ok(Placed { target: folder, name: Some(game.name.clone()), lines });
     }
     let file = download(game).ok_or_else(|| format!("{}'s download isn't there any more.", game.name))?;
+    if let Some(part) = download_parts(game).and_then(|parts| gamefix::download::unfinished(&parts).into_iter().next()) {
+        return Err(format!("{} is still downloading ({} isn't all there yet). Install it once that's finished.", game.name, part.display()));
+    }
     // An unpacked game is named as lobby names it; an installer or a disc image is run by
     // gamefix, which names it after what it installs.
     if archive_kind(&file).is_some() {
@@ -171,6 +191,39 @@ pub fn owned_in(game: &Game) -> Option<(crate::stores::Store, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asks_gamefix_about_a_downloads_own_files() {
+        use crate::library::{Entry, Source};
+        use std::os::unix::fs::FileExt;
+        let dir = std::env::temp_dir().join(format!("lobby-unfinished-{}", std::process::id()));
+        fs::create_dir_all(dir.join("repack")).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let setup = dir.join("repack/setup.exe");
+        fs::write(&setup, vec![b'M'; 2 << 20]).unwrap();
+        fs::File::options().write(true).open(&setup).unwrap().set_modified(old).unwrap();
+        let mut e = Entry::new(Source::Folder, "G");
+        (e.kind, e.program, e.folder) = (Kind::Download, Some(setup.clone()), Some(dir.join("repack")));
+        let game: Game = serde_json::from_value(serde_json::json!({"name": "G", "kind": "Download", "entries": [], "missing": false})).unwrap();
+        let mut game = Game { entries: vec![e], ..game };
+        assert!(!still_downloading(&game));
+        // RoadCraft's repack at 30%: its first part's start there, most of it not on disk.
+        let part = fs::File::create(dir.join("repack/fg-01.bin")).unwrap();
+        part.set_len(4 << 20).unwrap();
+        part.write_all_at(b"ArC\x01", 0).unwrap();
+        part.set_modified(old).unwrap();
+        assert!(still_downloading(&game));
+        let refused = place(&game, &|_| {}).err().unwrap();
+        assert!(refused.contains("still downloading") && refused.contains("fg-01.bin"), "{refused}");
+        // Loose in a folder of downloads, others' files say nothing about it.
+        game.entries[0].folder = None;
+        assert!(!still_downloading(&game));
+        // An installed game has no download to wait for.
+        game.entries[0].folder = Some(dir.join("repack"));
+        game.kind = Kind::Game;
+        assert!(!still_downloading(&game));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn folder_names() {

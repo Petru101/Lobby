@@ -73,6 +73,9 @@ fn plan_as_set_up(game: &Game) -> Plan {
     if let Some(note) = game.entries.iter().find_map(|e| e.note.as_ref()).filter(|_| game.kind == Kind::WrongSystem) {
         return Plan::Cannot(format!("{note}. The game's page may have a version for Windows or Linux."));
     }
+    if crate::install::still_downloading(game) {
+        return Plan::Cannot("It's still downloading. Install works once it's finished.".into());
+    }
     if game.kind == Kind::Download {
         return Plan::Cannot("It's downloaded, not installed yet. Install unpacks it into your games folder (or runs its installer) and sets it up.".into());
     }

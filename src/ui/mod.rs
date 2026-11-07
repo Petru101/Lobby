@@ -392,6 +392,8 @@ struct Ui {
     /// page, first, so it doesn't vanish from where it was installed, until it's opened or
     /// another page is picked.
     just_installed: RefCell<Option<(String, Option<gtk::Widget>)>>,
+    /// The downloads still coming: no Install yet (`still_downloading`).
+    downloading: RefCell<std::collections::HashSet<String>>,
     /// Asked this time whether Lobby may allow itself sandboxes (Ubuntu's AppArmor: `apparmor`).
     asked_apparmor: Cell<bool>,
     /// Steam's library folders being watched (`watch_steam`), the games installed in them at
@@ -550,7 +552,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -662,6 +664,14 @@ fn build(app: &adw::Application) {
     ui.self_update();
     let u = ui.clone();
     missing_banner.connect_button_clicked(move |_| u.explain_missing(&missing, steam.as_deref()));
+    let u = Rc::downgrade(&ui);
+    glib::timeout_add_seconds_local(60, move || {
+        let Some(u) = u.upgrade() else { return glib::ControlFlow::Break };
+        if !u.downloading.borrow().is_empty() {
+            u.look_for_finished_downloads();
+        }
+        glib::ControlFlow::Continue
+    });
     // Which games are running, while the window is open (reading /proc: a few ms).
     let u = Rc::downgrade(&ui);
     glib::timeout_add_seconds_local(2, move || {
@@ -1720,6 +1730,7 @@ impl Ui {
                     let games = u.lib.borrow().games.clone();
                     let played = games.clone();
                     gio::spawn_blocking(move || crate::playtime::take_in(&played)).await.ok();
+                    u.downloading.replace(gio::spawn_blocking(still_downloading(&games)).await.unwrap_or_default());
                     u.fill();
                     u.watch_steam();
                     u.find_leftovers();
@@ -1855,6 +1866,19 @@ impl Ui {
         }
         change(&mut lib);
         lib.save()
+    }
+
+    /// Downloads marked as still coming, looked at again: a card changes once one finishes.
+    fn look_for_finished_downloads(self: &Rc<Self>) {
+        let games = self.lib.borrow().games.clone();
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let now = gio::spawn_blocking(still_downloading(&games)).await.unwrap_or_default();
+            if now != *u.downloading.borrow() {
+                u.downloading.replace(now);
+                u.fill();
+            }
+        });
     }
 
     fn is_installing(&self, id: &str) -> bool {
@@ -3555,10 +3579,11 @@ impl Ui {
         // The page's dialog, for buttons made before it is.
         let dialog_slot: Rc<RefCell<Option<adw::Dialog>>> = Rc::default();
         let download = matches!(game.kind, Kind::Download | Kind::Owned);
-        let play = gtk::Button::builder().label(if download { "Install" } else { "Play" }).halign(gtk::Align::Start).build();
+        let coming = self.downloading.borrow().contains(&game.id);
+        let play = gtk::Button::builder().label(if coming { "Still downloading" } else if download { "Install" } else { "Play" }).halign(gtk::Align::Start).build();
         play.add_css_class("pill");
         play.add_css_class("suggested-action");
-        play.set_sensitive(download || !matches!(plan, Plan::Cannot(_)) || self.is_running(&game.id));
+        play.set_sensitive(!coming && (download || !matches!(plan, Plan::Cannot(_)) || self.is_running(&game.id)));
         if !download {
             self.run_widgets.borrow_mut().push((game.id.clone(), None, play.downgrade(), true));
             self.show_running();
@@ -4340,6 +4365,13 @@ fn add_cover(overlay: &gtk::Overlay, cover: &str, width: i32, height: i32) {
     }
 }
 
+/// What to run off the main thread (a drive may have to wake up): the ids of the downloads
+/// still coming. LOBBY_SNAPSHOT_DOWNLOADING=<id> marks one for a render.
+fn still_downloading(games: &[Game]) -> impl FnOnce() -> std::collections::HashSet<String> + Send + 'static {
+    let games: Vec<Game> = games.iter().filter(|g| g.kind == Kind::Download && !g.gone && !g.missing).cloned().collect();
+    move || games.iter().filter(|g| crate::install::still_downloading(g)).map(|g| g.id.clone()).chain(std::env::var("LOBBY_SNAPSHOT_DOWNLOADING")).collect()
+}
+
 /// What a card says under the name: where the game came from, in a word or two.
 fn origin(g: &Game) -> String {
     if g.kind == Kind::WrongSystem {
@@ -4395,6 +4427,12 @@ fn card(ui: &Rc<Ui>, g: &Game) -> gtk::FlowBoxChild {
     play.add_css_class("play-button");
     if g.kind == Kind::WrongSystem {
         play.set_visible(false);
+    }
+    if ui.downloading.borrow().contains(&g.id) {
+        play.set_visible(false);
+        let badge = gtk::Label::builder().label("Still downloading").halign(gtk::Align::Start).valign(gtk::Align::Start).margin_start(10).margin_top(10).tooltip_text("Install works once it's finished").build();
+        badge.add_css_class("update-badge");
+        cover.add_overlay(&badge);
     }
     let u = ui.clone();
     let id = g.id.clone();
