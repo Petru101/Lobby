@@ -134,7 +134,7 @@ pub(crate) fn found_folder(game: &Game, folder: &Path) -> Result<(), String> {
 /// For a gamefix install (its note in `folder`) whose program is outside it, on another
 /// drive: the game's own folder there, the one holding the installer's uninstaller (Inno
 /// Setup's unins000.exe, NSIS's uninstall.exe), else Err(the program).
-fn installed_elsewhere(folder: &Path) -> Option<Result<PathBuf, PathBuf>> {
+pub(crate) fn installed_elsewhere(folder: &Path) -> Option<Result<PathBuf, PathBuf>> {
     let note = fs::read_to_string(folder.join("gamefix-install.txt")).ok()?;
     let program = PathBuf::from(note.lines().find_map(|l| l.strip_prefix("program\t"))?);
     if !program.is_absolute() || program.starts_with(folder) {
