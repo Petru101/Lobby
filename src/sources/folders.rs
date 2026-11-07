@@ -465,9 +465,11 @@ fn unreal_engine(dir: &Path) -> bool {
 
 /// A folder collecting downloads or games rather than being one: named so ("Downloaded Games",
 /// "Old Games") and holding two or more downloads (archives, installers, programs) at its top.
+/// "game" alone is one game's: an RPG Maker export's game/ holds Game.exe and a helper program.
 fn collection(dir: &Path) -> bool {
-    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    crate::places::games_or_downloads(&name) && fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && super::downloads::wanted(&e.path())).take(2).count() >= 2
+    let name = dir.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let several = name.split(|c: char| !c.is_alphanumeric()).any(|w| !w.is_empty() && w != "game");
+    several && crate::places::games_or_downloads(&name) && fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && super::downloads::wanted(&e.path())).take(2).count() >= 2
 }
 
 /// A name without bracketed tags: "Mycopunk [FitGirl Repack]", "Game (DODI Repack)".
@@ -676,6 +678,12 @@ mod tests {
         }
         assert!(collection(&coll));
         assert!(!collection(&dir.join("UE_5.8")));
+        // A game's own folder, named "game", holding its program and a helper.
+        fs::create_dir_all(dir.join("mz/game")).unwrap();
+        for f in ["mz/game/Game.exe", "mz/game/notification_helper.exe"] {
+            fs::write(dir.join(f), "").unwrap();
+        }
+        assert!(!collection(&dir.join("mz/game")));
         assert_eq!(without_tags("Some Game (DODI Repack) v1.2"), "Some Game v1.2");
         assert_eq!(without_tags("[tags only]"), "[tags only]");
         fs::remove_dir_all(&dir).unwrap();
