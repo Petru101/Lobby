@@ -237,8 +237,8 @@ pub struct Game {
 }
 
 impl Game {
-    /// When it came here: the earliest its launchers, its folder's creation or the store's
-    /// purchase say, else when Lobby first saw it (Unix time).
+    /// When it came to this computer: the earliest its launchers or its folder's creation say,
+    /// else when Lobby first saw it (Unix time).
     pub fn since(&self) -> u64 {
         self.entries.iter().filter_map(|e| e.since).chain(Some(self.added).filter(|&a| a > 0)).min().unwrap_or(0)
     }

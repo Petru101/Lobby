@@ -94,12 +94,15 @@ pub fn apps(home: &Home) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
     for root in roots(home) {
         let played = played(&root);
+        let arrived = arrived(&root);
         for lib in libraries(&root) {
             for (appid, name, folder, size) in library_apps(&lib) {
                 if entries.iter().any(|e| e.keys.contains(&Key::SteamApp(appid))) {
                     continue;
                 }
                 let mut e = Entry::new(Source::Steam, name);
+                // Moving a library makes the folder new, so its date alone can be too late.
+                e.since = arrived.get(&appid).copied().into_iter().chain(super::created(&folder)).min();
                 e.folder = Some(folder);
                 e.size = size;
                 (e.last_played, e.playtime) = played.get(&appid).copied().unwrap_or_default();
@@ -110,6 +113,32 @@ pub fn apps(home: &Home) -> Vec<Entry> {
         }
     }
     entries
+}
+
+/// When Steam started putting each app on this computer, from its own log of them.
+fn arrived(root: &Path) -> std::collections::HashMap<u32, u64> {
+    let logs = root.join("logs");
+    let log: Vec<u8> = ["content_log.previous.txt", "content_log.txt"].iter().flat_map(|name| fs::read(logs.join(name)).unwrap_or_default()).collect();
+    first_logged(&String::from_utf8_lossy(&log))
+}
+
+/// Each app's first line in a content log (`[2026-10-12 01:40:18] AppID 570 state changed : ...`,
+/// in local time), counting from the last time it was uninstalled.
+fn first_logged(log: &str) -> std::collections::HashMap<u32, u64> {
+    let mut first = std::collections::HashMap::new();
+    for line in log.lines() {
+        let Some((time, rest)) = line.strip_prefix('[').and_then(|l| l.split_once("] AppID ")) else { continue };
+        let Some((appid, what)) = rest.split_once(' ') else { continue };
+        let Ok(appid) = appid.parse::<u32>() else { continue };
+        if what.starts_with("state changed : Uninstalled") {
+            first.remove(&appid);
+        } else if !first.contains_key(&appid) {
+            if let Some(t) = crate::library::unix_time(&time.replacen(' ', "T", 1)) {
+                first.insert(appid, t);
+            }
+        }
+    }
+    first
 }
 
 /// Steam libraries Steam doesn't list: an old Windows install's, a copied or plugged-in
@@ -278,4 +307,24 @@ pub fn shortcuts(home: &Home) -> Vec<Entry> {
         }
     }
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_game_arrives_at_its_first_log_line_since_being_uninstalled() {
+        let log = "[2026-10-07 12:03:48] AppID 33460 state changed : Update Required,\n\
+                   [2026-10-08 09:00:00] AppID 33460 state changed : Fully Installed,\n\
+                   [2026-10-01 10:00:00] AppID 440 state changed : Uninstalled,\n\
+                   [2026-10-02 10:00:00] AppID 570 state changed : Update Required,\n\
+                   [2026-10-03 10:00:00] AppID 570 state changed : Uninstalled,\n\
+                   [2026-10-04 10:00:00] AppID 570 state changed : Update Required,\n\
+                   not a line about an app\n";
+        let first = first_logged(log);
+        assert_eq!(first.get(&33460), crate::library::unix_time("2026-10-07T12:03:48").as_ref());
+        assert_eq!(first.get(&570), crate::library::unix_time("2026-10-04T10:00:00").as_ref());
+        assert_eq!(first.get(&440), None);
+    }
 }

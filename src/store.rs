@@ -115,6 +115,8 @@ impl Library {
             if !matched {
                 game.added = now;
             }
+            // Kept, as what it's read from can go: Steam's log rolls over, a folder gets replaced.
+            game.added = game.since();
         }
         for (mut o, matched) in old.into_iter().zip(matched_old).filter_map(|(o, m)| Some((o?, m))) {
             // Now part of another game (a download, once what it installed is found).
