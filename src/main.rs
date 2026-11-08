@@ -1126,9 +1126,11 @@ fn gamefix_game(what: &str, query: &str) -> Result<(), String> {
         "check" => {
             let Some(look) = fixing::look(game)? else { return Err(format!("{} isn't an installed game gamefix can check.", game.name)) };
             println!("{}\n{}\n", look.summary(), look.text);
+            println!("Button on its page: {}", look.button().unwrap_or("none"));
             println!("{}", match &look.how {
-                fixing::How::Steam(_) => "lobby gamefix fix sets it right in Steam's settings (Steam has to be closed).".to_string(),
-                fixing::How::Menu { .. } => "lobby gamefix fix sets it up again, with any fixes it needs.".to_string(),
+                fixing::How::Steam(_) => "Steam starts it, and Fix changes its settings there (Steam has to be closed).".to_string(),
+                fixing::How::Menu { .. } => "It starts from gamefix's app-menu entry.".to_string(),
+                fixing::How::FirstPlay(_) => "Its first Play sets it up, with any fixes it needs.".to_string(),
                 fixing::How::OnlyCheck { why, .. } => why.clone(),
             });
         }

@@ -4006,13 +4006,15 @@ impl Ui {
             row.set_title(look.summary());
             row.set_subtitle(&match &look.how {
                 crate::fixing::How::OnlyCheck { why, .. } => format!("{}\n\n{why}", look.text),
+                crate::fixing::How::FirstPlay(_) => format!("{}\n\nIts first Play sets it up, with any fixes it needs.", look.text),
                 _ if look.set_up => format!("What it found in the files:\n{}", look.text),
                 _ => look.text.clone(),
             });
             let buttons = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).build();
-            if look.how.can_fix() && (look.fixable || look.set_up) {
-                let fix = gtk::Button::builder().label(if look.set_up { "Set up again" } else { "Fix" }).build();
-                if !look.set_up {
+            if let Some(label) = look.button() {
+                let fix = gtk::Button::builder().label(label).build();
+                // Urged only after a failed start: a game that runs may not need it.
+                if look.offers_fix() && look.failed {
                     fix.add_css_class("suggested-action");
                 }
                 let (u, id, page) = (u.clone(), id.clone(), page.clone());
