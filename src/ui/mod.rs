@@ -14,7 +14,7 @@ use webkit6::prelude::*;
 use gtk::{gdk, gio, glib};
 use crate::stores::Store;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::rc::Rc;
@@ -320,6 +320,42 @@ const SCANNING: &str = "Looking for new games…";
 /// How many cards Continue playing shows.
 const RECENT_SHOWN: usize = 8;
 
+/// What a look for running games found.
+struct Looked {
+    found: HashSet<String>,
+    /// Steam games seen showing a picture for the first time in this run.
+    newly_shown: Vec<String>,
+    steam_log: (u64, u64),
+    /// Steam games whose ended run was judged (`starts::judge_steam`).
+    judged: Vec<String>,
+}
+
+/// Which games are running, and how Steam's ended (reads /proc and Steam's logs: off the main
+/// thread). Steam's logs are read for a while after they last grew: `judge_steam` waits for a run
+/// to settle.
+fn looked_for_running(games: &[Game], shown: HashSet<String>, since: u64, steam_log: (u64, u64)) -> Looked {
+    let running = crate::running::find(games);
+    let steam_app = |g: &Game| g.entries.iter().filter(|e| e.source == Source::Steam && e.kind != Kind::Owned).flat_map(|e| e.keys.iter()).find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None });
+    let newly_shown: Vec<String> = games
+        .iter()
+        .filter(|g| steam_app(g).is_some() && !shown.contains(&g.id))
+        .filter(|g| running.get(&g.id).is_some_and(|pids| pids.iter().any(|&pid| crate::running::shows_window(pid))))
+        .map(|g| g.id.clone())
+        .collect();
+    let logs = crate::sources::Home::find().map(|h| crate::sources::steam::run_logs(&h)).unwrap_or_default();
+    let size: u64 = logs.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+    let now = crate::store::now();
+    let changed = if size != steam_log.0 { now } else { steam_log.1 };
+    let judged = if now.saturating_sub(changed) <= 15 {
+        let apps: HashMap<u32, String> = games.iter().filter_map(|g| Some((steam_app(g)?, g.id.clone()))).collect();
+        let shown: HashSet<String> = shown.into_iter().chain(newly_shown.iter().cloned()).collect();
+        crate::starts::judge_steam(&apps, &logs, since, &shown)
+    } else {
+        Vec::new()
+    };
+    Looked { found: running.into_keys().collect(), newly_shown, steam_log: (size, changed), judged }
+}
+
 struct Ui {
     window: adw::ApplicationWindow,
     /// How many games show, at the end of the source row.
@@ -344,6 +380,12 @@ struct Ui {
     online_warnings: RefCell<HashMap<String, Vec<String>>>,
     /// The newest failed start told (a toast for each newer one).
     failures_seen: Cell<u64>,
+    /// When the window opened: Steam games started since are watched for a picture.
+    opened: u64,
+    /// Steam games seen showing a picture in the run going on or just ended.
+    steam_shown: RefCell<HashSet<String>>,
+    /// The size of Steam's logs of its games, and when it last changed.
+    steam_log: Cell<(u64, u64)>,
     /// A game just installed from a download: its download is offered for deleting once the
     /// scan after the install knows it.
     offer_leftover: RefCell<Option<String>>,
@@ -552,7 +594,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -886,6 +928,10 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         }
         if std::env::var_os("LOBBY_SNAPSHOT_CLEANUP").is_some() {
             u.clean_up();
+        }
+        // LOBBY_SNAPSHOT_FIX=<id>: presses Fix on that game (only ever with a test HOME).
+        if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_FIX") {
+            u.fix_game(&id, Rc::default());
         }
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_DETAILS") {
             u.details(&id);
@@ -1319,10 +1365,17 @@ impl Ui {
             return;
         }
         let games = self.lib.borrow().games.clone();
+        let (shown, since, steam_log) = (self.steam_shown.borrow().clone(), self.opened, self.steam_log.get());
         let u = self.clone();
         glib::spawn_future_local(async move {
-            let found: std::collections::HashSet<String> = gio::spawn_blocking(move || crate::running::find(&games).into_keys().collect()).await.unwrap_or_default();
+            let look = gio::spawn_blocking(move || looked_for_running(&games, shown, since, steam_log)).await;
             u.looking_for_running.set(false);
+            let Ok(Looked { found, newly_shown, steam_log, judged }) = look else { return };
+            u.steam_log.set(steam_log);
+            u.steam_shown.borrow_mut().extend(newly_shown);
+            for id in &judged {
+                u.steam_shown.borrow_mut().remove(id);
+            }
             if *u.running.borrow() != found {
                 // Seen running: played. Steam's games are only asked for on Play, and may not
                 // start.
@@ -1334,24 +1387,133 @@ impl Ui {
                 u.show_running();
             }
             // Starts that ended without showing anything since the last look (`lobby sandbox`
-            // writes them down; one failing within 2 s is never seen running).
+            // and `starts::judge_steam` write them down). One that's only a guess is on its page
+            // and says nothing here.
             let since = u.failures_seen.get();
-            let new = gio::spawn_blocking(move || crate::starts::all().into_iter().filter(|(_, f)| f.when > since).collect::<Vec<_>>()).await.unwrap_or_default();
-            if let Some(latest) = new.iter().map(|(_, f)| f.when).max() {
+            let games = u.lib.borrow().games.clone();
+            let new = gio::spawn_blocking(move || {
+                let new: Vec<_> = crate::starts::all().into_iter().filter(|(_, f)| f.when > since).collect();
+                let latest = new.iter().map(|(_, f)| f.when).max();
+                let told: Vec<(String, crate::starts::Failed, bool)> = new
+                    .into_iter()
+                    .filter(|(_, f)| f.sure)
+                    .map(|(id, f)| {
+                        let offer = games.iter().find(|g| g.id == id).is_some_and(|g| matches!(crate::fixing::look(g), Ok(Some(l)) if l.offers_fix()));
+                        (id, f, offer)
+                    })
+                    .collect();
+                (told, latest)
+            })
+            .await
+            .unwrap_or_default();
+            let (new, latest) = new;
+            if let Some(latest) = latest {
                 u.failures_seen.set(latest);
             }
-            {
-                for (id, f) in new {
-                    let name = u.game(&id).map(|g| g.name).unwrap_or(id.clone());
-                    let toast = adw::Toast::builder().title(format!("{name} closed {} without showing anything", crate::starts::after(f.seconds))).button_label("Why?").timeout(10).build();
-                    let u2 = u.clone();
-                    toast.connect_button_clicked(move |_| {
+            for (id, f, offer) in new {
+                let name = u.game(&id).map(|g| g.name).unwrap_or(id.clone());
+                let toast = adw::Toast::builder().title(format!("{name} closed {} without showing anything", crate::starts::after(f.seconds))).button_label(if offer { "Fix it" } else { "Why?" }).timeout(10).build();
+                let u2 = u.clone();
+                toast.connect_button_clicked(move |_| {
+                    if offer {
+                        u2.fix_game(&id, Rc::default());
+                    } else {
                         u2.details(&id);
-                    });
-                    u.toasts.add_toast(toast);
-                }
+                    }
+                });
+                u.toasts.add_toast(toast);
             }
         });
+    }
+
+    /// Asks to close Steam when it has to be, and closes it: false when it stays open.
+    async fn steam_closed(self: &Rc<Self>, game: &Game) -> bool {
+        let g = game.clone();
+        if !gio::spawn_blocking(move || crate::fixing::steam_in_the_way(&g)).await.unwrap_or(false) {
+            return true;
+        }
+        let alert = adw::AlertDialog::new(Some("Close Steam?"), Some(&format!("Steam has to be closed while gamefix changes {}'s settings, because Steam rewrites them when it quits. Anything Steam is downloading or running stops.", game.name)));
+        alert.add_responses(&[("cancel", "Not now"), ("close", "Close Steam")]);
+        alert.set_response_appearance("close", adw::ResponseAppearance::Suggested);
+        alert.set_default_response(Some("close"));
+        if alert.choose_future(Some(&self.window)).await != "close" {
+            return false;
+        }
+        self.toast("Closing Steam…");
+        if gio::spawn_blocking(crate::fixing::close_steam).await.unwrap_or(false) {
+            return true;
+        }
+        self.alert("Steam didn't close", "It was still open after a minute, so nothing was changed. Close it yourself (Steam, then Exit) and try again.");
+        false
+    }
+
+    /// gamefix's fix for the game: what it needs is asked for and Steam closed first. `page`, when
+    /// the game's page is open, is opened again to say what's true now.
+    fn fix_game(self: &Rc<Self>, id: &str, page: Rc<RefCell<Option<adw::Dialog>>>) {
+        let (u, id) = (self.clone(), id.to_string());
+        glib::spawn_future_local(async move {
+            let Some(game) = u.game(&id) else { return };
+            let g = game.clone();
+            let need = gio::spawn_blocking(move || crate::fixing::need(&g).map(|n| {
+                let described = n.describe();
+                (n, described)
+            }))
+            .await
+            .ok()
+            .flatten();
+            if let Some((need, (what, size))) = need {
+                if !u.ask_install_need(&game.name, &what, size.as_deref()).await {
+                    return;
+                }
+                u.toast(&format!("Installing {what}…"));
+                if let Err(e) = gio::spawn_blocking(move || need.install()).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                    u.alert(&format!("{what} couldn't be installed"), &e);
+                    return;
+                }
+            }
+            if !u.steam_closed(&game).await {
+                return;
+            }
+            u.toast(&format!("Fixing {} with gamefix…", game.name));
+            let g = game.clone();
+            let result = gio::spawn_blocking(move || crate::fixing::fix(&g)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+            u.after_gamefix(&id, &game.name, result, "gamefix made these changes", &page);
+        });
+    }
+
+    /// Takes gamefix's changes to a Steam game's settings back.
+    fn undo_fix(self: &Rc<Self>, id: &str, page: Rc<RefCell<Option<adw::Dialog>>>) {
+        let (u, id) = (self.clone(), id.to_string());
+        glib::spawn_future_local(async move {
+            let Some(game) = u.game(&id) else { return };
+            if !u.steam_closed(&game).await {
+                return;
+            }
+            let g = game.clone();
+            let result = gio::spawn_blocking(move || crate::fixing::undo(&g)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+            u.after_gamefix(&id, &game.name, result, "gamefix took its changes back", &page);
+        });
+    }
+
+    /// Says how a fix or its undo went, with the page and library as they are now.
+    fn after_gamefix(self: &Rc<Self>, id: &str, name: &str, result: Result<Vec<String>, String>, did: &str, page: &Rc<RefCell<Option<adw::Dialog>>>) {
+        let changed = result.as_ref().is_ok_and(|lines| crate::fixing::changed(lines));
+        if changed {
+            // What it said about the last start was before this.
+            crate::starts::record(id, None);
+            self.rescan();
+            self.sync_shortcut(id);
+        }
+        let open = page.borrow().clone();
+        if let Some(open) = open {
+            open.close();
+            self.details(id);
+        }
+        match result {
+            Ok(lines) if changed => self.alert(&format!("{name}: {did}"), &lines.join("\n")),
+            Ok(lines) => self.alert(&format!("{name}: nothing changed"), &lines.join("\n")),
+            Err(e) => self.alert(&format!("{name}: gamefix couldn't do it"), &e),
+        }
     }
 
     fn is_running(&self, id: &str) -> bool {
@@ -3698,10 +3860,21 @@ impl Ui {
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(24).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
         content.append(&top);
         let online = self.online_warnings.borrow().get(&game.id).cloned().unwrap_or_default();
-        let failed = crate::starts::failed(&game.id).map(|f| {
+        // A Steam game has no log here: Steam started it.
+        let log_file = store::log_file(&game.id);
+        let has_log = log_file.is_file();
+        // LOBBY_SNAPSHOT_FAILED=<id>: a failed start of that game, for a render.
+        let pretend = std::env::var("LOBBY_SNAPSHOT_FAILED").is_ok_and(|id| id == game.id).then(|| crate::starts::Failed { when: store::now(), seconds: 4, why: None, sure: true });
+        let failed = crate::starts::failed(&game.id).or(pretend).map(|f| {
             let when = glib::DateTime::from_unix_local(f.when as i64).ok().and_then(|d| d.format("%-d %b, %H:%M").ok()).map(|d| d.to_string()).unwrap_or_default();
-            format!("Its last start, {when}, ended {} without showing anything. {}", crate::starts::after(f.seconds), f.why.unwrap_or_else(|| "Its log may say why.".into()))
+            let ended = crate::starts::after(f.seconds);
+            let why = f.why.or_else(|| has_log.then(|| "Its log may say why.".to_string()));
+            let text = if f.sure { format!("Its last start, {when}, ended {ended} without showing anything.") } else { format!("Its last start, {when}, ended {ended}, so it may not have started.") };
+            why.map_or(text.clone(), |w| format!("{text} {w}"))
         });
+        // The fix offered beside a failed start, once gamefix's check says there is one.
+        let fix_failed = gtk::Button::builder().label("Fix it").valign(gtk::Align::Center).visible(false).build();
+        fix_failed.add_css_class("suggested-action");
         for (warning, log) in crate::drives::warnings(&game, &crate::drives::mounts()).into_iter().map(|w| (w, false)).chain(online.into_iter().map(|w| (w, false))).chain(failed.map(|w| (w, true))) {
             let icon = gtk::Image::builder().icon_name("dialog-warning-symbolic").valign(gtk::Align::Start).build();
             let text = gtk::Label::builder().label(&warning).wrap(true).xalign(0.0).hexpand(true).build();
@@ -3709,16 +3882,23 @@ impl Ui {
             row.add_css_class("drive-warning");
             row.append(&icon);
             row.append(&text);
-            // A failed start: what the game printed.
+            // A failed start: what the game printed, and the fix.
             if log {
-                let button = gtk::Button::builder().label("Show log").valign(gtk::Align::Center).build();
-                let (file, w) = (store::log_file(&game.id), self.window.clone());
-                button.connect_clicked(move |_| gtk::FileLauncher::new(Some(&gio::File::for_path(&file))).launch(Some(&w), gio::Cancellable::NONE, |_| {}));
-                row.append(&button);
+                if has_log {
+                    let button = gtk::Button::builder().label("Show log").valign(gtk::Align::Center).build();
+                    let (file, w) = (log_file.clone(), self.window.clone());
+                    button.connect_clicked(move |_| gtk::FileLauncher::new(Some(&gio::File::for_path(&file))).launch(Some(&w), gio::Cancellable::NONE, |_| {}));
+                    row.append(&button);
+                }
+                row.append(&fix_failed);
             }
             content.append(&row);
         }
         content.append(&info);
+        let fixes = self.gamefix_group(&game, &dialog_slot, &fix_failed);
+        if game.kind == Kind::Game {
+            content.append(&fixes);
+        }
         let protection = self.protection_group(&game, &plan);
         let proton = self.proton_group(&game, &plan);
         if game.kind == Kind::Game {
@@ -3756,6 +3936,7 @@ impl Ui {
             "proton" => Some(proton.clone().upcast::<gtk::Widget>()),
             "saves" => Some(save_folders.clone().upcast::<gtk::Widget>()),
             "files" => Some(files.clone().upcast::<gtk::Widget>()),
+            "gamefix" => Some(fixes.clone().upcast::<gtk::Widget>()),
             _ => None,
         }) {
             let (scrolled, content) = (scrolled.clone(), content.clone());
@@ -3800,6 +3981,60 @@ impl Ui {
     }
 
     /// Show frame rate on a game's page: MangoHud's overlay when Lobby starts it.
+    /// What gamefix finds wrong with the game and its fix, as its right-click menu has them; the
+    /// check runs in the background. `fix_failed`: the button beside a failed start, shown when
+    /// the fix is worth offering.
+    fn gamefix_group(self: &Rc<Self>, game: &Game, page: &Rc<RefCell<Option<adw::Dialog>>>, fix_failed: &gtk::Button) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::builder().title("gamefix").build();
+        let row = adw::ActionRow::builder().title("Checking its files…").use_markup(false).subtitle_selectable(true).build();
+        group.add(&row);
+        if game.kind != Kind::Game {
+            return group;
+        }
+        let (u, id, game, page, fix_failed, shown) = (self.clone(), game.id.clone(), game.clone(), page.clone(), fix_failed.clone(), group.clone());
+        glib::spawn_future_local(async move {
+            let look = gio::spawn_blocking(move || crate::fixing::look(&game)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+            let look = match look {
+                Ok(Some(look)) => look,
+                Ok(None) => return shown.set_visible(false),
+                Err(e) => {
+                    row.set_title("gamefix can't check it");
+                    row.set_subtitle(&e);
+                    return;
+                }
+            };
+            row.set_title(look.summary());
+            row.set_subtitle(&match &look.how {
+                crate::fixing::How::OnlyCheck { why, .. } => format!("{}\n\n{why}", look.text),
+                _ if look.set_up => format!("What it found in the files:\n{}", look.text),
+                _ => look.text.clone(),
+            });
+            let buttons = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).build();
+            if look.how.can_fix() && (look.fixable || look.set_up) {
+                let fix = gtk::Button::builder().label(if look.set_up { "Set up again" } else { "Fix" }).build();
+                if !look.set_up {
+                    fix.add_css_class("suggested-action");
+                }
+                let (u, id, page) = (u.clone(), id.clone(), page.clone());
+                fix.connect_clicked(move |_| u.fix_game(&id, page.clone()));
+                buttons.append(&fix);
+            }
+            if look.can_undo {
+                let undo = gtk::Button::builder().label("Undo").build();
+                let (u, id, page) = (u.clone(), id.clone(), page.clone());
+                undo.connect_clicked(move |_| u.undo_fix(&id, page.clone()));
+                buttons.append(&undo);
+            }
+            row.add_suffix(&buttons);
+            if look.offers_fix() {
+                let (u, id, page) = (u.clone(), id.clone(), page.clone());
+                fix_failed.connect_clicked(move |_| u.fix_game(&id, page.clone()));
+                fix_failed.set_visible(true);
+            }
+        });
+        group
+    }
+
     fn frame_rate_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
         let unsupported = launch::frame_rate_unsupported(plan);
         let help = unsupported.clone().unwrap_or_else(|| "MangoHud's overlay in the corner: frames per second, frame times, CPU and GPU load. Right Shift+F12 hides it while playing. From Play, and from its app-menu and desktop shortcuts.".into());

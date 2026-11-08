@@ -3,6 +3,11 @@
 //! sandbox`, which every protected start goes through (Play and the shortcuts), and kept in
 //! ~/.local/share/lobby/starts.json by game id until a start works. The likely reason is read
 //! from the game's log (~/.local/state/lobby/logs/<id>.log) and its command.
+//!
+//! Steam starts its games itself, so those are read from Steam's own log of them
+//! (logs/console_log.txt, `Game process added` and `removed`), whoever started them, once they
+//! end (`judge_steam`). While the window is open it also watched for a picture, which makes the
+//! verdict sure; a start it didn't see is only a guess, from how soon it ended.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +24,14 @@ pub struct Failed {
     pub seconds: u64,
     /// Why, when the log or the command says.
     pub why: Option<String>,
+    /// Seen ending without showing anything. Not: a Steam game that ended very soon while the
+    /// window wasn't open, which may have been someone quitting.
+    #[serde(default = "sure")]
+    pub sure: bool,
+}
+
+fn sure() -> bool {
+    true
 }
 
 fn file() -> PathBuf {
@@ -53,6 +66,90 @@ pub fn record(id: &str, failed: Option<Failed>) {
         let _ = fs::create_dir_all(crate::store::dir());
         let _ = fs::write(file(), serde_json::to_string_pretty(&all).unwrap_or_default());
     }
+}
+
+/// Unwatched, a Steam game that ended sooner than this may not have started; any later and it
+/// counts as played.
+const UNWATCHED_WITHIN: u64 = 30;
+
+/// A start and end of a game in Steam's log.
+#[derive(Debug, PartialEq)]
+struct SteamRun {
+    app: u32,
+    started: u64,
+    ended: u64,
+}
+
+/// Steam's log: the runs that ended, in order, and the apps running at its end.
+fn steam_runs(log: &str) -> (Vec<SteamRun>, std::collections::HashSet<u32>) {
+    let mut open: HashMap<u32, u64> = HashMap::new();
+    let mut runs = Vec::new();
+    for line in log.lines() {
+        // [2026-11-08 15:38:39] Game process added : AppID 422900 "..."
+        let Some((time, rest)) = line.strip_prefix('[').and_then(|l| l.split_once("] Game process ")) else { continue };
+        let (added, rest) = if let Some(r) = rest.strip_prefix("added") {
+            (true, r)
+        } else if let Some(r) = rest.strip_prefix("removed") {
+            (false, r)
+        } else {
+            continue;
+        };
+        let Some(app) = rest.split("AppID ").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|a| a.parse().ok()) else { continue };
+        let Some(at) = crate::library::unix_time(&time.replacen(' ', "T", 1)) else { continue };
+        if added {
+            open.insert(app, at);
+        } else if let Some(started) = open.remove(&app) {
+            runs.push(SteamRun { app, started, ended: at });
+        }
+    }
+    (runs, open.into_keys().collect())
+}
+
+/// What a Steam run says: Some(failure) or None (it worked, or can't be called a failure).
+fn verdict(run: &SteamRun, watched: bool, shown: bool) -> Option<Failed> {
+    let seconds = run.ended.saturating_sub(run.started);
+    let failed = |sure| Some(Failed { when: run.ended, seconds, why: None, sure });
+    match (watched, shown) {
+        (_, true) => None,
+        (true, false) if seconds < WITHIN => failed(true),
+        (false, false) if seconds < UNWATCHED_WITHIN => failed(false),
+        _ => None,
+    }
+}
+
+fn steam_seen_file() -> PathBuf {
+    crate::store::dir().join("steam-runs-seen")
+}
+
+/// Steam restarts a game by itself sometimes (a first process that ends for the real one): a run
+/// is judged once this long has passed with nothing after it.
+const SETTLE: u64 = 10;
+
+/// Records how the Steam games that ended since the last look went. `games` by Steam app id,
+/// `since`: when the window opened (a start before that wasn't watched), `shown`: games it saw
+/// show a picture. Returns the games judged, whose `shown` is used up.
+pub fn judge_steam(games: &HashMap<u32, String>, logs: &[PathBuf], since: u64, shown: &std::collections::HashSet<String>) -> Vec<String> {
+    let log: Vec<u8> = logs.iter().flat_map(|f| fs::read(f).unwrap_or_default()).collect();
+    let (runs, running) = steam_runs(&String::from_utf8_lossy(&log));
+    let seen: u64 = fs::read_to_string(steam_seen_file()).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+    let now = crate::store::now();
+    let mut latest = seen;
+    let mut judged = Vec::new();
+    // The next run of the same game tells whether this one was only Steam restarting it.
+    for (i, run) in runs.iter().enumerate().filter(|(_, r)| r.ended > seen) {
+        if running.contains(&run.app) || (now.saturating_sub(run.ended) < SETTLE && !runs[i + 1..].iter().any(|r| r.app == run.app)) {
+            continue;
+        }
+        latest = latest.max(run.ended);
+        let Some(id) = games.get(&run.app) else { continue };
+        record(id, verdict(run, run.started >= since, shown.contains(id)));
+        judged.push(id.clone());
+    }
+    if latest > seen {
+        let _ = fs::create_dir_all(crate::store::dir());
+        let _ = fs::write(steam_seen_file(), latest.to_string());
+    }
+    judged
 }
 
 /// How soon it ended, for a sentence: "right away", "after 4 s".
@@ -110,6 +207,38 @@ pub fn why(command: &[String], log: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steam_log() {
+        let log = "[2026-11-08 15:38:38] GameAction [AppID 422900, ActionID 1] : LaunchApp changed task to CreatingProcess with \"\"\n\
+                   [2026-11-08 15:38:39] Game process added : AppID 422900 \"WINEDLLOVERRIDES=x /steam-launch-wrapper -- /g.exe\", ProcID 1, IP 0.0.0.0:0\n\
+                   [2026-11-08 15:38:42] Game process updated : AppID 422900 \"x\"\n\
+                   [2026-11-08 15:38:50] Game process removed: AppID 422900 \"x\", ProcID 1\n\
+                   [2026-11-08 16:00:00] Game process added : AppID 570 \"x\"\n\
+                   [2026-11-08 16:01:00] Game process removed: AppID 9 \"never added\"\n";
+        let (runs, running) = steam_runs(log);
+        let at = |t: &str| crate::library::unix_time(t).unwrap();
+        assert_eq!(runs, [SteamRun { app: 422900, started: at("2026-11-08T15:38:39"), ended: at("2026-11-08T15:38:50") }]);
+        assert!(running.contains(&570) && running.len() == 1);
+    }
+
+    #[test]
+    fn steam_verdicts() {
+        let run = |seconds| SteamRun { app: 1, started: 1000, ended: 1000 + seconds };
+        // Watched: anything short with no picture failed; a picture means it started.
+        assert!(verdict(&run(90), true, false).is_some_and(|f| f.sure && f.seconds == 90));
+        assert_eq!(verdict(&run(5), true, true), None);
+        assert_eq!(verdict(&run(WITHIN), true, false), None);
+        // Not watched: only a very short one is a guess, never sure.
+        assert!(verdict(&run(5), false, false).is_some_and(|f| !f.sure));
+        assert_eq!(verdict(&run(UNWATCHED_WITHIN), false, false), None);
+    }
+
+    #[test]
+    fn old_records_were_sure() {
+        let f: Failed = serde_json::from_str(r#"{"when":1,"seconds":2,"why":null}"#).unwrap();
+        assert!(f.sure);
+    }
 
     #[test]
     fn reasons() {

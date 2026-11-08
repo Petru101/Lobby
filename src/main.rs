@@ -7,6 +7,7 @@ mod battlenet;
 mod clients;
 mod covers;
 mod drives;
+mod fixing;
 mod free;
 mod import;
 mod install;
@@ -46,6 +47,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby scan [--json]     look for games again and list them
        lobby list [--json]     list the games found before (scans the first time)
        lobby play <game>       start a game, by its id or name
+       lobby gamefix check|fix|undo <game>  what gamefix finds wrong with it, and its fix
        lobby how <game> [--json]  say how lobby would start it, without starting it (--json:
                                the exact command and folder)
        lobby install <game>    install a download, or a game you own on Epic or GOG
@@ -132,6 +134,7 @@ fn main() -> ExitCode {
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("import"), []) => import_now(args.iter().any(|a| a == "--dry")),
         (Some("own-wine-setup"), words) if !words.is_empty() => own_wine_setup(&words.join(" ")),
+        (Some("gamefix"), [what @ ("check" | "fix" | "undo"), game @ ..]) if !game.is_empty() => gamefix_game(what, &game.join(" ")),
         (Some("search"), []) => search_drives(),
         (Some("running"), []) => running_games(),
         (Some("move"), [game, into]) => move_game(game, into),
@@ -567,7 +570,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
         // Ended before anything of it showed: a failed start, with the likely reason.
         let failed = matches!(status, Ok((_, false))) && ran < starts::WITHIN;
         let why = failed.then(|| starts::why(command, &std::fs::read_to_string(&log).unwrap_or_default())).flatten();
-        starts::record(id, failed.then(|| starts::Failed { when: store::now(), seconds: ran, why: why.clone() }));
+        starts::record(id, failed.then(|| starts::Failed { when: store::now(), seconds: ran, why: why.clone(), sure: true }));
         if failed && !window_open() {
             let body = format!("It closed {} without showing anything. {}", starts::after(ran), why.unwrap_or_else(|| "Its page in Lobby has its log.".into()));
             let _ = std::process::Command::new("notify-send").args(["-a", "Lobby", "-i", "dialog-warning", &format!("{} didn't start", game.name), &body]).stdin(std::process::Stdio::null()).status();
@@ -860,7 +863,8 @@ fn how(query: &str) -> Result<(), String> {
         println!("\nOnline play: {warning}");
     }
     if let Some(f) = starts::failed(&game.id) {
-        println!("\nLast start failed: it ended {} without showing anything. {}\n  log: {}", starts::after(f.seconds), f.why.unwrap_or_default(), store::log_file(&game.id).display());
+        let without = if f.sure { " without showing anything" } else { "" };
+        println!("\nLast start failed: it ended {}{without}. {}\n  log: {}", starts::after(f.seconds), f.why.unwrap_or_default(), store::log_file(&game.id).display());
     }
     if game.kind != Kind::Game {
         return Ok(());
@@ -1111,6 +1115,26 @@ fn own_wine_setup(query: &str) -> Result<(), String> {
     let game = lib.find(query)?;
     let to = import::own_prefix(game, &lib.games)?;
     println!("{} has a Wine setup of its own now: {} (a copy of the shared one; its Proton can be picked).", game.name, to.display());
+    Ok(())
+}
+
+/// gamefix on a game, as its page has it.
+fn gamefix_game(what: &str, query: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?;
+    match what {
+        "check" => {
+            let Some(look) = fixing::look(game)? else { return Err(format!("{} isn't an installed game gamefix can check.", game.name)) };
+            println!("{}\n{}\n", look.summary(), look.text);
+            println!("{}", match &look.how {
+                fixing::How::Steam(_) => "lobby gamefix fix sets it right in Steam's settings (Steam has to be closed).".to_string(),
+                fixing::How::Menu { .. } => "lobby gamefix fix sets it up again, with any fixes it needs.".to_string(),
+                fixing::How::OnlyCheck { why, .. } => why.clone(),
+            });
+        }
+        "fix" => fixing::fix(game)?.iter().for_each(|l| println!("{l}")),
+        _ => fixing::undo(game)?.iter().for_each(|l| println!("{l}")),
+    }
     Ok(())
 }
 

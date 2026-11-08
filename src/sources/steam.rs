@@ -115,6 +115,11 @@ pub fn apps(home: &Home) -> Vec<Entry> {
     entries
 }
 
+/// Steam's logs of its games starting and ending, oldest first.
+pub fn run_logs(home: &Home) -> Vec<PathBuf> {
+    roots(home).iter().flat_map(|root| ["console_log.previous.txt", "console_log.txt"].map(|name| root.join("logs").join(name))).filter(|f| f.is_file()).collect()
+}
+
 /// When Steam started putting each app on this computer, from its own log of them.
 fn arrived(root: &Path) -> std::collections::HashMap<u32, u64> {
     let logs = root.join("logs");

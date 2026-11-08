@@ -27,6 +27,12 @@ fn is_gamefix_entry(e: &Entry) -> bool {
     e.made_by_gamefix()
 }
 
+/// Whether Play starts the game from an app-menu entry gamefix made (nothing comes before it in
+/// `plan_as_set_up`), so a new setup of gamefix's is what it runs.
+pub fn starts_from_gamefix(game: &Game) -> bool {
+    game.entries.iter().any(is_gamefix_entry) && store_plan(game).is_none() && crate::battlenet::game_folder(game).is_none() && crate::clients::needed(game).is_none()
+}
+
 /// How a game starts, from the entries it was found by, best first.
 /// How Play starts it: as it was set up, with a Proton that has moved since (a Steam library moved
 /// to another drive takes its Protons along) found again.
