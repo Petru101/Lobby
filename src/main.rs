@@ -48,6 +48,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby list [--json]     list the games found before (scans the first time)
        lobby play <game>       start a game, by its id or name
        lobby gamefix check|fix|undo <game>  what gamefix finds wrong with it, and its fix
+       lobby gamefix protons <game>, proton <tool> <game>  a Steam game's other Protons; switch
        lobby how <game> [--json]  say how lobby would start it, without starting it (--json:
                                the exact command and folder)
        lobby install <game>    install a download, or a game you own on Epic or GOG
@@ -134,7 +135,8 @@ fn main() -> ExitCode {
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("import"), []) => import_now(args.iter().any(|a| a == "--dry")),
         (Some("own-wine-setup"), words) if !words.is_empty() => own_wine_setup(&words.join(" ")),
-        (Some("gamefix"), [what @ ("check" | "fix" | "undo"), game @ ..]) if !game.is_empty() => gamefix_game(what, &game.join(" ")),
+        (Some("gamefix"), [what @ ("check" | "fix" | "undo" | "protons"), game @ ..]) if !game.is_empty() => gamefix_game(what, &game.join(" ")),
+        (Some("gamefix"), ["proton", tool, game @ ..]) if !game.is_empty() => gamefix_proton(tool, &game.join(" ")),
         (Some("search"), []) => search_drives(),
         (Some("running"), []) => running_games(),
         (Some("move"), [game, into]) => move_game(game, into),
@@ -1118,6 +1120,12 @@ fn own_wine_setup(query: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn gamefix_proton(tool: &str, query: &str) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    fixing::switch_proton(lib.find(query)?, tool)?.iter().for_each(|l| println!("{l}"));
+    Ok(())
+}
+
 /// gamefix on a game, as its page has it.
 fn gamefix_game(what: &str, query: &str) -> Result<(), String> {
     let lib = Library::load().map_or_else(scan, Ok)?;
@@ -1128,13 +1136,19 @@ fn gamefix_game(what: &str, query: &str) -> Result<(), String> {
             println!("{}\n{}\n", look.summary(), look.text);
             println!("Button on its page: {}", look.button().unwrap_or("none"));
             println!("{}", match &look.how {
-                fixing::How::Steam(_) => "Steam starts it, and Fix changes its settings there (Steam has to be closed).".to_string(),
+                fixing::How::Steam(_) => "Steam starts it: anything gamefix changes is in Steam's settings (Steam has to be closed).".to_string(),
                 fixing::How::Menu { .. } => "It starts from gamefix's app-menu entry.".to_string(),
                 fixing::How::FirstPlay(_) => "Its first Play sets it up, with any fixes it needs.".to_string(),
                 fixing::How::OnlyCheck { why, .. } => why.clone(),
             });
         }
         "fix" => fixing::fix(game)?.iter().for_each(|l| println!("{l}")),
+        "protons" => {
+            for c in fixing::protons(game)? {
+                println!("{}  ({}){}", c.label, c.tool, if c.suggested { "  suggested" } else { "" });
+                c.warnings.iter().for_each(|w| println!("  {w}"));
+            }
+        }
         _ => fixing::undo(game)?.iter().for_each(|l| println!("{l}")),
     }
     Ok(())

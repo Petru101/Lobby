@@ -320,6 +320,10 @@ const SCANNING: &str = "Looking for new games…";
 /// How many cards Continue playing shows.
 const RECENT_SHOWN: usize = 8;
 
+/// What a failed start offers, on its toast and its row.
+const FIX_IT: &str = "Fix it";
+const TRY_PROTON: &str = "Try another Proton";
+
 /// What a look for running games found.
 struct Looked {
     found: HashSet<String>,
@@ -929,6 +933,14 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         if std::env::var_os("LOBBY_SNAPSHOT_CLEANUP").is_some() {
             u.clean_up();
         }
+        // LOBBY_SNAPSHOT_REPORT=<id>: its Report a problem.
+        if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_REPORT") {
+            u.report_problem(&id);
+        }
+        // LOBBY_SNAPSHOT_PROTONS=<id>: its Try another Proton.
+        if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_PROTONS") {
+            u.try_proton(&id, Rc::default());
+        }
         // LOBBY_SNAPSHOT_FIX=<id>: presses Fix on that game (only ever with a test HOME).
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_FIX") {
             u.fix_game(&id, Rc::default());
@@ -1394,11 +1406,16 @@ impl Ui {
             let new = gio::spawn_blocking(move || {
                 let new: Vec<_> = crate::starts::all().into_iter().filter(|(_, f)| f.when > since).collect();
                 let latest = new.iter().map(|(_, f)| f.when).max();
-                let told: Vec<(String, crate::starts::Failed, bool)> = new
+                let told: Vec<(String, crate::starts::Failed, &'static str)> = new
                     .into_iter()
                     .filter(|(_, f)| f.sure)
                     .map(|(id, f)| {
-                        let offer = games.iter().find(|g| g.id == id).is_some_and(|g| matches!(crate::fixing::look(g), Ok(Some(l)) if l.offers_fix()));
+                        let look = games.iter().find(|g| g.id == id).and_then(|g| crate::fixing::look(g).ok().flatten());
+                        let offer = match look {
+                            Some(l) if l.offers_fix() => FIX_IT,
+                            Some(l) if !l.protons.is_empty() => TRY_PROTON,
+                            _ => "Why?",
+                        };
                         (id, f, offer)
                     })
                     .collect();
@@ -1412,18 +1429,143 @@ impl Ui {
             }
             for (id, f, offer) in new {
                 let name = u.game(&id).map(|g| g.name).unwrap_or(id.clone());
-                let toast = adw::Toast::builder().title(format!("{name} closed {} without showing anything", crate::starts::after(f.seconds))).button_label(if offer { "Fix it" } else { "Why?" }).timeout(10).build();
+                let toast = adw::Toast::builder().title(format!("{name} closed {} without showing anything", crate::starts::after(f.seconds))).button_label(offer).timeout(10).build();
                 let u2 = u.clone();
-                toast.connect_button_clicked(move |_| {
-                    if offer {
-                        u2.fix_game(&id, Rc::default());
-                    } else {
+                toast.connect_button_clicked(move |_| match offer {
+                    FIX_IT => u2.fix_game(&id, Rc::default()),
+                    TRY_PROTON => u2.try_proton(&id, Rc::default()),
+                    _ => {
                         u2.details(&id);
                     }
                 });
                 u.toasts.add_toast(toast);
             }
         });
+    }
+
+    /// Report a problem, as gamefix's right-click menu has it: what the person writes, then
+    /// everything that would be sent, which they send or don't.
+    fn report_problem(self: &Rc<Self>, id: &str) {
+        let (u, id) = (self.clone(), id.to_string());
+        glib::spawn_future_local(async move {
+            let Some(game) = u.game(&id) else { return };
+            let g = game.clone();
+            let report = gio::spawn_blocking(move || crate::fixing::problem_report(&g)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+            match report {
+                Ok(report) => u.report_dialog(&game.name, report),
+                Err(e) => u.alert("gamefix can't report on it", &e),
+            }
+        });
+    }
+
+    fn report_dialog(self: &Rc<Self>, name: &str, report: gamefix::feedback::Report) {
+        let margins = |b: gtk::builders::BoxBuilder| b.orientation(gtk::Orientation::Vertical).spacing(12).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
+        let text_box = |text: &gtk::TextView, height: i32| {
+            text.set_wrap_mode(gtk::WrapMode::WordChar);
+            text.set_top_margin(8);
+            text.set_bottom_margin(8);
+            text.set_left_margin(8);
+            text.set_right_margin(8);
+            let scrolled = gtk::ScrolledWindow::builder().child(text).min_content_height(height).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+            scrolled.add_css_class("card");
+            scrolled
+        };
+        let dialog = adw::Dialog::builder().title(format!("Report a problem with {name}")).content_width(600).content_height(560).build();
+
+        // What the person writes.
+        let message = gtk::TextView::builder().accepts_tab(false).build();
+        let contact = gtk::Entry::builder().placeholder_text("Optional: an email address, a Reddit or Discord name").build();
+        let along = gtk::Label::builder().label("gamefix's report on the game and what it changed for it go along with it. You see everything before it's sent.").wrap(true).xalign(0.0).build();
+        along.add_css_class("dim-label");
+        let next = gtk::Button::builder().label("See what's sent").halign(gtk::Align::End).sensitive(false).build();
+        next.add_css_class("suggested-action");
+        let write = margins(gtk::Box::builder());
+        write.append(&gtk::Label::builder().label("What went wrong, or what would you like to tell the developer?").wrap(true).xalign(0.0).build());
+        write.append(&text_box(&message, 160));
+        write.append(&along);
+        write.append(&gtk::Label::builder().label("If you'd like an answer, how can the developer reach you?").wrap(true).xalign(0.0).build());
+        write.append(&contact);
+        write.append(&next);
+
+        // Everything that goes.
+        let preview = gtk::TextView::builder().editable(false).monospace(true).build();
+        let back = gtk::Button::builder().label("Back").build();
+        let send = gtk::Button::builder().label("Send").build();
+        send.add_css_class("suggested-action");
+        let spacer = gtk::Box::builder().hexpand(true).build();
+        let buttons = gtk::Box::builder().spacing(6).build();
+        buttons.append(&back);
+        buttons.append(&spacer);
+        buttons.append(&send);
+        let see = margins(gtk::Box::builder());
+        see.append(&gtk::Label::builder().label("This is everything that's sent, with your home folder, user name and Steam account number taken out:").wrap(true).xalign(0.0).build());
+        see.append(&text_box(&preview, 300));
+        see.append(&gtk::LinkButton::builder().label("What the server keeps").uri(gamefix::feedback::privacy_url()).halign(gtk::Align::Start).build());
+        see.append(&buttons);
+
+        let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::SlideLeftRight).build();
+        stack.add_named(&write, Some("write"));
+        stack.add_named(&see, Some("see"));
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::new());
+        view.set_content(Some(&stack));
+        dialog.set_child(Some(&view));
+
+        let written = |m: &gtk::TextView| {
+            let b = m.buffer();
+            b.text(&b.start_iter(), &b.end_iter(), false).to_string()
+        };
+        let n = next.clone();
+        message.buffer().connect_changed(move |b| n.set_sensitive(!b.text(&b.start_iter(), &b.end_iter(), false).trim().is_empty()));
+        let report = Rc::new(RefCell::new(Some(report)));
+        let (r, m, c, p, st) = (report.clone(), message.clone(), contact.clone(), preview.clone(), stack.clone());
+        next.connect_clicked(move |_| {
+            let mut report = r.borrow_mut();
+            let Some(report) = report.as_mut() else { return };
+            report.message = written(&m);
+            report.contact = c.text().to_string();
+            p.buffer().set_text(&report.preview());
+            st.set_visible_child_name("see");
+        });
+        let st = stack.clone();
+        back.connect_clicked(move |_| st.set_visible_child_name("write"));
+        let (u, d, report_slot) = (self.clone(), dialog.clone(), report);
+        send.connect_clicked(move |button| {
+            let Some(report) = report_slot.borrow_mut().take() else { return };
+            button.set_sensitive(false);
+            button.set_label("Sending…");
+            let (u, d, button, slot) = (u.clone(), d.clone(), button.clone(), report_slot.clone());
+            glib::spawn_future_local(async move {
+                let (report, sent) = gio::spawn_blocking(move || {
+                    let sent = report.send();
+                    (report, sent)
+                })
+                .await
+                .expect("sending a report doesn't panic");
+                match sent {
+                    Ok(()) => {
+                        d.close();
+                        u.alert("Sent, thank you", &format!("Its id is {}: mention it if you write about it elsewhere.", report.id));
+                    }
+                    Err(e) => {
+                        slot.replace(Some(report));
+                        button.set_label("Send");
+                        button.set_sensitive(true);
+                        u.alert("It wasn't sent", &e);
+                    }
+                }
+            });
+        });
+        // LOBBY_SNAPSHOT_REPORT_SEND=<message>: writes it and goes on to what's sent; pressed too
+        // when GAMEFIX_SERVER names a test server, and never otherwise.
+        if let Ok(text) = std::env::var("LOBBY_SNAPSHOT_REPORT_SEND") {
+            message.buffer().set_text(&text);
+            next.emit_clicked();
+            if std::env::var_os("GAMEFIX_SERVER").is_some() {
+                send.emit_clicked();
+            }
+        }
+        dialog.present(Some(&self.window));
     }
 
     /// Asks to close Steam when it has to be, and closes it: false when it stays open.
@@ -1478,6 +1620,56 @@ impl Ui {
             let g = game.clone();
             let result = gio::spawn_blocking(move || crate::fixing::fix(&g)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
             u.after_gamefix(&id, &game.name, result, "gamefix made these changes", &page);
+        });
+    }
+
+    /// After a failed start of a Steam game: the Protons it can try, with what to know about each
+    /// before picking it. Only ever when pressed; Steam closes as for Fix.
+    fn try_proton(self: &Rc<Self>, id: &str, page: Rc<RefCell<Option<adw::Dialog>>>) {
+        let (u, id) = (self.clone(), id.to_string());
+        glib::spawn_future_local(async move {
+            let Some(game) = u.game(&id) else { return };
+            let g = game.clone();
+            let choices = gio::spawn_blocking(move || crate::fixing::protons(&g)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+            let choices = match choices {
+                Ok(c) if c.is_empty() => return u.alert("No other Proton to try", "Steam has no other Proton installed that this game could use."),
+                Ok(c) => c,
+                Err(e) => return u.alert("It can't try another Proton", &e),
+            };
+            let group = adw::PreferencesGroup::builder().description("It's Steam's own setting for this game, and nothing of the game's changes. The first one is the best to try. Undo on its page puts back what it had.").build();
+            let dialog = adw::Dialog::builder().title(format!("Try another Proton for {}", game.name)).content_width(560).build();
+            for c in choices {
+                let mut notes = Vec::new();
+                if c.suggested {
+                    notes.push("ProtonDB's reports say it runs with this one.".to_string());
+                }
+                notes.extend(c.warnings);
+                let row = adw::ActionRow::builder().title(&c.label).subtitle(notes.join("\n")).use_markup(false).build();
+                let button = gtk::Button::builder().label("Try this one").valign(gtk::Align::Center).build();
+                let (u, game, id, page, d, tool) = (u.clone(), game.clone(), id.clone(), page.clone(), dialog.clone(), c.tool);
+                button.connect_clicked(move |_| {
+                    d.close();
+                    let (u, game, id, page, tool) = (u.clone(), game.clone(), id.clone(), page.clone(), tool.clone());
+                    glib::spawn_future_local(async move {
+                        if !u.steam_closed(&game).await {
+                            return;
+                        }
+                        let g = game.clone();
+                        let result = gio::spawn_blocking(move || crate::fixing::switch_proton(&g, &tool)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
+                        u.after_gamefix(&id, &game.name, result, "gamefix made this change", &page);
+                    });
+                });
+                row.add_suffix(&button);
+                group.add(&row);
+            }
+            let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
+            content.append(&group);
+            let view = adw::ToolbarView::new();
+            view.add_top_bar(&adw::HeaderBar::new());
+            let scrolled = gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+            view.set_content(Some(&scrolled));
+            dialog.set_child(Some(&view));
+            dialog.present(Some(&u.window));
         });
     }
 
@@ -3873,8 +4065,9 @@ impl Ui {
             why.map_or(text.clone(), |w| format!("{text} {w}"))
         });
         // The fix offered beside a failed start, once gamefix's check says there is one.
-        let fix_failed = gtk::Button::builder().label("Fix it").valign(gtk::Align::Center).visible(false).build();
+        let fix_failed = gtk::Button::builder().label(FIX_IT).valign(gtk::Align::Center).visible(false).build();
         fix_failed.add_css_class("suggested-action");
+        let proton_failed = gtk::Button::builder().label(TRY_PROTON).valign(gtk::Align::Center).visible(false).build();
         for (warning, log) in crate::drives::warnings(&game, &crate::drives::mounts()).into_iter().map(|w| (w, false)).chain(online.into_iter().map(|w| (w, false))).chain(failed.map(|w| (w, true))) {
             let icon = gtk::Image::builder().icon_name("dialog-warning-symbolic").valign(gtk::Align::Start).build();
             let text = gtk::Label::builder().label(&warning).wrap(true).xalign(0.0).hexpand(true).build();
@@ -3890,12 +4083,13 @@ impl Ui {
                     button.connect_clicked(move |_| gtk::FileLauncher::new(Some(&gio::File::for_path(&file))).launch(Some(&w), gio::Cancellable::NONE, |_| {}));
                     row.append(&button);
                 }
+                row.append(&proton_failed);
                 row.append(&fix_failed);
             }
             content.append(&row);
         }
         content.append(&info);
-        let fixes = self.gamefix_group(&game, &dialog_slot, &fix_failed);
+        let fixes = self.gamefix_group(&game, &dialog_slot, &fix_failed, &proton_failed);
         if game.kind == Kind::Game {
             content.append(&fixes);
         }
@@ -3983,15 +4177,15 @@ impl Ui {
     /// Show frame rate on a game's page: MangoHud's overlay when Lobby starts it.
     /// What gamefix finds wrong with the game and its fix, as its right-click menu has them; the
     /// check runs in the background. `fix_failed`: the button beside a failed start, shown when
-    /// the fix is worth offering.
-    fn gamefix_group(self: &Rc<Self>, game: &Game, page: &Rc<RefCell<Option<adw::Dialog>>>, fix_failed: &gtk::Button) -> adw::PreferencesGroup {
+    /// the fix is worth offering; `proton_failed`, when it has another Proton to try.
+    fn gamefix_group(self: &Rc<Self>, game: &Game, page: &Rc<RefCell<Option<adw::Dialog>>>, fix_failed: &gtk::Button, proton_failed: &gtk::Button) -> adw::PreferencesGroup {
         let group = adw::PreferencesGroup::builder().title("gamefix").build();
         let row = adw::ActionRow::builder().title("Checking its files…").use_markup(false).subtitle_selectable(true).build();
         group.add(&row);
         if game.kind != Kind::Game {
             return group;
         }
-        let (u, id, game, page, fix_failed, shown) = (self.clone(), game.id.clone(), game.clone(), page.clone(), fix_failed.clone(), group.clone());
+        let (u, id, game, page, fix_failed, proton_failed, shown) = (self.clone(), game.id.clone(), game.clone(), page.clone(), fix_failed.clone(), proton_failed.clone(), group.clone());
         glib::spawn_future_local(async move {
             let look = gio::spawn_blocking(move || crate::fixing::look(&game)).await.unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
             let look = match look {
@@ -4033,6 +4227,16 @@ impl Ui {
                 fix_failed.connect_clicked(move |_| u.fix_game(&id, page.clone()));
                 fix_failed.set_visible(true);
             }
+            if !look.protons.is_empty() {
+                let (u, id, page) = (u.clone(), id.clone(), page.clone());
+                proton_failed.connect_clicked(move |_| u.try_proton(&id, page.clone()));
+                proton_failed.set_visible(true);
+            }
+            let report = adw::ActionRow::builder().title("Report a problem").subtitle("Tell gamefix's developer what went wrong. You see everything before it's sent.").build();
+            let button = gtk::Button::builder().label("Report…").valign(gtk::Align::Center).build();
+            button.connect_clicked(move |_| u.report_problem(&id));
+            report.add_suffix(&button);
+            shown.add(&report);
         });
         group
     }

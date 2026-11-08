@@ -5,7 +5,7 @@
 
 use crate::launch::{self, Plan};
 use crate::library::{Entry, Game, Kind, Source};
-use gamefix::setup::{self, Targets};
+use gamefix::setup::{self, ProtonChoice, Targets};
 use gamefix::steam::Steam;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,8 +37,14 @@ pub struct Look {
     pub set_up: bool,
     /// Its last start failed.
     pub failed: bool,
+    /// gamefix changes nothing about how this game starts (an anti-cheat, Steam's containers).
+    pub left_alone: bool,
+    /// All gamefix has changed for it is which Proton Steam uses.
+    pub only_proton: bool,
     /// Steam's settings hold a fix of gamefix's for it, which can be taken back.
     pub can_undo: bool,
+    /// The Protons it can try, after a failed start of a Steam game's Windows build.
+    pub protons: Vec<ProtonChoice>,
 }
 
 impl Look {
@@ -53,7 +59,7 @@ impl Look {
     pub fn button(&self) -> Option<&'static str> {
         if self.offers_fix() {
             Some("Fix")
-        } else if self.how.can_fix() && self.set_up && self.failed {
+        } else if self.how.can_fix() && self.set_up && self.failed && !self.left_alone {
             Some("Set up again")
         } else {
             None
@@ -61,7 +67,9 @@ impl Look {
     }
 
     pub fn summary(&self) -> &'static str {
-        if self.set_up {
+        if self.only_proton {
+            "gamefix changed which Proton it uses"
+        } else if self.set_up {
             "gamefix's fixes are in place"
         } else if self.problems {
             "gamefix found problems"
@@ -158,37 +166,22 @@ pub fn look(game: &Game) -> Result<Option<Look>, String> {
         How::FirstPlay(_) => "Play",
         How::Menu { .. } | How::OnlyCheck { .. } => "gamefix",
     };
-    let (text, advice) = for_the_page(&report.render(&read), word);
-    let others = report.problems.iter().any(|p| !matches!(p, gamefix::check::Problem::NoLinuxBuild));
-    // gamefix leaves a game alone when its anti-cheat is what stops it.
-    let blocked = text.contains(ANTI_CHEAT_WINS);
-    let can_undo = matches!(how, How::Steam(_)) && setup::touches_steam(&read);
-    Ok(Some(Look { problems: others || advice || blocked, fixable: (others || advice) && !blocked, set_up: setup::record_path(&read).exists(), failed: crate::starts::failed(&game.id).is_some(), can_undo, how, text }))
+    let said = report.for_app(&read, word);
+    let steam = matches!(how, How::Steam(_));
+    let can_undo = steam && setup::touches_steam(&read);
+    let failed = crate::starts::failed(&game.id).is_some();
+    // Only after a failed start: it may be nothing to do with Proton, and the person picks.
+    let protons = if steam && failed { setup::proton_choices(&read, &report).unwrap_or_default() } else { Vec::new() };
+    let record = fs::read_to_string(setup::record_path(&read)).ok();
+    let only_proton = record.as_deref().is_some_and(|r| r.lines().next().is_some() && r.lines().all(|l| l.starts_with("steam-compat\t")));
+    Ok(Some(Look { problems: said.problems, fixable: said.fixable, left_alone: report.hands_off.is_some(), set_up: record.is_some(), failed, only_proton, can_undo, protons, how, text: said.text }))
 }
 
-const NO_LINUX: &str = "✗ There is no Linux version of this game.";
-const ANTI_CHEAT_WINS: &str = "othing on this side gets past that";
-
-/// A report as the page says it, and whether what it says about a Windows game is advice to
-/// change something (ProtonDB's Proton or options), not only how gamefix starts such a game.
-/// Without the heading about where the game is, and without "no Linux version" with its advice
-/// to run it with Proton, which every Windows game would have and every start here does already.
-/// gamefix's advice names its commands; here it's `word`: what does it on this game's page.
-fn for_the_page(report: &str, word: &str) -> (String, bool) {
-    let body = report.split_once("\n\n").map_or(report, |(_, rest)| rest).trim();
-    let mut advice = false;
-    let blocks: Vec<String> = body
-        .split("\n\n")
-        .filter_map(|block| {
-            let Some(rest) = block.strip_prefix(NO_LINUX) else { return Some(block.to_string()) };
-            let kept: Vec<&str> = rest.lines().filter(|l| !l.is_empty() && !l.contains("Steam runs it with Proton. ProtonDB's reports don't name") && !l.contains("that run it better than Steam's own setup") && !l.trim_start().starts_with("Fix: run ")).collect();
-            advice = kept.iter().any(|l| l.trim_start().starts_with("Fix: gamefix setup"));
-            (!kept.is_empty()).then(|| kept.iter().map(|l| l.trim_start()).collect::<Vec<_>>().join("\n"))
-        })
-        .collect();
-    let text = blocks.join("\n\n");
-    let text = if text.is_empty() { "If it still doesn't start, the game has to run to show why: its files look fine.".to_string() } else { text };
-    (text.replace(" (--steam: to Steam)", "").replace("gamefix setup --steam", word).replace("gamefix setup", word).replace("Fix: Fix", "Fix"), advice)
+/// A report to gamefix's developer about the game, with gamefix's check of it. The caller adds
+/// what the person wrote, shows them `preview`, then calls `send`.
+pub fn problem_report(game: &Game) -> Result<gamefix::feedback::Report, String> {
+    let how = how(game, &launch::plan(game)).ok_or_else(|| format!("{} isn't an installed game gamefix can check.", game.name))?;
+    Ok(gamefix::feedback::Report::about(&read(game, &how)?))
 }
 
 /// Whether Steam has to close before gamefix can change this game's settings.
@@ -230,6 +223,25 @@ pub fn fix(game: &Game) -> Result<Vec<String>, String> {
         Some(How::OnlyCheck { why, .. }) => Err(why),
         None => Err(format!("{} isn't an installed game gamefix can fix.", game.name)),
     }
+}
+
+/// The Protons a Steam game's Windows build can be switched to, best to try first.
+pub fn protons(game: &Game) -> Result<Vec<ProtonChoice>, String> {
+    let how = steam_how(game)?;
+    let read = read(game, &how)?;
+    setup::proton_choices(&read, &gamefix::check::check(&read, &gamefix::system::System::load()))
+}
+
+/// Sets a Steam game to one of `protons`. Steam has to be closed.
+pub fn switch_proton(game: &Game, tool: &str) -> Result<Vec<String>, String> {
+    let how = steam_how(game)?;
+    let read = read(game, &how)?;
+    let lines = setup::switch_proton(&read, &gamefix::check::check(&read, &gamefix::system::System::load()), tool)?;
+    Ok(lines.into_iter().map(|l| format!("✓ {l}")).chain(["Press Play to try it.".to_string()]).collect())
+}
+
+fn steam_how(game: &Game) -> Result<How, String> {
+    steam_folder(game).map(How::Steam).ok_or_else(|| "It isn't a Steam game: Steam's Proton setting doesn't start it.".to_string())
 }
 
 /// Takes back gamefix's changes to a Steam game's settings.
@@ -287,38 +299,9 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    fn for_the_page_fix(report: &str) -> (String, bool) {
-        for_the_page(report, "Fix")
-    }
-
-    #[test]
-    fn the_report_as_the_page_says_it() {
-        let head = "G  (/g)\n  Runs:  g.exe (Windows, 64-bit)\n\n";
-        // Every Windows game's first problem, with nothing further to say.
-        let (text, advice) = for_the_page_fix(&format!("{head}{NO_LINUX}\n    Fix: run g.exe with Proton: gamefix setup adds it to the app menu that way (--steam: to Steam).\n"));
-        assert!(text.contains("its files look fine") && !advice);
-        let (text, advice) = for_the_page_fix(&format!("{head}{NO_LINUX}\n    Steam runs it with Proton. ProtonDB's reports don't name a Proton or launch options\n    that run it better than Steam's own setup.\n"));
-        assert!(text.contains("its files look fine") && !advice);
-        // A Proton ProtonDB's reports name is worth the button.
-        let (text, advice) = for_the_page_fix(&format!("{head}{NO_LINUX}\n    On ProtonDB it worked with GE for 9 players.\n    Fix: gamefix setup --steam sets it to GE.\n"));
-        assert_eq!(text, "On ProtonDB it worked with GE for 9 players.\nFix sets it to GE.");
-        assert!(advice);
-        // Other problems stay, in the page's words.
-        let (text, advice) = for_the_page_fix(&format!("{head}{NO_LINUX}\n    Fix: run g.exe with Proton: gamefix setup adds it to the app menu that way.\n\n✗ It brings its own ddraw.dll.\n    Fix (at launch): WINEDLLOVERRIDES=ddraw=n,b; gamefix setup adds it.\n"));
-        assert_eq!(text, "✗ It brings its own ddraw.dll.\n    Fix (at launch): WINEDLLOVERRIDES=ddraw=n,b; Fix adds it.");
-        assert!(!advice);
-        // A game with no problems keeps gamefix's own sentence.
-        let (text, _) = for_the_page_fix("G  (/g)\n\nNo problems found in its files (3 libraries checked).\n");
-        assert_eq!(text, "No problems found in its files (3 libraries checked).");
-        // How gamefix starts an Unreal game isn't a problem, and a first Play does it.
-        let (text, advice) = for_the_page(&format!("{head}{NO_LINUX}\n    Fix: run g.exe with Proton: gamefix setup adds it.\n• g.exe is Unreal's launcher.\n    gamefix setup starts the game's program directly.\n"), "Play");
-        assert_eq!(text, "• g.exe is Unreal's launcher.\nPlay starts the game's program directly.");
-        assert!(!advice);
-    }
-
     #[test]
     fn a_game_that_works_gets_no_button() {
-        let look = |how, fixable, set_up, failed| Look { how, text: String::new(), problems: fixable, fixable, set_up, failed, can_undo: false };
+        let look = |how, fixable, set_up, failed| Look { how, text: String::new(), problems: fixable, fixable, set_up, failed, left_alone: false, only_proton: false, can_undo: false, protons: Vec::new() };
         let steam = || How::Steam(PathBuf::from("/g"));
         let menu = || How::Menu { target: PathBuf::from("/g"), name: "G".into() };
         assert_eq!(look(steam(), false, false, false).button(), None);
@@ -327,6 +310,10 @@ mod tests {
         assert_eq!(look(menu(), true, true, false).button(), None);
         assert_eq!(look(menu(), false, true, true).button(), Some("Set up again"));
         assert_eq!(look(How::FirstPlay(PathBuf::from("/g")), true, false, true).button(), None);
+        // What gamefix leaves alone can't be set up again.
+        let mut alone = look(menu(), false, true, true);
+        alone.left_alone = true;
+        assert_eq!(alone.button(), None);
     }
 
     #[test]
