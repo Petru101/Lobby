@@ -35,6 +35,7 @@ thread_local! {
 pub fn run(claim: bool) -> glib::ExitCode {
     // X11's name for the window, which an AppImage's would make "AppRun.wrapped".
     glib::set_prgname(Some(APP_ID));
+    covers::give_memory_back();
     crate::appimage::enter();
     crate::appimage::menu_entry();
     // A checking run (LOBBY_SNAPSHOT) is a copy of its own: otherwise it would hand over to the
@@ -900,6 +901,16 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
                 eprintln!("refill: scrolled to {:.0} after", adj.value());
             }
         }
+        // LOBBY_SNAPSHOT_SCROLLS=<px>,<px>...: the library scrolled to each in turn, 0.6 s apart.
+        if let Ok(steps) = std::env::var("LOBBY_SNAPSHOT_SCROLLS") {
+            if let Some(adj) = u.flow.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>().map(|s| s.vadjustment()) {
+                for px in steps.split(',').filter_map(|p| p.parse::<f64>().ok()) {
+                    adj.set_value(px);
+                    glib::timeout_future(std::time::Duration::from_millis(600)).await;
+                    eprintln!("scrolled to {:.0} of {:.0}", adj.value(), adj.upper());
+                }
+            }
+        }
         if std::env::var_os("LOBBY_SNAPSHOT_ACCOUNTS").is_some() {
             u.accounts();
         }
@@ -1053,6 +1064,7 @@ impl Ui {
             }
         }
         self.flow.invalidate_sort();
+        covers::look_again();
     }
 
     /// What a controller does (`pad`): only while this is the active window.
@@ -1290,6 +1302,7 @@ impl Ui {
             return;
         }
         self.flow.invalidate_filter();
+        covers::look_again();
         let lib = self.lib.borrow();
         // Continue playing: on Installed and Library, while not searching.
         let recent: Vec<String> = if page == Page::Downloads || !self.search.text().is_empty() {
@@ -1845,6 +1858,7 @@ impl Ui {
         }
         drop(facts);
         self.flow.invalidate_sort();
+        covers::look_again();
     }
 
     /// Measures the sizes not known yet in the background (the first time can take a minute or
@@ -3530,7 +3544,7 @@ impl Ui {
                 row.set_subtitle("Sign in to the Steam app to see your Steam games here");
                 let button = gtk::Button::builder().label("Open Steam").valign(gtk::Align::Center).build();
                 button.connect_clicked(|_| {
-                    let _ = crate::launch::start(&["steam".to_string()], None, &crate::store::log_file("steam"));
+                    let _ = crate::launch::start("Steam", &["steam".to_string()], None, &crate::store::log_file("steam"));
                 });
                 row.add_suffix(&button);
             }
@@ -3926,7 +3940,7 @@ impl Ui {
                 let final_command = launch::final_command(&game, command, protect);
                 // Steam may not start it: played once it's seen running (`look_for_running`).
                 let steam = final_command.as_ref().is_ok_and(|c| c.first().is_some_and(|w| w == "steam"));
-                match final_command.and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))) {
+                match final_command.and_then(|command| launch::start(&game.name, &command, cwd.as_deref(), &store::log_file(&game.id))) {
                     Ok(()) => {
                         self.toast(&format!("Starting {}…", game.name));
                         if !steam {
@@ -4040,7 +4054,7 @@ impl Ui {
                     .unwrap_or_else(|_| Err("gamefix stopped with an error.".into()));
                     match result {
                         Ok((lines, Some(entry))) => {
-                            let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::final_command(&game, command, true).and_then(|command| launch::start(&command, cwd.as_deref(), &store::log_file(&game.id))));
+                            let started = std::fs::read_to_string(&entry).ok().and_then(|t| launch::desktop_exec(&t)).ok_or("gamefix's entry has no command".to_string()).and_then(|(command, cwd)| launch::final_command(&game, command, true).and_then(|command| launch::start(&game.name, &command, cwd.as_deref(), &store::log_file(&game.id))));
                             let mut e = Entry::new(Source::AppMenu, game.name.clone());
                             e.keys.push(Key::Desktop(entry));
                             u.played(&game.id, Some(e));
@@ -4919,45 +4933,41 @@ fn cover_widget(g: &Game, width: i32, height: i32) -> gtk::Overlay {
     let tint = g.name.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 6;
     placeholder.add_css_class(&format!("tint-{tint}"));
     let inner = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).valign(gtk::Align::Center).vexpand(true).margin_start(14).margin_end(14).build();
-    if let Some(icon) = g.icon() {
-        let image = gtk::Image::from_file(icon);
-        image.set_pixel_size(64);
-        inner.append(&image);
-    }
     let label = gtk::Label::builder().label(&g.name).wrap(true).wrap_mode(gtk::pango::WrapMode::WordChar).justify(gtk::Justification::Center).lines(5).ellipsize(gtk::pango::EllipsizeMode::End).max_width_chars(8).build();
     label.add_css_class("cover-name");
     inner.append(&label);
     placeholder.append(&inner);
     overlay.set_child(Some(&placeholder));
-    if let Some(cover) = g.cover() {
-        add_cover(&overlay, cover, width, height);
+    // Reading an icon takes memory too: only for a card that shows it.
+    let icon = g.icon().map(|i| i.to_owned());
+    let show_icon = move || {
+        if let Some(icon) = icon {
+            let image = gtk::Image::from_file(icon);
+            image.set_pixel_size(64);
+            inner.prepend(&image);
+        }
+    };
+    match g.cover() {
+        Some(cover) => add_cover_or(&overlay, cover, width, height, Some(Box::new(show_icon))),
+        None => show_icon(),
     }
     overlay
 }
 
-/// The cover over what's under it, once it's read. Both pictures are made at once, so overlays
-/// added after (Play) stay on top. A cover wider than the card (itch.io's are 315x250) is shown
-/// whole over a blurred copy of itself.
+/// The cover over what's under it, once it's near the screen. Both pictures are made at once, so
+/// overlays added after (Play) stay on top. A cover wider than the card (itch.io's are 315x250)
+/// is shown whole over a blurred copy of itself.
 fn add_cover(overlay: &gtk::Overlay, cover: &str, width: i32, height: i32) {
-    {
-        let backdrop = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).visible(false).build();
-        backdrop.add_css_class("cover-backdrop");
-        let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).visible(false).build();
-        overlay.add_overlay(&backdrop);
-        overlay.add_overlay(&picture);
-        let ratio = width as f64 / height as f64;
-        covers::load(cover.to_string(), move |texture| {
-            let Some(texture) = texture else { return };
-            let wide = texture.width() as f64 / texture.height() as f64 > ratio * 1.15;
-            if wide {
-                backdrop.set_paintable(Some(&texture));
-                backdrop.set_visible(true);
-                picture.set_content_fit(gtk::ContentFit::Contain);
-            }
-            picture.set_paintable(Some(&texture));
-            picture.set_visible(true);
-        });
-    }
+    add_cover_or(overlay, cover, width, height, None);
+}
+
+fn add_cover_or(overlay: &gtk::Overlay, cover: &str, width: i32, height: i32, unreadable: Option<Box<dyn FnOnce()>>) {
+    let backdrop = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).visible(false).build();
+    backdrop.add_css_class("cover-backdrop");
+    let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Cover).can_shrink(true).visible(false).build();
+    overlay.add_overlay(&backdrop);
+    overlay.add_overlay(&picture);
+    covers::show(overlay, backdrop, picture, cover, width as f64 / height as f64, unreadable);
 }
 
 /// What to run off the main thread (a drive may have to wake up): the ids of the downloads
