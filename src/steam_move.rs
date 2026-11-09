@@ -106,5 +106,5 @@ pub fn restart_steam() -> Result<(), String> {
     if !steam.shut_down() {
         return Err("Steam didn't close within a minute: restart it yourself to see the game.".into());
     }
-    std::os::unix::process::CommandExt::process_group(&mut std::process::Command::new("steam"), 0).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| e.to_string())
+    crate::launch::start("Steam", &["steam".to_string()], None, &crate::store::log_file("steam"))
 }

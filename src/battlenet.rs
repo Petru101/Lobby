@@ -246,7 +246,7 @@ pub fn start(game: &crate::library::Game, folder: &Path, launch: &str, log: &Pat
     if !known {
         add(folder)?;
     }
-    crate::launch::start(&crate::sandbox::wrap(game, command(launch)), None, log)
+    crate::launch::start(&game.name, &crate::sandbox::wrap(game, command(launch)), None, log)
 }
 
 /// Whether a process runs in a sandbox: a PID namespace other than lobby's own.

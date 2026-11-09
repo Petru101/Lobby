@@ -748,8 +748,49 @@ pub fn exec_words(exec: &str) -> Vec<String> {
     out
 }
 
+/// The name of the group `name` runs in. KDE's system monitor shows the part between the last
+/// two dashes, undoing each \\xNN as one Latin-1 letter, so other letters can't be kept. "steam"
+/// is Steam's own app-menu entry: its name and icon.
+fn scope_name(name: &str, suffix: &str) -> String {
+    let mut id = String::new();
+    for c in name.trim().chars().take(80) {
+        match c {
+            c if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':') => id.push(c),
+            '\\' => {}
+            c if c.is_control() || c as u32 > 0xff => {}
+            c => id.push_str(&format!("\\x{:02x}", c as u32)),
+        }
+    }
+    if id.is_empty() {
+        id.push_str("game");
+    }
+    format!("app-lobby-{id}-{suffix}.scope")
+}
+
+/// The command as an app of its own for the desktop, so a system monitor lists Steam and each
+/// game by name. A program belongs to whoever started it, whatever happens to that later: Steam
+/// started from Lobby's window, and every game Steam starts, was counted as Lobby, even with
+/// Lobby closed. Without systemd, or a program that isn't there (so that spawning says so), the
+/// command stays as it is. LOBBY_SAME_GROUP=1 keeps it in the caller's group, for a test run
+/// that stops its game by stopping its own group.
+fn own_app(name: &str, command: &[String]) -> Vec<String> {
+    let Some(program) = command.first() else { return Vec::new() };
+    let systemd = std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|d| Path::new(&d).join("systemd/private").exists()) && program_on_path("systemd-run").is_some();
+    let there = if program.contains('/') { Path::new(program).is_file() } else { program_on_path(program).is_some() };
+    if !systemd || !there || std::env::var_os("LOBBY_SAME_GROUP").is_some() || std::env::var_os("LOBBY_SNAPSHOT").is_some() {
+        return command.to_vec();
+    }
+    let steam = Path::new(program).file_name().is_some_and(|f| f == "steam");
+    let suffix = format!("{:x}{:x}", std::process::id(), crate::store::now());
+    let unit = scope_name(if steam { "steam" } else { name }, &suffix);
+    let description = format!("--description={}", if steam { "Steam" } else { name });
+    ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--slice=app.slice", &format!("--unit={unit}"), &description, "--"].iter().map(|s| s.to_string()).chain(command.iter().cloned()).collect()
+}
+
 /// Starts the command on its own (it outlives lobby), its output going to the game's log.
-pub fn start(command: &[String], cwd: Option<&Path>, log: &Path) -> Result<(), String> {
+/// `name`: what it's called in a system monitor.
+pub fn start(name: &str, command: &[String], cwd: Option<&Path>, log: &Path) -> Result<(), String> {
+    let command = own_app(name, command);
     let (program, args) = command.split_first().ok_or("empty command")?;
     fs::create_dir_all(log.parent().unwrap()).map_err(|e| e.to_string())?;
     let out = fs::File::create(log).map_err(|e| format!("{}: {e}", log.display()))?;
@@ -993,6 +1034,17 @@ mod tests {
         let mut e = Entry::new(source, "G");
         e.keys.push(key);
         e
+    }
+
+    #[test]
+    fn a_groups_name_survives_kdes_reading() {
+        assert_eq!(scope_name("steam", "1a"), "app-lobby-steam-1a.scope");
+        assert_eq!(scope_name("Particle Fleet: Emergence", "1a"), "app-lobby-Particle\\x20Fleet:\\x20Emergence-1a.scope");
+        // A dash would end the name early; an @ is a systemd template.
+        assert_eq!(scope_name("Half-Life @ 2", "1a"), "app-lobby-Half\\x2dLife\\x20\\x40\\x202-1a.scope");
+        assert_eq!(scope_name("Pok\u{e9}mon", "1a"), "app-lobby-Pok\\xe9mon-1a.scope");
+        assert_eq!(scope_name("\u{15e2}", "1a"), "app-lobby-game-1a.scope");
+        assert_eq!(scope_name("a\\b\n", "1a"), "app-lobby-ab-1a.scope");
     }
 
     #[test]

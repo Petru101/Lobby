@@ -177,7 +177,7 @@ pub fn steam_owned(game: &Game) -> Option<u32> {
 /// Opens Steam's install window for a game the account owns (Steam picks the library and
 /// downloads it; the next scan finds it).
 pub fn install_with_steam(game: &Game, appid: u32) -> Result<(), String> {
-    crate::launch::start(&["steam".to_string(), format!("steam://install/{appid}")], None, &crate::store::log_file(&game.id))
+    crate::launch::start("Steam", &["steam".to_string(), format!("steam://install/{appid}")], None, &crate::store::log_file(&game.id))
 }
 
 /// The store and the game's id there, for a game owned in a store lobby is signed in to.

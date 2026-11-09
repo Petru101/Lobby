@@ -249,7 +249,7 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
         How::Store(store, id) => store.installed().into_iter().find(|g| &g.id == id).map(|g| g.folder),
         How::Folder(f) | How::SteamCopy(f, _) | How::Found(f) => Some(f.clone()),
         How::Steam(id) => {
-            crate::launch::start(&["steam".into(), format!("steam://uninstall/{id}")], None, &crate::store::log_file(&game.id))?;
+            crate::launch::start("Steam", &["steam".into(), format!("steam://uninstall/{id}")], None, &crate::store::log_file(&game.id))?;
             return Ok(vec!["Steam asks you to confirm, then uninstalls it.".into()]);
         }
         How::Not(why) => return Err(why.clone()),

@@ -310,7 +310,7 @@ fn open_shortcut(slug: &str) -> Result<(), String> {
     }
     let id = format!("shortcut-{slug}");
     let log = store::log_file(&id);
-    launch::start(&sandbox::wrap_id(&id, start_menu::command(&s)), s.program.parent(), &log).map_err(failed)?;
+    launch::start(&s.name, &sandbox::wrap_id(&id, start_menu::command(&s)), s.program.parent(), &log).map_err(failed)?;
     println!("Starting {} in {}'s Wine prefix. Its output goes to {}", s.name, s.place, log.display());
     Ok(())
 }
@@ -773,7 +773,7 @@ fn play(query: &str) -> Result<(), String> {
     }
     let log = store::log_file(&game.id);
     let command = launch::final_command(&game, command, protect)?;
-    launch::start(&command, cwd.as_deref(), &log)?;
+    launch::start(&game.name, &command, cwd.as_deref(), &log)?;
     println!("Starting {} with {how}. Its output goes to {}", game.name, log.display());
     if let Some(g) = lib.get_mut(&game.id) {
         g.played = Some(store::now());
