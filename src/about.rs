@@ -5,7 +5,7 @@
 pub const SOURCE: &str = "https://github.com/Petru101/Lobby";
 pub const RELEASES: &str = "https://github.com/Petru101/Lobby/releases";
 
-pub const WHO: &str = "Lobby is made by one person (Petru101 on GitHub), not a company. Nobody independent has checked it. Its code is public, so anyone can read it, but the AppImage is built on its maker's own computer, so nobody can prove it matches that code. If that matters to you, build it from the code yourself.";
+pub const WHO: &str = "Lobby is made by one person (Petru101 on GitHub), not a company. Nobody independent has checked it. Its code is public, so anyone can read it, and the AppImage is built on GitHub's servers from that code, not on its maker's computer. GitHub keeps a signed record of which code each file came from, and you can check yours: gh attestation verify Lobby-x86_64.AppImage -R Petru101/Lobby (GitHub's gh tool, signed in). That shows where the file came from, not that the code is safe. You can also build it from the code yourself.";
 
 pub const CONNECTS: &str = "Nothing about you or what you play goes to Lobby's maker unless you send a report. There's no tracking or usage statistics in Lobby's code or in the tools it runs for the stores (legendary, gogdl, umu). Lobby can't speak for Proton, the stores' apps or the games themselves. Every site below sees your internet address.";
 

@@ -11,9 +11,12 @@ dir=$(cd "$(dirname "$0")/.." && pwd)
 key=${LOBBY_RELEASE_KEY:-$HOME/.config/lobby-release/lobby.key}
 public=${key%.key}.pub
 [ -f "$key" ] && [ -f "$public" ] || { echo "no release key at $key" >&2; exit 1; }
+# Apt's gh can be too old to have `gh attestation`.
+checker=$HOME/.config/lobby-release/gh; [ -x "$checker" ] || checker=gh
+"$checker" attestation verify --help >/dev/null 2>&1 || { echo "$checker can't check attestations: it needs gh 2.49 or newer" >&2; exit 1; }
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 gh release download "$tag" --repo "$repo" --pattern Lobby-x86_64.AppImage --dir "$work"
-gh attestation verify "$work/Lobby-x86_64.AppImage" --repo "$repo" --signer-workflow "$repo/.github/workflows/release.yml" --source-ref "refs/tags/$tag" >/dev/null
+"$checker" attestation verify "$work/Lobby-x86_64.AppImage" --repo "$repo" --signer-workflow "$repo/.github/workflows/release.yml" --source-ref "refs/tags/$tag" >/dev/null
 echo "GitHub built it from $tag"
 if [ -z "$LOBBY_RELEASE_KEY" ]; then
     git -C "$dir" fetch -q origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true

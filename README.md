@@ -58,7 +58,8 @@ The AppImage runs on Ubuntu 24.04 and newer, Fedora, Arch and the like: download
 (all versions: [Releases](https://github.com/Petru101/Lobby/releases)), make it executable (`chmod +x Lobby-x86_64.AppImage`, or the file's
 Properties) and start it. The first start puts Lobby in the app menu, and Lobby updates
 itself from here, installing only releases signed with its maker's key (Gear Lever and
-AppImageUpdate can update it too, without that check). It brings its own GTK,
+AppImageUpdate can update it too, without that check). Releases are built on GitHub from this code: check one with `gh attestation verify
+Lobby-x86_64.AppImage -R Petru101/Lobby`. It brings its own GTK,
 libadwaita and WebKitGTK; the system needs FUSE (`fusermount3`), bubblewrap and
 xdg-dbus-proxy, which desktops almost always have.
 
