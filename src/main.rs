@@ -12,6 +12,7 @@ mod free;
 mod import;
 mod install;
 mod anticheat;
+mod about;
 mod apparmor;
 mod appimage;
 mod launch;
@@ -79,7 +80,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby allow-sandbox     on Ubuntu: let lobby make the sandboxes Proton and protection need
                                (an AppArmor profile; sudo asks for your password)
        lobby add <file>        add a game by the program that starts it (or its installer or archive)
-       lobby self-update       get the newest Lobby (the AppImage replaces itself; the window does it daily)
+       lobby self-update       get the newest Lobby (the AppImage replaces itself)
+       lobby updates [automatic|ask|off]  what the window does about new versions, once a day
        lobby open-drives       open the drives holding games that aren't open (after a restart)
        lobby search            search every drive for games outside the folders lobby looks in
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (each scan does)
@@ -153,6 +155,7 @@ fn main() -> ExitCode {
         (Some("check"), []) => check_system(),
         (Some("open-drives"), []) => open_drives(),
         (Some("self-update"), []) => self_update(),
+        (Some("updates"), [what @ ..]) if what.len() <= 1 => updates_setting(what.first().copied()),
         (Some("add"), [file]) => add_game(std::path::Path::new(file)),
         (Some("allow-sandbox"), []) => apparmor::allow(true).map(|()| println!("Lobby may start games now: its AppArmor profile is in /etc/apparmor.d/lobby.")),
         // How Play runs a game protected: `lobby sandbox <id> -- <command>`.
@@ -1235,6 +1238,15 @@ fn add_game(file: &std::path::Path) -> Result<(), String> {
 }
 
 /// The newest Lobby, when this one is an AppImage: downloaded and put in its place.
+/// Says what Lobby does about new versions, or sets it.
+fn updates_setting(what: Option<&str>) -> Result<(), String> {
+    if let Some(word) = what {
+        appimage::Updates::from_word(word).ok_or("lobby updates takes automatic, ask or off.")?.save()?;
+    }
+    println!("{}", appimage::Updates::load().explained());
+    Ok(())
+}
+
 fn self_update() -> Result<(), String> {
     if appimage::file().is_none() {
         return Err("This Lobby isn't the AppImage: update it the way it was installed (a build from source: git pull, then build again).".into());

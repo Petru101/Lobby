@@ -11,6 +11,8 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 flate2 = "1"
 libc = "0.2"
+# Checks updates' signatures; no dependencies of its own.
+minisign-verify = "0.3"
 # Built in from github.com/Petru101/gamefix at this commit (run/pin-gamefix.sh moves it); a gamefix
 # checkout beside this one (../gaming) is used instead when .cargo/config.toml patches it in
 # (run/cargo.sh writes that).

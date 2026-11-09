@@ -10,7 +10,7 @@ used daily on one computer (Bazzite, KDE Plasma, NVIDIA) and tested on Ubuntu 24
 Fedora 44 and Arch.
 
 **[Download the AppImage](https://github.com/Petru101/Lobby/releases/latest/download/Lobby-x86_64.AppImage)**
-([how to install](#installing)). It updates itself.
+([how to install](#installing)). It updates itself; About in its menu can make it ask first, or stop.
 
 <img width="1330" height="910" alt="image" src="https://github.com/user-attachments/assets/4305bbb6-d44b-4ae6-9443-d20a8a249725" />
 
@@ -57,7 +57,8 @@ The AppImage runs on Ubuntu 24.04 and newer, Fedora, Arch and the like: download
 [Lobby-x86_64.AppImage](https://github.com/Petru101/Lobby/releases/latest/download/Lobby-x86_64.AppImage)
 (all versions: [Releases](https://github.com/Petru101/Lobby/releases)), make it executable (`chmod +x Lobby-x86_64.AppImage`, or the file's
 Properties) and start it. The first start puts Lobby in the app menu, and Lobby updates
-itself from here (Gear Lever and AppImageUpdate can update it too). It brings its own GTK,
+itself from here, installing only releases signed with its maker's key (Gear Lever and
+AppImageUpdate can update it too, without that check). It brings its own GTK,
 libadwaita and WebKitGTK; the system needs FUSE (`fusermount3`), bubblewrap and
 xdg-dbus-proxy, which desktops almost always have.
 
@@ -98,11 +99,14 @@ protection <game> ...`, and more: `lobby --help`.
 
 ## Privacy
 
+Lobby's About page (in the main menu) lists what it connects to and why. Nothing goes to its
+maker unless you send a report, and there's no tracking in its code.
+
 Lobby only reads launchers' files and changes its own (and the app-menu entries it makes).
 To know which downloads came from itch.io, it reads the browsers' download history (Firefox,
 LibreWolf, Zen, Floorp, Waterfox; Chrome, Chromium, Brave, Edge, Vivaldi, Opera) for downloads
 whose page was an itch.io game page, and keeps only those. It asks the stores and Steam's public store
-for covers and names. Sign-ins stay on your computer, in Lobby's own folders.
+for covers and names, sending a game's name and folder name as search words. Sign-ins stay on your computer, in Lobby's own folders.
 
 ## License
 

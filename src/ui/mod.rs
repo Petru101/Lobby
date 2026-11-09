@@ -5,6 +5,7 @@ mod covers;
 mod pad;
 mod shortcuts;
 
+use crate::appimage::Updates;
 use crate::battlenet;
 use crate::launch::{self, Plan};
 use crate::library::{Entry, Game, Key, Kind, Source};
@@ -476,6 +477,7 @@ fn build(app: &adw::Application) {
     let accounts_button = menu_item("Store Accounts");
     let places_button = menu_item("Where Lobby Looks");
     let shortcuts_button = menu_item("App Menu Shortcuts");
+    let about_button = menu_item("About Lobby");
     // Gaming mode: the window fills the screen and no desktop answers its window buttons, which
     // a controller can't reach either. Closing it is in the menu instead.
     if crate::gaming_mode() {
@@ -744,6 +746,11 @@ fn build(app: &adw::Application) {
         m.popdown();
         u.windows_shortcuts();
     });
+    let (u, m) = (ui.clone(), main_menu.clone());
+    about_button.connect_clicked(move |_| {
+        m.popdown();
+        u.about();
+    });
     let u = ui.clone();
     add_button.connect_clicked(move |_| u.pick_game());
     // A folder dropped on the window: looked in from now on; a file: added as a game.
@@ -932,6 +939,10 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         }
         if std::env::var_os("LOBBY_SNAPSHOT_CLEANUP").is_some() {
             u.clean_up();
+        }
+        // LOBBY_SNAPSHOT_ABOUT=1: the About page.
+        if std::env::var_os("LOBBY_SNAPSHOT_ABOUT").is_some() {
+            u.about();
         }
         // LOBBY_SNAPSHOT_REPORT=<id>: its Report a problem.
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_REPORT") {
@@ -3683,38 +3694,181 @@ impl Ui {
         if std::env::var_os("LOBBY_SNAPSHOT").is_some() && std::env::var_os("LOBBY_UPDATE_URL").is_none() {
             return;
         }
-        if !crate::appimage::due() {
+        let setting = Updates::load();
+        if setting == Updates::Off || !crate::appimage::due() {
             return;
         }
         let u = self.clone();
         glib::spawn_future_local(async move {
-            let found = gio::spawn_blocking(|| {
-                let update = crate::appimage::check()?;
-                match update {
-                    Some(up) if crate::appimage::can_replace() => crate::appimage::install(&up).map(|()| Some((up, true))),
-                    Some(up) => Ok(Some((up, false))),
-                    None => Ok(None),
+            let found = gio::spawn_blocking(move || {
+                let Some(up) = crate::appimage::check()? else { return Ok(None) };
+                let can = crate::appimage::can_replace();
+                if setting == Updates::Automatic && can {
+                    let installed = crate::appimage::install(&up);
+                    return Ok(Some((up, installed.map(|()| true), true)));
                 }
+                Ok::<_, String>(Some((up, Ok(false), can)))
             })
             .await
             .unwrap_or_else(|_| Err("it stopped with an error".into()));
             match found {
-                Ok(Some((up, true))) => {
-                    let toast = adw::Toast::builder().title(format!("Lobby {} is ready", up.version)).button_label("Restart").timeout(0).build();
+                Ok(Some((up, Ok(true), _))) => u.update_ready(&up),
+                Ok(Some((up, Ok(false), can))) => u.update_out(up, can),
+                // Said, not only logged: a refused signature is something to know about.
+                Ok(Some((up, Err(e), _))) => {
+                    crate::log::line(&format!("self-update: {e}"));
+                    let toast = adw::Toast::builder().title(format!("Lobby {} wasn't installed", up.version)).button_label("Why?").timeout(0).build();
                     let u2 = u.clone();
-                    toast.connect_button_clicked(move |_| u2.restart());
-                    u.toasts.add_toast(toast);
-                }
-                Ok(Some((up, false))) => {
-                    let toast = adw::Toast::builder().title(format!("Lobby {} is out", up.version)).button_label("Download").timeout(0).build();
-                    let (w, page) = (u.window.clone(), up.page.clone());
-                    toast.connect_button_clicked(move |_| gtk::UriLauncher::new(&page).launch(Some(&w), gio::Cancellable::NONE, |_| {}));
+                    toast.connect_button_clicked(move |_| u2.alert("Lobby wasn't updated", &e));
                     u.toasts.add_toast(toast);
                 }
                 Ok(None) => {}
                 Err(e) => crate::log::line(&format!("self-update: {e}")),
             }
         });
+    }
+
+    fn update_ready(self: &Rc<Self>, up: &crate::appimage::Update) {
+        let toast = adw::Toast::builder().title(format!("Lobby {} is ready", up.version)).button_label("Restart").timeout(0).build();
+        let u = self.clone();
+        toast.connect_button_clicked(move |_| u.restart());
+        self.toasts.add_toast(toast);
+    }
+
+    /// A new version waiting for the person: Install, or Download when Lobby can't replace its
+    /// own file.
+    fn update_out(self: &Rc<Self>, up: crate::appimage::Update, can_replace: bool) {
+        let toast = adw::Toast::builder().title(format!("Lobby {} is out", up.version)).button_label(if can_replace { "Install…" } else { "Download" }).timeout(0).build();
+        let u = self.clone();
+        toast.connect_button_clicked(move |_| {
+            if can_replace {
+                u.install_update(up.clone());
+            } else {
+                gtk::UriLauncher::new(&up.page).launch(Some(&u.window), gio::Cancellable::NONE, |_| {});
+            }
+        });
+        self.toasts.add_toast(toast);
+    }
+
+    /// Asks, then replaces Lobby with the new version.
+    fn install_update(self: &Rc<Self>, up: crate::appimage::Update) {
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let alert = adw::AlertDialog::new(Some(&format!("Install Lobby {}?", up.version)), Some("It replaces this program with the new version from GitHub. The new version runs from the next start."));
+            alert.set_extra_child(Some(&gtk::LinkButton::builder().label("What changed").uri(&up.page).build()));
+            alert.add_responses(&[("cancel", "Not now"), ("install", "Install")]);
+            alert.set_response_appearance("install", adw::ResponseAppearance::Suggested);
+            alert.set_default_response(Some("install"));
+            if alert.choose_future(Some(&u.window)).await != "install" {
+                return;
+            }
+            u.toast(&format!("Downloading Lobby {}…", up.version));
+            let to_install = up.clone();
+            match gio::spawn_blocking(move || crate::appimage::install(&to_install)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                Ok(()) => u.update_ready(&up),
+                Err(e) => u.alert("Lobby wasn't updated", &e),
+            }
+        });
+    }
+
+    /// Check now, on the About page: says how it went on `row`, and asks before installing.
+    fn check_for_update(self: &Rc<Self>, row: adw::ActionRow) {
+        row.set_subtitle("Asking GitHub…");
+        let u = self.clone();
+        glib::spawn_future_local(async move {
+            let found = gio::spawn_blocking(|| crate::appimage::check().map(|up| up.map(|up| (up, crate::appimage::can_replace())))).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+            match found {
+                Ok(None) => row.set_subtitle(&format!("You have the newest version, {}.", env!("CARGO_PKG_VERSION"))),
+                Ok(Some((up, can))) => {
+                    row.set_subtitle(&format!("Lobby {} is out.", up.version));
+                    if can {
+                        u.install_update(up);
+                    } else {
+                        u.update_out(up, false);
+                    }
+                }
+                Err(e) => row.set_subtitle(&format!("Lobby couldn't ask GitHub. {e}")),
+            }
+        });
+    }
+
+    /// About: the version, how updates work and the choice about them, who makes Lobby, and what
+    /// it connects to.
+    fn about(self: &Rc<Self>) {
+        let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(24).margin_top(12).margin_bottom(24).margin_start(24).margin_end(24).build();
+        let link = |label: &str, uri: &str| gtk::LinkButton::builder().label(label).uri(uri).valign(gtk::Align::Center).build();
+
+        let version = env!("CARGO_PKG_VERSION");
+        let name = gtk::Label::builder().label("Lobby").xalign(0.0).build();
+        name.add_css_class("title-1");
+        let number = gtk::Label::builder().label(format!("Version {version}")).xalign(0.0).build();
+        number.add_css_class("dim-label");
+        let heading = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
+        heading.append(&name);
+        heading.append(&number);
+        content.append(&heading);
+
+        let updates = adw::PreferencesGroup::builder().title("Updates").build();
+        let mut pressed = None;
+        if crate::appimage::file().is_some() {
+            let choices = gtk::StringList::new(&Updates::ALL.map(Updates::label));
+            let setting = Updates::load();
+            let choice = adw::ComboRow::builder().title("New versions").model(&choices).selected(Updates::ALL.iter().position(|u| *u == setting).unwrap_or(0) as u32).build();
+            let told = gtk::Label::builder().label(setting.explained()).wrap(true).xalign(0.0).build();
+            told.add_css_class("dim-label");
+            let (u, explained) = (self.clone(), told.clone());
+            choice.connect_selected_notify(move |row| {
+                let Some(picked) = Updates::ALL.get(row.selected() as usize).copied() else { return };
+                explained.set_label(picked.explained());
+                if let Err(e) = picked.save() {
+                    u.alert("Lobby couldn't save that", &e);
+                }
+            });
+            updates.add(&choice);
+            let check = adw::ActionRow::builder().title("Look for a new version").subtitle(format!("You have {version}.")).build();
+            let button = gtk::Button::builder().label("Check now").valign(gtk::Align::Center).build();
+            let (u, row) = (self.clone(), check.clone());
+            button.connect_clicked(move |_| u.check_for_update(row.clone()));
+            check.add_suffix(&button);
+            updates.add(&check);
+            pressed = Some(button);
+            let about_updates = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(12).build();
+            about_updates.append(&told);
+            let fingerprint = gtk::Label::builder().label("An update is a new program replacing this one, from this project's GitHub page. Lobby installs it only if it carries a signature made with its maker's key, which is kept off GitHub, so someone breaking into that page can't push an update. It shows the update came from its maker, not that it's safe.").wrap(true).xalign(0.0).build();
+            fingerprint.add_css_class("dim-label");
+            about_updates.append(&fingerprint);
+            updates.add(&about_updates);
+        } else {
+            updates.set_description(Some("This copy isn't an AppImage, so it doesn't update itself: it stays on this version until whatever installed it replaces it."));
+        }
+        content.append(&updates);
+
+        let who = adw::PreferencesGroup::builder().title("Who makes it").description(crate::about::WHO).build();
+        let source = adw::ActionRow::builder().title("The code").subtitle("Open source, under the GPL (version 3 or later).").build();
+        source.add_suffix(&link("On GitHub", crate::about::SOURCE));
+        who.add(&source);
+        let changes = adw::ActionRow::builder().title("What changed").subtitle("Every version, with what's new in it.").build();
+        changes.add_suffix(&link("Releases", crate::about::RELEASES));
+        who.add(&changes);
+        content.append(&who);
+
+        let connects = adw::PreferencesGroup::builder().title("What it connects to").description(crate::about::CONNECTS).build();
+        for (what, why) in crate::about::CONNECTIONS {
+            connects.add(&adw::ActionRow::builder().title(*what).subtitle(*why).use_markup(false).subtitle_selectable(true).build());
+        }
+        content.append(&connects);
+
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::new());
+        view.set_content(Some(&gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build()));
+        let dialog = adw::Dialog::builder().title("About Lobby").content_width(640).content_height(720).child(&view).build();
+        dialog.present(Some(&self.window));
+        // LOBBY_SNAPSHOT_ABOUT=check presses Check now (LOBBY_UPDATE_URL names a test release).
+        if std::env::var("LOBBY_SNAPSHOT_ABOUT").is_ok_and(|v| v == "check") && std::env::var_os("LOBBY_UPDATE_URL").is_some() {
+            if let Some(button) = pressed {
+                button.emit_clicked();
+            }
+        }
     }
 
     /// Lobby quits and starts again (a second start would only bring this window up).
