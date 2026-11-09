@@ -2,10 +2,11 @@
 # that a release was built from this repository's public code:
 #   gh attestation verify Lobby-x86_64.AppImage -R Petru101/Lobby
 #
-# A vX.Y.Z tag builds it and leaves a draft release to test, write notes for and publish. A
-# release-test/* branch only builds it (and attests that build, naming the branch), to try a
-# change to this file. Actions are pinned by commit and nothing is cached, so that one build's
-# leftovers can't reach another.
+# A vX.Y.Z tag builds it and leaves a draft release to test, sign, write notes for and publish:
+# Lobby refuses an update without a signature, and run/sign-release.sh makes that on its maker's
+# computer, so the key is never on GitHub and nothing here publishes. A release-test/* branch only
+# builds it (and attests that build, naming the branch), to try a change to this file. Actions are
+# pinned by commit and nothing is cached, so that one build's leftovers can't reach another.
 name: Release
 
 on:
@@ -122,7 +123,9 @@ jobs:
 
       - name: Make the draft release
         run: |
-          notes="Built on GitHub from this tag's code ([the build]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID)). To check a download, with [GitHub's command-line tool](https://cli.github.com), signed in:
+          notes="**Before publishing:** run \`run/sign-release.sh $GITHUB_REF_NAME\`, or Lobby will refuse this update. Then delete this line.
+
+          Built on GitHub from this tag's code ([the build]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID)). To check a download, with [GitHub's command-line tool](https://cli.github.com), signed in:
 
           \`\`\`
           gh attestation verify Lobby-x86_64.AppImage -R $GH_REPO
