@@ -1,0 +1,133 @@
+# Builds Lobby's AppImage on GitHub's servers and records where it came from, so anyone can check
+# that a release was built from this repository's public code:
+#   gh attestation verify Lobby-x86_64.AppImage -R Petru101/Lobby
+#
+# A vX.Y.Z tag builds it and leaves a draft release to test, write notes for and publish. A
+# release-test/* branch only builds it (and attests that build, naming the branch), to try a
+# change to this file. Actions are pinned by commit and nothing is cached, so that one build's
+# leftovers can't reach another.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+    branches: ["release-test/**"]
+
+permissions: {}
+
+env:
+  # The Rust that builds releases: moved on purpose, not by whatever is newest that day.
+  RUST_VERSION: "1.99.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # A plain Ubuntu 24.04, whose glibc and GTK 4.14 are the oldest the AppImage runs on, without
+    # the extra software GitHub's own machines come with for linuxdeploy to bundle by accident.
+    container: ubuntu:24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq build-essential pkg-config libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev curl python3 git ca-certificates file > /dev/null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Self-update compares the tag with the running version: a tag that isn't Cargo.toml's
+      # version would offer the same update for ever. gamefix must be the commit Cargo.toml pins.
+      - name: Check the version and gamefix's pin
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "The tag $GITHUB_REF_NAME isn't Cargo.toml's version $version" >&2
+            exit 1
+          fi
+          grep -Eq '^gamefix = \{ git = "https://github.com/Petru101/gamefix", rev = "[0-9a-f]{40}" \}$' Cargo.toml
+          [ ! -e .cargo ]
+
+      - name: Install Rust
+        run: |
+          curl -fsSL --retry 3 https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain "$RUST_VERSION"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build the AppImage
+        run: run/appimage.sh
+
+      # Cargo.lock names gamefix without a source (local builds patch in a checkout), so cargo
+      # fills it in here: it must be the pinned commit. The packing tools come from their rolling
+      # releases, so their fingerprints go in this log.
+      - name: Check what was built
+        run: |
+          rev=$(sed -nE 's/^gamefix = .*rev = "([0-9a-f]+)".*/\1/p' Cargo.toml)
+          grep -q "^source = \"git+https://github.com/Petru101/gamefix?rev=$rev#$rev\"$" Cargo.lock
+          sha256sum "$HOME"/.cache/lobby-appimage-tools/*
+          cd target/appimage
+          sha256sum Lobby-x86_64.AppImage Lobby-x86_64.AppImage.zsync
+          test -s Lobby-x86_64.AppImage.zsync
+          ./Lobby-x86_64.AppImage --appimage-version
+          test "$(./Lobby-x86_64.AppImage --appimage-updateinformation)" = "gh-releases-zsync|Petru101|Lobby|latest|Lobby-x86_64.AppImage.zsync"
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            target/appimage/Lobby-x86_64.AppImage
+            target/appimage/Lobby-x86_64.AppImage.zsync
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: appimage
+          path: |
+            target/appimage/Lobby-x86_64.AppImage
+            target/appimage/Lobby-x86_64.AppImage.zsync
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  # Apart from the build, so what compiles the code can't change releases and what can change
+  # releases runs none of the code. A draft: nothing reaches anyone until it's published.
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: appimage
+
+      - name: Check the attestation
+        run: |
+          for file in Lobby-x86_64.AppImage Lobby-x86_64.AppImage.zsync; do
+            gh attestation verify "$file" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml" --source-ref "$GITHUB_REF"
+          done
+
+      - name: Make the draft release
+        run: |
+          notes="Built on GitHub from this tag's code ([the build]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID)). To check a download, with [GitHub's command-line tool](https://cli.github.com), signed in:
+
+          \`\`\`
+          gh attestation verify Lobby-x86_64.AppImage -R $GH_REPO
+          \`\`\`
+
+          Lobby 0.1.1 and newer update themselves to this one (or download \`Lobby-x86_64.AppImage\` below, make it executable and start it)."
+          gh release create "$GITHUB_REF_NAME" Lobby-x86_64.AppImage Lobby-x86_64.AppImage.zsync \
+            --draft --verify-tag --title "Lobby ${GITHUB_REF_NAME#v}" --notes "$notes"
