@@ -34,6 +34,21 @@ pub fn still_downloading(game: &Game) -> bool {
     download_parts(game).is_some_and(|parts| parts.iter().any(|f| gamefix::download::looks_unfinished(f)))
 }
 
+/// Of these downloads, the ones still coming, for the window, which asks every few seconds. The
+/// quick look alone counts a file written in the last two minutes as coming, so a finished
+/// download kept its badge that long (the user waited about a minute after every download, and
+/// looking again changed nothing). The files it flags get gamefix's closer look, Install's: a
+/// file written lately but unchanged for 3 s is finished. One wait for all of them.
+pub fn still_coming<'a>(games: impl IntoIterator<Item = &'a Game>) -> std::collections::HashSet<String> {
+    let flagged: Vec<(&str, Vec<PathBuf>)> = games
+        .into_iter()
+        .filter_map(|g| download_parts(g).filter(|parts| parts.iter().any(|f| gamefix::download::looks_unfinished(f))).map(|parts| (g.id.as_str(), parts)))
+        .collect();
+    let all: Vec<PathBuf> = flagged.iter().flat_map(|(_, parts)| parts.iter().cloned()).collect();
+    let left = gamefix::download::unfinished(&all);
+    flagged.into_iter().filter(|(_, parts)| parts.iter().any(|p| left.contains(p))).map(|(id, _)| id.to_string()).collect()
+}
+
 fn archive_kind(file: &Path) -> Option<&'static str> {
     let name = file.file_name()?.to_string_lossy().to_lowercase();
     if [".tar.gz", ".tar.xz", ".tar.bz2", ".tgz"].iter().any(|e| name.ends_with(e)) {
@@ -222,6 +237,36 @@ mod tests {
         game.entries[0].folder = Some(dir.join("repack"));
         game.kind = Kind::Game;
         assert!(!still_downloading(&game));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_download_just_finished_is_not_coming() {
+        use crate::library::{Entry, Source};
+        let dir = std::env::temp_dir().join(format!("lobby-coming-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("game.zip");
+        fs::write(&file, vec![b'P'; 1 << 20]).unwrap();
+        let mut e = Entry::new(Source::Folder, "G");
+        (e.kind, e.program) = (Kind::Download, Some(file.clone()));
+        let game: Game = serde_json::from_value(serde_json::json!({"id": "g", "name": "G", "kind": "Download", "entries": [], "missing": false})).unwrap();
+        let game = Game { entries: vec![e], ..game };
+        // Written a moment ago: the quick look can't tell, the closer one can.
+        assert!(still_downloading(&game));
+        assert!(still_coming([&game]).is_empty());
+        // Still being written.
+        let writer = std::thread::spawn({
+            let file = file.clone();
+            move || {
+                for _ in 0..8 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    use std::io::Write;
+                    fs::OpenOptions::new().append(true).open(&file).unwrap().write_all(&[b'P'; 4096]).unwrap();
+                }
+            }
+        });
+        assert_eq!(still_coming([&game]), ["g".to_string()].into());
+        writer.join().unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 

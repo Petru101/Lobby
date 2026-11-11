@@ -26,6 +26,15 @@ pub fn line(what: &str) {
 }
 
 /// Runs `f`, logging how long it took.
+/// Like `timed`, with the processor time this thread spent on it too (waiting costs none).
+pub fn timed_cpu<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let cpu = || fs::read_to_string("/proc/thread-self/schedstat").ok().and_then(|s| s.split(' ').next()?.parse::<u64>().ok()).unwrap_or(0);
+    let (start, used) = (Instant::now(), cpu());
+    let out = f();
+    line(&format!("{what}: {} ms, {} ms of processor time", start.elapsed().as_millis(), cpu().saturating_sub(used) / 1_000_000));
+    out
+}
+
 pub fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
     let start = Instant::now();
     let out = f();
