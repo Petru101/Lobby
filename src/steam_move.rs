@@ -97,14 +97,17 @@ fn copy_dir(from: &Path, to: &Path, copied: &dyn Fn(u64)) -> Result<(), String> 
     Ok(())
 }
 
-/// Restarts Steam, so it reads its libraries again (when it's running).
-pub fn restart_steam() -> Result<(), String> {
+/// Restarts Steam, so it reads its libraries again (when it's running), and starts `play` with
+/// it (Steam is started for that when it isn't running).
+pub fn restart_steam(play: Option<u32>) -> Result<(), String> {
     let Some(steam) = gamefix::steam::Steam::find() else { return Ok(()) };
-    if !steam.running() {
+    if steam.running() {
+        if !steam.shut_down() {
+            return Err("Steam didn't close within a minute: restart it yourself to see the game.".into());
+        }
+    } else if play.is_none() {
         return Ok(());
     }
-    if !steam.shut_down() {
-        return Err("Steam didn't close within a minute: restart it yourself to see the game.".into());
-    }
-    crate::launch::start("Steam", &["steam".to_string()], None, &crate::store::log_file("steam"))
+    let command: Vec<String> = std::iter::once("steam".to_string()).chain(play.map(|id| format!("steam://rungameid/{id}"))).collect();
+    crate::launch::start("Steam", &command, None, &crate::store::log_file("steam"))
 }

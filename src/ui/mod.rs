@@ -922,6 +922,14 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
             u.busy.set_reveal_child(true);
             glib::timeout_future(std::time::Duration::from_secs(1)).await;
         }
+        // LOBBY_SNAPSHOT_MOVE_STEAM=<id>: what Play asks for a game in a Steam library Steam
+        // doesn't use (the question only: the snapshot is taken with it open).
+        if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_MOVE_STEAM") {
+            if let Some((folder, appid)) = u.game(&id).as_ref().and_then(stray_steam_copy) {
+                u.move_into_steam(&id, folder, appid, true);
+                glib::timeout_future(std::time::Duration::from_secs(3)).await;
+            }
+        }
         // LOBBY_SNAPSHOT_MOVE=<id>: where Move… offers to put it.
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_MOVE") {
             u.move_game(&id);
@@ -2993,7 +3001,8 @@ impl Ui {
 
     /// Copies a game from a Steam library Steam doesn't use into one it does, after asking
     /// (its size, where to), then offers to restart Steam so it shows there.
-    fn move_into_steam(self: &Rc<Self>, id: &str, folder: std::path::PathBuf, appid: u32) {
+    /// `play`: asked from Play, which starts it once it's there.
+    fn move_into_steam(self: &Rc<Self>, id: &str, folder: std::path::PathBuf, appid: u32, play: bool) {
         let Some(game) = self.game(id) else { return };
         let u = self.clone();
         glib::spawn_future_local(async move {
@@ -3010,8 +3019,10 @@ impl Ui {
                 Ok(p) => p,
                 Err(e) => return u.alert(&format!("{} can't be moved into Steam", game.name), &e),
             };
-            let alert = adw::AlertDialog::new(Some(&format!("Move {} into Steam?", game.name)), Some(&format!("Its files ({size}) are copied into Steam's library {}; the old copy stays in {} until you delete it. Steam restarts afterwards to show it.", target.display(), folder.parent().map(|p| p.display().to_string()).unwrap_or_default())));
-            alert.add_responses(&[("cancel", "Cancel"), ("move", "Move into Steam")]);
+            let why = if play { "Steam doesn't start it where it is: that Steam library isn't one of Steam's. " } else { "" };
+            let after = if play { "Steam then restarts and starts it." } else { "Steam restarts afterwards to show it." };
+            let alert = adw::AlertDialog::new(Some(&format!("Move {} into Steam?", game.name)), Some(&format!("{why}Its files ({size}) are copied into Steam's library {}; the old copy stays in {} until you delete it. {after}", target.display(), folder.parent().map(|p| p.display().to_string()).unwrap_or_default())));
+            alert.add_responses(&[("cancel", "Cancel"), ("move", if play { "Move and Play" } else { "Move into Steam" })]);
             alert.set_response_appearance("move", adw::ResponseAppearance::Suggested);
             if alert.choose_future(Some(&u.window)).await != "move" {
                 return;
@@ -3020,8 +3031,8 @@ impl Ui {
             let moved = u.with_progress(&game.id, "Copying…", move |p| crate::sources::Home::find().ok_or("no home folder".to_string()).and_then(|h| crate::steam_move::move_into_steam(&h, &f, appid, p))).await.unwrap_or_else(|| Err("it stopped with an error".into()));
             match moved {
                 Ok(lib) => {
-                    u.toast(&format!("{} is in Steam's library {} now. Restarting Steam…", game.name, lib.display()));
-                    if let Ok(Err(e)) = gio::spawn_blocking(crate::steam_move::restart_steam).await {
+                    u.toast(&format!("{} is in Steam's library {} now. {}", game.name, lib.display(), if play { "Steam starts it in a moment…" } else { "Restarting Steam…" }));
+                    if let Ok(Err(e)) = gio::spawn_blocking(move || crate::steam_move::restart_steam(play.then_some(appid))).await {
                         u.alert("Steam didn't restart", &e);
                     }
                 }
@@ -3953,6 +3964,12 @@ impl Ui {
                     Err(e) => self.alert(&format!("{} didn't start", game.name), &e),
                 }
             }
+            // Steam can start it once it's in one of Steam's libraries: Play offers that.
+            Plan::Cannot(_) if stray_steam_copy(&game).is_some() => {
+                if let Some((folder, appid)) = stray_steam_copy(&game) {
+                    self.move_into_steam(&game.id, folder, appid, true);
+                }
+            }
             Plan::Cannot(why) => self.alert(&format!("{} can't be started", game.name), &why),
             Plan::NeedsClient { client, .. } => {
                 let Some(client) = crate::clients::by_id(client) else { return };
@@ -4116,7 +4133,7 @@ impl Ui {
         let buttons = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(12).margin_top(12).build();
         buttons.append(&play);
         // In a Steam library Steam doesn't use, and not installed in Steam's own.
-        let stray = game.entries.iter().find(|e| e.source == Source::SteamElsewhere).filter(|_| !game.entries.iter().any(|e| e.source == Source::Steam && e.kind != Kind::Owned)).and_then(|e| Some((e.folder.clone()?, e.keys.iter().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None })?)));
+        let stray = stray_steam_copy(&game);
         if let Some((folder, appid)) = stray.clone() {
             play.set_visible(false);
             let b = gtk::Button::builder().label("Move into Steam").tooltip_text("Copy it into one of Steam's libraries, where Steam starts it").build();
@@ -4128,7 +4145,7 @@ impl Ui {
                 if let Some(d) = d.borrow().as_ref() {
                     d.close();
                 }
-                u.move_into_steam(&id, folder.clone(), appid);
+                u.move_into_steam(&id, folder.clone(), appid, false);
             });
         }
         let update = game.update().map(|_| {
@@ -4978,6 +4995,16 @@ fn add_cover_or(overlay: &gtk::Overlay, cover: &str, width: i32, height: i32, un
 fn still_downloading(games: &[Game]) -> impl FnOnce() -> std::collections::HashSet<String> + Send + 'static {
     let games: Vec<Game> = games.iter().filter(|g| g.kind == Kind::Download && !g.gone && !g.missing).cloned().collect();
     move || crate::log::timed_cpu(&format!("downloads still coming, of {}", games.len()), || crate::install::still_coming(&games)).into_iter().chain(std::env::var("LOBBY_SNAPSHOT_DOWNLOADING")).collect()
+}
+
+/// A game only in a Steam library Steam doesn't use (not installed in Steam's own): that copy's
+/// folder and Steam's id for it.
+fn stray_steam_copy(game: &Game) -> Option<(std::path::PathBuf, u32)> {
+    if game.entries.iter().any(|e| e.source == Source::Steam && e.kind != Kind::Owned) {
+        return None;
+    }
+    let e = game.entries.iter().find(|e| e.source == Source::SteamElsewhere)?;
+    Some((e.folder.clone()?, e.keys.iter().find_map(|k| if let Key::SteamApp(id) = k { Some(*id) } else { None })?))
 }
 
 /// What a card says under the name: where the game came from, in a word or two.
