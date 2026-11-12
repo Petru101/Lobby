@@ -381,6 +381,8 @@ struct Ui {
     /// Drives holding games that aren't open (`drives::closed_with_games`), and its banner.
     closed: RefCell<Vec<(crate::drives::Closed, usize)>>,
     closed_banner: adw::Banner,
+    /// Windows drives that came up read-only with games on them (`drives::read_only_with_games`).
+    read_only_banner: adw::Banner,
     /// What may keep each game's online play from working here (`anticheat::warnings`, after
     /// each scan), for its page.
     online_warnings: RefCell<HashMap<String, Vec<String>>>,
@@ -588,6 +590,8 @@ fn build(app: &adw::Application) {
     toolbar.add_top_bar(&leftover_banner);
     let closed_banner = adw::Banner::builder().button_label("Open").revealed(false).build();
     toolbar.add_top_bar(&closed_banner);
+    let read_only_banner = adw::Banner::builder().button_label("How to fix…").revealed(false).build();
+    toolbar.add_top_bar(&read_only_banner);
     // What most games need that this computer lacks (`programs`): Steam, curl, 7-Zip ...
     let missing = crate::programs::missing().into_iter().filter(|p| p.essential).collect::<Vec<_>>();
     let steam = crate::programs::steam_missing();
@@ -603,7 +607,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), looking_for_downloads: Cell::new(false), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), read_only_banner: read_only_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), looking_for_downloads: Cell::new(false), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -712,6 +716,12 @@ fn build(app: &adw::Application) {
     ui.leftover_banner.connect_button_clicked(move |_| u.clean_up());
     let u = ui.clone();
     closed_banner.connect_button_clicked(move |_| u.open_drives());
+    let owner = ui.window.clone();
+    read_only_banner.connect_button_clicked(move |_| {
+        let dialog = adw::AlertDialog::new(Some("A Windows drive can only be read"), Some(crate::drives::READ_ONLY_WHY));
+        dialog.add_response("ok", "OK");
+        dialog.present(Some(&owner));
+    });
     ui.self_update();
     let u = ui.clone();
     missing_banner.connect_button_clicked(move |_| u.explain_missing(&missing, steam.as_deref()));
@@ -992,6 +1002,10 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         }
         if std::env::var_os("LOBBY_SNAPSHOT_PLACES").is_some() {
             u.places();
+        }
+        // LOBBY_SNAPSHOT_READ_ONLY=1: the read-only bar's "How to fix…".
+        if std::env::var_os("LOBBY_SNAPSHOT_READ_ONLY").is_some() {
+            u.read_only_banner.emit_by_name::<()>("button-clicked", &[]);
         }
         if std::env::var_os("LOBBY_SNAPSHOT_SHORTCUTS").is_some() {
             u.windows_shortcuts();
@@ -1909,6 +1923,10 @@ impl Ui {
             u.closed_banner.set_title(&crate::drives::closed_text(&closed));
             u.closed_banner.set_revealed(!closed.is_empty());
             u.closed.replace(closed);
+            let saved = all.clone();
+            let read_only = gio::spawn_blocking(move || crate::drives::read_only_with_games(&saved, &crate::drives::mounts())).await.unwrap_or_default();
+            u.read_only_banner.set_title(&crate::drives::read_only_text(&read_only));
+            u.read_only_banner.set_revealed(!read_only.is_empty());
             let warnings = gio::spawn_blocking(move || crate::log::timed("anti-cheat", || crate::anticheat::warnings(&all))).await.unwrap_or_default();
             u.online_warnings.replace(warnings);
             u.show_leftover_banner();

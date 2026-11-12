@@ -93,8 +93,11 @@ pub fn parse(mountinfo: &str) -> Vec<Mount> {
         .collect()
 }
 
+/// The drives mounted now. LOBBY_MOUNTINFO=<file> reads that file instead (for checking the
+/// read-only bar with a made-up drive list).
 pub fn mounts() -> Vec<Mount> {
-    std::fs::read_to_string("/proc/self/mountinfo").map(|t| parse(&t)).unwrap_or_default()
+    let file = std::env::var_os("LOBBY_MOUNTINFO").map_or_else(|| PathBuf::from("/proc/self/mountinfo"), PathBuf::from);
+    std::fs::read_to_string(file).map(|t| parse(&t)).unwrap_or_default()
 }
 
 /// The mount a path is on: the one mounted at the path or the nearest folder above it, the
@@ -141,6 +144,40 @@ pub fn warnings(game: &Game, mounts: &[Mount]) -> Vec<String> {
     }
     said
 }
+
+/// Windows-format drives mounted read-only that hold installed games, with how many each holds:
+/// every game on one can't save, and it says so nowhere but a game's page otherwise.
+pub fn read_only_with_games(games: &[Game], mounts: &[Mount]) -> Vec<(String, usize)> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for g in games.iter().filter(|g| g.kind == Kind::Game && !g.gone && !g.hidden) {
+        let paths = g.entries.iter().flat_map(|e| [e.folder.as_deref(), e.program.as_deref(), e.prefix.as_deref()]).flatten();
+        let mut on: Vec<String> = paths.filter_map(|p| mount_of(p, mounts)).filter(|m| m.read_only && m.windows_format()).map(Mount::name).collect();
+        on.dedup();
+        for name in on {
+            match out.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, c)) => *c += 1,
+                None => out.push((name, 1)),
+            }
+        }
+    }
+    out
+}
+
+/// "19 games are on the Windows drive, which can only be read right now", for the bar.
+pub fn read_only_text(drives: &[(String, usize)]) -> String {
+    let count: usize = drives.iter().map(|(_, n)| n).sum();
+    let names: Vec<&str> = drives.iter().map(|(d, _)| d.as_str()).collect();
+    let which = match names.split_last() {
+        Some((last, [])) => format!("{last}, which"),
+        Some((last, rest)) => format!("{} and {last}, which", rest.join(", ")),
+        None => return String::new(),
+    };
+    let games = if count == 1 { "1 game is".to_string() } else { format!("{count} games are") };
+    format!("{games} on {which} can only be read right now: saving won't work")
+}
+
+/// Why a Windows drive can only be read, and how to fix it.
+pub const READ_ONLY_WHY: &str = "Windows didn't fully shut down (Fast Startup or hibernation), so Linux opens its drive read-only to keep Windows' files safe. Games there start, but can't save or update.\n\nTo fix it: start Windows, turn off Fast Startup (Control Panel → Power Options → Choose what the power buttons do → uncheck \"Turn on fast startup\"), shut Windows down, then restart this computer.";
 
 fn capitalized(s: &str) -> String {
     let mut c = s.chars();
@@ -298,6 +335,32 @@ mod tests {
         assert_eq!(closed_text(&closed), "3 games are on the Games and My USB drives, which aren't open");
         assert_eq!(closed_text(&closed[..1]), "2 games are on the Games drive, which isn't open");
         assert_eq!(closed_text(&[(closed[0].0.clone(), 0)]), "Games may be on the Games drive, which isn't open");
+    }
+
+    #[test]
+    fn counts_games_on_a_read_only_windows_drive() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-read-only");
+        let (win, linux) = (dir.join("win"), dir.join("linux"));
+        for d in [win.join("A"), win.join("B"), linux.join("C")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let line = |n: u32, p: &Path, opts: &str, fs: &str| format!("{n} 1 0:{n} / {} {opts},noatime shared:1 - {fs} /dev/x{n} {opts}", p.display());
+        let mounts = parse(&[line(1, Path::new("/"), "rw", "btrfs"), line(2, &win, "ro", "fuseblk"), line(3, &linux, "ro", "btrfs")].join("\n"));
+        let game = |name: &str, folder: PathBuf| {
+            let mut e = crate::library::Entry::new(Source::Folder, name);
+            e.folder = Some(folder);
+            Game { id: name.into(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
+        };
+        let mut games = vec![game("a", win.join("A")), game("b", win.join("B")), game("c", linux.join("C"))];
+        let found = read_only_with_games(&games, &mounts);
+        assert_eq!(found, vec![(mounts[1].name(), 2)]);
+        assert_eq!(read_only_text(&found), "2 games are on the drive your win folder is on, which can only be read right now: saving won't work");
+        games[1].hidden = true;
+        assert!(read_only_text(&read_only_with_games(&games, &mounts)).starts_with("1 game is on "));
+        // Writable again: no bar.
+        let rw = parse(&line(2, &win, "rw", "fuseblk"));
+        assert!(read_only_with_games(&games, &rw).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
