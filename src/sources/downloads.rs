@@ -5,6 +5,7 @@
 //! rar (Fedora's 7-Zip leaves rar out).
 
 use crate::library::{not_a_game, Entry, Key, Kind, Source};
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -36,7 +37,7 @@ fn runnable_jar(file: &Path) -> bool {
 }
 
 /// Words in a download's name that make it something for a game, not one.
-const NOT_A_GAME: &[&str] = &["patch", "fix", "mod", "mods", "trainer", "soundtrack", "ost", "wallpaper", "wallpapers", "manual", "save", "saves", "update", "redist", "dlc", "checksum", "plugin", "plugins", "tool", "tools", "addon", "addons", "asset", "assets", "assetpack", "blender", "texture", "textures", "documentation", "exiftool", "sdk"];
+const NOT_A_GAME: &[&str] = &["patch", "fix", "mod", "mods", "trainer", "soundtrack", "ost", "wallpaper", "wallpapers", "manual", "save", "saves", "update", "redist", "dlc", "checksum", "plugin", "plugins", "tool", "tools", "addon", "addons", "asset", "assets", "assetpack", "blender", "texture", "textures", "documentation", "exiftool", "sdk", "whql"];
 
 /// The command's output lines, or None if it failed or took over 60 s. Never waits for input
 /// (an encrypted archive would otherwise ask for a password).
@@ -247,6 +248,32 @@ fn not_a_game_download(name: &str) -> bool {
     not_a_game(name) || words.iter().any(|w| NOT_A_GAME.contains(&w.as_str())) || ["patch", "trainer", "cheatengine"].iter().chain(APPS).any(|w| plain.contains(w))
 }
 
+/// Makers of hardware whose downloads are drivers and their apps, never games (Windows'
+/// CompanyName, lowercase): an NVIDIA driver in Downloads was a game card.
+const HARDWARE_MAKERS: &[&str] = &["nvidia", "advanced micro devices", "amd", "intel corporation", "realtek", "logitech", "razer", "corsair", "steelseries", "asustek", "micro-star", "gigabyte", "elgato", "8bitdo"];
+
+/// The maker a Windows program names in its version information (CompanyName). Read from its
+/// first 8 MB: the information sits near the start (1 MB into NVIDIA's 944 MB installer), and a
+/// whole installer is too much to read on every scan.
+fn maker(file: &Path) -> Option<String> {
+    let mut data = Vec::new();
+    std::fs::File::open(file).ok()?.take(8 << 20).read_to_end(&mut data).ok()?;
+    let key: Vec<u8> = "CompanyName\0".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let at = data.windows(key.len()).position(|w| w == key)? + key.len();
+    let start = (at + 3) & !3;
+    let units: Vec<u16> = data.get(start..)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).take(128).collect();
+    let name = String::from_utf16_lossy(&units).trim().to_lowercase();
+    (!name.is_empty()).then_some(name)
+}
+
+/// A program made by a hardware maker: a driver or its app.
+fn hardware_makers(file: &Path) -> bool {
+    maker(file).is_some_and(|m| {
+        let words: Vec<&str> = m.split(|c: char| !c.is_alphanumeric() && c != '-').collect();
+        HARDWARE_MAKERS.iter().any(|h| if h.contains(' ') { m.starts_with(h) } else { words.contains(h) })
+    })
+}
+
 /// A loose file as a game download, or nothing.
 /// `strict` (a dumping ground of a folder: an old Downloads): only an archive showing a game
 /// engine counts, and no loose .exe (tools and installers of all sorts).
@@ -270,7 +297,7 @@ pub fn look(file: &Path, strict: bool) -> Option<Entry> {
         return Some(e);
     }
     if ext == "exe" {
-        if strict {
+        if strict || hardware_makers(file) {
             return None;
         }
         // An installer, or a game in one program that runs as it is.
@@ -324,6 +351,32 @@ mod tests {
         for f in ["Ghost_Defender.zip", "setup_amber_fields_1.0.exe", "Moon_Garden_v1.2_win.zip", "Unreal_Gold.zip", "Steamworld_Dig.zip"] {
             assert!(!not_a_game_download(&title(Path::new(f))), "{f}");
         }
+    }
+
+    #[test]
+    fn drivers_arent_games() {
+        assert!(not_a_game_download(&title(Path::new("617.42-desktop-win10-win11-64bit-international-dch-whql.exe"))));
+        let dir = std::env::temp_dir().join(format!("lobby-drivers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A version resource's CompanyName: the key, padding to 4 bytes, the value, NUL.
+        let exe = |name: &str, company: &str| {
+            let mut data = b"MZ".to_vec();
+            data.resize(4096, 0);
+            data.extend("CompanyName\0".encode_utf16().flat_map(|c| c.to_le_bytes()));
+            while data.len() % 4 != 0 {
+                data.push(0);
+            }
+            data.extend(company.encode_utf16().chain([0]).flat_map(|c| c.to_le_bytes()));
+            let path = dir.join(name);
+            std::fs::write(&path, data).unwrap();
+            path
+        };
+        assert!(hardware_makers(&exe("geforce.exe", "NVIDIA Corporation")));
+        assert!(hardware_makers(&exe("adrenalin.exe", "Advanced Micro Devices, Inc.")));
+        assert!(hardware_makers(&exe("ghub.exe", "Logitech")));
+        assert!(!hardware_makers(&exe("game.exe", "Blackcloud BSG")));
+        assert!(!hardware_makers(&exe("other.exe", "Amdocs")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
