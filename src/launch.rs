@@ -100,7 +100,7 @@ fn plan_as_set_up(game: &Game) -> Plan {
     }
     if let Some(e) = game.entries.iter().find(|e| e.source == Source::SteamElsewhere) {
         let at = e.folder.as_deref().map(|f| f.display().to_string()).unwrap_or_default();
-        return Plan::Cannot(format!("It's in a Steam library Steam doesn't use ({at}). \"Move into Steam\" on its page copies it into one of Steam's libraries; Steam starts it from there."));
+        return Plan::Cannot(format!("It's in a Steam library Steam doesn't use ({at}). Play in Lobby's window (or \"Move into Steam\" on its page) moves it into one of Steam's libraries; Steam starts it from there."));
     }
     if let Some(p) = store_plan(game) {
         return p;

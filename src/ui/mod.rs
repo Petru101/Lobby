@@ -3019,19 +3019,24 @@ impl Ui {
                 Ok(p) => p,
                 Err(e) => return u.alert(&format!("{} can't be moved into Steam", game.name), &e),
             };
-            let why = if play { "Steam doesn't start it where it is: that Steam library isn't one of Steam's. " } else { "" };
+            let from = crate::drives::drive_name(&folder);
+            let to = crate::drives::drive_name(&target);
+            let why = if play { format!("Steam can't start it where it is: in an old Steam folder on {from} that Steam doesn't use. ") } else { String::new() };
             let after = if play { "Steam then restarts and starts it." } else { "Steam restarts afterwards to show it." };
-            let alert = adw::AlertDialog::new(Some(&format!("Move {} into Steam?", game.name)), Some(&format!("{why}Its files ({size}) are copied into Steam's library {}; the old copy stays in {} until you delete it. {after}", target.display(), folder.parent().map(|p| p.display().to_string()).unwrap_or_default())));
+            let alert = adw::AlertDialog::new(Some(&format!("Move {} into Steam?", game.name)), Some(&format!("{why}Lobby moves it ({size}) from {from} into Steam's own library on {to}. {after}")));
             alert.add_responses(&[("cancel", "Cancel"), ("move", if play { "Move and Play" } else { "Move into Steam" })]);
             alert.set_response_appearance("move", adw::ResponseAppearance::Suggested);
             if alert.choose_future(Some(&u.window)).await != "move" {
                 return;
             }
             let f = folder.clone();
-            let moved = u.with_progress(&game.id, "Copying…", move |p| crate::sources::Home::find().ok_or("no home folder".to_string()).and_then(|h| crate::steam_move::move_into_steam(&h, &f, appid, p))).await.unwrap_or_else(|| Err("it stopped with an error".into()));
+            let moved = u.with_progress(&game.id, "Moving…", move |p| crate::sources::Home::find().ok_or("no home folder".to_string()).and_then(|h| crate::steam_move::move_into_steam(&h, &f, appid, p))).await.unwrap_or_else(|| Err("it stopped with an error".into()));
             match moved {
-                Ok(lib) => {
-                    u.toast(&format!("{} is in Steam's library {} now. {}", game.name, lib.display(), if play { "Steam starts it in a moment…" } else { "Restarting Steam…" }));
+                Ok(moved) => {
+                    u.toast(&format!("{} is in Steam's library now. {}", game.name, if play { "Steam starts it in a moment…" } else { "Restarting Steam…" }));
+                    if let Some(left) = moved.left {
+                        u.alert(&format!("{} is in Steam now, but its old copy is still there", game.name), &format!("Lobby couldn't delete all of it: {left}"));
+                    }
                     if let Ok(Err(e)) = gio::spawn_blocking(move || crate::steam_move::restart_steam(play.then_some(appid))).await {
                         u.alert("Steam didn't restart", &e);
                     }

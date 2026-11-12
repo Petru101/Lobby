@@ -28,8 +28,11 @@ impl Mount {
     fn name(&self) -> String {
         let removable = ["/run/media", "/media", "/mnt"].iter().any(|r| self.point.starts_with(r));
         let home = std::env::var_os("HOME").and_then(|h| std::fs::canonicalize(h).ok());
-        let in_home = home.is_some_and(|h| self.point.starts_with(&h));
+        let in_home = home.as_ref().is_some_and(|h| self.point.starts_with(h) && self.point != *h);
+        // The system's own drive: the home folder is on it (Fedora Atomic mounts it at /var).
+        let system = self.point == Path::new("/") || home.is_some_and(|h| h.starts_with(&self.point));
         match self.point.file_name() {
+            _ if system => "your system drive".into(),
             Some(n) if removable => format!("the {} drive", n.to_string_lossy()),
             Some(n) if in_home => format!("the drive your {} folder is on", n.to_string_lossy()),
             _ => format!("the drive at {}", self.point.display()),
@@ -96,6 +99,11 @@ pub fn mounts() -> Vec<Mount> {
 
 /// The mount a path is on: the one mounted at the path or the nearest folder above it, the
 /// last mounted when several are (links resolved, so /home is /var/home).
+/// The drive a folder is on, as a person would call it ("the Archive drive").
+pub fn drive_name(path: &Path) -> String {
+    mount_of(path, &mounts()).map_or_else(|| "a drive".into(), Mount::name)
+}
+
 pub fn mount_of<'a>(path: &Path, mounts: &'a [Mount]) -> Option<&'a Mount> {
     let real = path.ancestors().find_map(|p| std::fs::canonicalize(p).ok())?;
     mounts.iter().filter(|m| real.starts_with(&m.point)).max_by_key(|m| m.point.components().count())

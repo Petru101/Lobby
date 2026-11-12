@@ -1,7 +1,10 @@
 //! Moving a game from a Steam library Steam doesn't list (an old Windows install's) into one
-//! it does: the game's folder and its app manifest copied into Steam's library on a Linux-format
+//! it does: the game's folder and its app manifest moved into Steam's library on a Linux-format
 //! drive with the most room (a Windows-format drive can't hold Proton's prefixes). Steam reads
-//! its libraries when it starts, so it's restarted after. The old copy is left where it was.
+//! its libraries when it starts, so it's restarted after. It's a move, the user's wish: they
+//! couldn't tell where the copy left behind was ("I can't keep track of Linux's drive naming").
+//! On the same drive the folder is renamed; across drives it's copied, the copy checked against
+//! the original (every file's size), and only then the original deleted.
 
 use crate::sources::Home;
 use std::fs;
@@ -40,9 +43,36 @@ pub fn size_text(folder: &Path) -> String {
     if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.0} MB", gb * 1000.0) }
 }
 
-/// Copies the game (in `<old library>/steamapps/common/<dir>`) and its manifest into Steam's
-/// library; `progress` gets 0 to 100. Returns the library it went to.
-pub fn move_into_steam(home: &Home, folder: &Path, appid: u32, progress: &dyn Fn(f64)) -> Result<PathBuf, String> {
+/// What of the original couldn't be deleted (the game is in Steam's library either way).
+pub struct Moved {
+    pub left: Option<String>,
+}
+
+/// Every file under the folder, by path from it, with its size.
+fn files_of(dir: &Path, under: &Path, out: &mut Vec<(PathBuf, u64)>) {
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => files_of(&path, under, out),
+            Ok(t) => out.push((path.strip_prefix(under).unwrap_or(&path).to_path_buf(), if t.is_file() { e.metadata().map_or(0, |m| m.len()) } else { 0 })),
+            Err(_) => {}
+        }
+    }
+}
+
+fn same_files(a: &Path, b: &Path) -> bool {
+    let list = |d: &Path| {
+        let mut v = Vec::new();
+        files_of(d, d, &mut v);
+        v.sort();
+        v
+    };
+    list(a) == list(b)
+}
+
+/// Moves the game (in `<old library>/steamapps/common/<dir>`), its manifest and its Proton
+/// prefix if it has one there into Steam's library; `progress` gets 0 to 100.
+pub fn move_into_steam(home: &Home, folder: &Path, appid: u32, progress: &dyn Fn(f64)) -> Result<Moved, String> {
     let steamapps = folder.parent().and_then(Path::parent).filter(|p| p.ends_with("steamapps")).ok_or("It isn't in a Steam library's steamapps/common.")?;
     let manifest = steamapps.join(format!("appmanifest_{appid}.acf"));
     if !manifest.is_file() {
@@ -55,6 +85,21 @@ pub fn move_into_steam(home: &Home, folder: &Path, appid: u32, progress: &dyn Fn
     if new_manifest.exists() || into.exists() {
         return Err(format!("Steam's library {} has it already.", lib.display()));
     }
+    // Its Proton prefix, when it was played from there on Linux: its saves may be in it.
+    let (prefix, new_prefix) = (steamapps.join("compatdata").join(appid.to_string()), lib.join("steamapps/compatdata").join(appid.to_string()));
+    let prefix = prefix.is_dir().then_some(prefix).filter(|_| !new_prefix.exists());
+    // On the same drive a rename is the whole move.
+    if fs::rename(folder, &into).is_ok() {
+        let left = fs::rename(&manifest, &new_manifest).or_else(|_| fs::copy(&manifest, &new_manifest).map(|_| ()));
+        left.map_err(|e| e.to_string())?;
+        if let Some(p) = &prefix {
+            let _ = fs::create_dir_all(new_prefix.parent().unwrap());
+            if fs::rename(p, &new_prefix).is_err() {
+                copy_then_delete(p, &new_prefix, &|_| {})?;
+            }
+        }
+        return Ok(Moved { left: None });
+    }
     let done = std::cell::Cell::new(0u64);
     let work = into.with_file_name(format!(".lobby-moving-{appid}"));
     let _ = fs::remove_dir_all(&work);
@@ -65,9 +110,35 @@ pub fn move_into_steam(home: &Home, folder: &Path, appid: u32, progress: &dyn Fn
     .inspect_err(|_| {
         let _ = fs::remove_dir_all(&work);
     })?;
+    if !same_files(folder, &work) {
+        let _ = fs::remove_dir_all(&work);
+        return Err("The copy didn't come out the same as the original, so nothing was moved.".into());
+    }
     fs::rename(&work, &into).map_err(|e| e.to_string())?;
     fs::copy(&manifest, &new_manifest).map_err(|e| e.to_string())?;
-    Ok(lib)
+    let mut left = Vec::new();
+    if let Some(p) = &prefix {
+        let _ = fs::create_dir_all(new_prefix.parent().unwrap());
+        if let Err(e) = copy_then_delete(p, &new_prefix, &|_| {}) {
+            left.push(format!("its Proton settings: {e}"));
+        }
+    }
+    // The original goes only now, with its copy in place and checked.
+    if let Err(e) = fs::remove_dir_all(folder) {
+        left.push(format!("{} ({e})", folder.display()));
+    }
+    let _ = fs::remove_file(&manifest);
+    Ok(Moved { left: (!left.is_empty()).then(|| left.join("; ")) })
+}
+
+/// A folder copied, checked, then deleted.
+fn copy_then_delete(from: &Path, to: &Path, copied: &dyn Fn(u64)) -> Result<(), String> {
+    copy_dir(from, to, copied)?;
+    if !same_files(from, to) {
+        let _ = fs::remove_dir_all(to);
+        return Err("the copy didn't come out the same".into());
+    }
+    fs::remove_dir_all(from).map_err(|e| e.to_string())
 }
 
 fn copy_dir(from: &Path, to: &Path, copied: &dyn Fn(u64)) -> Result<(), String> {
@@ -110,4 +181,48 @@ pub fn restart_steam(play: Option<u32>) -> Result<(), String> {
     }
     let command: Vec<String> = std::iter::once("steam".to_string()).chain(play.map(|id| format!("steam://rungameid/{id}"))).collect();
     crate::launch::start("Steam", &command, None, &crate::store::log_file("steam"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A game in a stray library under `stray`, moved into the Steam library of a home under
+    /// `home`: the same drive (a rename) or another (copied, checked, original deleted).
+    fn moves(stray: &Path, home: &Path) {
+        let _ = (fs::remove_dir_all(stray), fs::remove_dir_all(home));
+        let steam = home.join(".local/share/Steam/steamapps");
+        fs::create_dir_all(steam.join("common")).unwrap();
+        let game = stray.join("SteamLibrary/steamapps/common/Some Game");
+        fs::create_dir_all(game.join("data")).unwrap();
+        fs::write(game.join("game.exe"), vec![1u8; 300_000]).unwrap();
+        fs::write(game.join("data/level.pak"), vec![2u8; 70_000]).unwrap();
+        std::os::unix::fs::symlink("level.pak", game.join("data/link")).unwrap();
+        fs::write(stray.join("SteamLibrary/steamapps/appmanifest_42.acf"), "\"AppState\" {}").unwrap();
+        let prefix = stray.join("SteamLibrary/steamapps/compatdata/42/pfx");
+        fs::create_dir_all(&prefix).unwrap();
+        fs::write(prefix.join("save.dat"), "saved").unwrap();
+        let h = Home { home: home.to_path_buf(), user: "u".into() };
+        let moved = move_into_steam(&h, &game, 42, &|_| {}).unwrap();
+        assert!(moved.left.is_none());
+        let into = fs::canonicalize(&steam).unwrap();
+        assert_eq!(fs::read(into.join("common/Some Game/game.exe")).unwrap().len(), 300_000);
+        assert_eq!(fs::read_link(into.join("common/Some Game/data/link")).unwrap(), Path::new("level.pak"));
+        assert!(into.join("appmanifest_42.acf").is_file());
+        assert_eq!(fs::read_to_string(into.join("compatdata/42/pfx/save.dat")).unwrap(), "saved");
+        assert!(!game.exists() && !stray.join("SteamLibrary/steamapps/appmanifest_42.acf").exists() && !prefix.exists());
+        // Nothing left half-way.
+        assert!(!into.join("common/.lobby-moving-42").exists());
+        let _ = (fs::remove_dir_all(stray), fs::remove_dir_all(home));
+    }
+
+    #[test]
+    fn moves_a_game_into_steam_and_leaves_no_copy() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-steam-move");
+        // Both in the project's folder: one drive.
+        moves(&here.join("stray"), &here.join("home"));
+        // The game in the temporary folder (another file system here): copied, then deleted.
+        moves(&std::env::temp_dir().join(format!("lobby-stray-{}", std::process::id())), &here.join("home2"));
+        let _ = fs::remove_dir_all(&here);
+    }
 }
