@@ -41,7 +41,9 @@ pub fn how(game: &Game) -> How {
     // The folder lobby unpacked into or gamefix installed into: the game's folder or one up to
     // three above it (an archive's top folder holding the game's own: MoleTest/Mole Test/).
     let made = |f: &Path| f.join(crate::install::SOURCE_NOTE).is_file() || f.join("gamefix-install.txt").is_file();
-    let places = game.entries.iter().flat_map(|e| [e.folder.clone(), e.program.as_deref().and_then(Path::parent).map(Path::to_path_buf)]).flatten();
+    // Not its downloads': a disc image Lobby unpacked is the download, not the game installed
+    // from it (Need for Speed Underground's discs, while the game went to E:\NFSU).
+    let places = game.entries.iter().filter(|e| e.kind != Kind::Download || game.kind == Kind::Download).flat_map(|e| [e.folder.clone(), e.program.as_deref().and_then(Path::parent).map(Path::to_path_buf)]).flatten();
     if let Some(folder) = places.flat_map(|f| f.ancestors().take(4).map(Path::to_path_buf).collect::<Vec<_>>()).find(|f| made(f)) {
         return How::Folder(folder);
     }
@@ -133,7 +135,7 @@ pub(crate) fn found_folder(game: &Game, folder: &Path) -> Result<(), String> {
 
 /// For a gamefix install (its note in `folder`) whose program is outside it, on another
 /// drive: the game's own folder there, the one holding the installer's uninstaller (Inno
-/// Setup's unins000.exe, NSIS's uninstall.exe), else Err(the program).
+/// Setup's unins000.exe, NSIS's uninstall.exe, EA's eauninstall.exe), else Err(the program).
 pub(crate) fn installed_elsewhere(folder: &Path) -> Option<Result<PathBuf, PathBuf>> {
     let note = fs::read_to_string(folder.join("gamefix-install.txt")).ok()?;
     let program = PathBuf::from(note.lines().find_map(|l| l.strip_prefix("program\t"))?);
@@ -143,7 +145,7 @@ pub(crate) fn installed_elsewhere(folder: &Path) -> Option<Result<PathBuf, PathB
     let uninstaller = |dir: &Path| {
         fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
             let n = e.file_name().to_string_lossy().to_lowercase();
-            n.ends_with(".exe") && (n.starts_with("unins") || n.starts_with("uninstall"))
+            n.ends_with(".exe") && (n.starts_with("unins") || n.contains("uninstall"))
         })
     };
     let dev = |p: &Path| fs::metadata(p).map(|m| std::os::unix::fs::MetadataExt::dev(&m)).ok();
@@ -195,6 +197,9 @@ mod tests {
         fs::write(&program, "").unwrap();
         fs::write(prefix.join("gamefix-install.txt"), format!("source\t/d/setup.exe\nprogram\t{}\nname\tBorderlands 4\n", program.display())).unwrap();
         assert_eq!(installed_elsewhere(&prefix), Some(Err(program.clone())));
+        fs::write(game.join("eauninstall.exe"), "").unwrap();
+        assert_eq!(installed_elsewhere(&prefix), Some(Ok(game.clone())));
+        fs::remove_file(game.join("eauninstall.exe")).unwrap();
         fs::write(game.join("unins000.exe"), "").unwrap();
         assert_eq!(installed_elsewhere(&prefix), Some(Ok(game.clone())));
         fs::write(prefix.join("gamefix-install.txt"), "source\t/d/setup.exe\nprogram\tdrive_c/Games/X/x.exe\n").unwrap();

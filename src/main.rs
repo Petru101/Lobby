@@ -7,6 +7,7 @@ mod battlenet;
 mod clients;
 mod covers;
 mod drives;
+mod extras;
 mod fixing;
 mod free;
 mod import;
@@ -853,7 +854,13 @@ fn how(query: &str) -> Result<(), String> {
             let c = clients::by_id(client);
             println!("{}: only starts with the {}; Lobby installs it into {} first, then runs {} there.", game.name, c.map_or("store app", |c| c.name), c.map(|c| c.prefix().display().to_string()).unwrap_or_default(), program.display());
         }
-        launch::Plan::Cannot(why) => println!("{}: {why}", game.name),
+        launch::Plan::Cannot(why) => {
+            println!("{}: {why}", game.name);
+            let extras = install::extras(game);
+            if !extras.is_empty() && game.kind == Kind::Download {
+                println!("After installing it, Install puts in {}, downloaded beside it.", extras.iter().map(|e| e.describe()).collect::<Vec<_>>().join(", then "));
+            }
+        }
     }
     if let Some(o) = &game.launch_options {
         println!("  launch options: {o}");
@@ -885,7 +892,11 @@ fn how(query: &str) -> Result<(), String> {
         uninstall::How::Store(store, _) => format!("{}'s files go, through lobby's {} tool", game.name, store.name()),
         uninstall::How::Steam(id) => format!("Steam uninstalls it (app {id})"),
         uninstall::How::SteamCopy(f, _) => format!("deletes the copy in {}", f.display()),
-        uninstall::How::Folder(f) => format!("deletes {} (lobby or gamefix put it there)", f.display()),
+        uninstall::How::Folder(f) => match uninstall::installed_elsewhere(&f) {
+            Some(Ok(game_folder)) => format!("deletes {} (lobby or gamefix put it there) and the game's folder {}", f.display(), game_folder.display()),
+            Some(Err(program)) => format!("deletes {} (lobby or gamefix put it there); the game's folder isn't plain from {}, so it stays", f.display(), program.display()),
+            None => format!("deletes {} (lobby or gamefix put it there)", f.display()),
+        },
         uninstall::How::Found(f) => format!("deletes {} (found on your drive)", f.display()),
         uninstall::How::Not(why) => why,
     });

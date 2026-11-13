@@ -49,7 +49,7 @@ pub fn still_coming<'a>(games: impl IntoIterator<Item = &'a Game>) -> std::colle
     flagged.into_iter().filter(|(_, parts)| parts.iter().any(|p| left.contains(p))).map(|(id, _)| id.to_string()).collect()
 }
 
-fn archive_kind(file: &Path) -> Option<&'static str> {
+pub(crate) fn archive_kind(file: &Path) -> Option<&'static str> {
     let name = file.file_name()?.to_string_lossy().to_lowercase();
     if [".tar.gz", ".tar.xz", ".tar.bz2", ".tgz"].iter().any(|e| name.ends_with(e)) {
         Some("tar")
@@ -73,7 +73,7 @@ fn run(program: &str, args: &[&str]) -> Result<(), String> {
 }
 
 /// Unpacks the archive into the (new, empty) folder. No password is ever asked for.
-fn unpack(file: &Path, into: &Path) -> Result<(), String> {
+pub(crate) fn unpack(file: &Path, into: &Path) -> Result<(), String> {
     let (f, d) = (file.to_string_lossy(), into.to_string_lossy());
     match archive_kind(file) {
         Some("tar") => run("tar", &["-xf", &f, "-C", &d]),
@@ -100,10 +100,19 @@ fn only_archive(dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// A folder an earlier Install unpacked this download into, still there: used again, not
+/// unpacked a second time (an install whose installer was cancelled left 1.4 GB of discs).
+fn unpacked_before(games: &Path, file: &Path) -> Option<PathBuf> {
+    fs::read_dir(games).ok()?.flatten().map(|e| e.path()).find(|dir| fs::read_to_string(dir.join(SOURCE_NOTE)).is_ok_and(|t| Path::new(t.trim_end_matches('\n')) == file))
+}
+
 /// Unpacks the archive into a new folder in the games folder, named after the game.
 fn unpack_into_games(game: &Game, file: &Path) -> Result<PathBuf, String> {
     let games = gamefix::setup::games_folder();
     fs::create_dir_all(&games).map_err(|e| format!("The games folder {} isn't there: {e}", games.display()))?;
+    if let Some(dir) = unpacked_before(&games, file) {
+        return Ok(dir);
+    }
     // Unpacked beside its final place, then renamed: a failed unpack leaves no half game.
     let work = games.join(format!(".lobby-unpacking-{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
@@ -130,6 +139,8 @@ pub struct Installed {
     pub lines: Vec<String>,
     /// The app-menu entry that starts it, when it could be set up.
     pub entry: Option<PathBuf>,
+    /// The extras put in after it ("the patch", "the fix").
+    pub extras: Vec<&'static str>,
 }
 
 /// A game's files in place, not set up yet: the folder (or the installer, which gamefix runs),
@@ -138,6 +149,8 @@ pub struct Placed {
     pub target: PathBuf,
     pub name: Option<String>,
     lines: Vec<String>,
+    /// Patches and fixes downloaded beside it, put in once it's installed.
+    extras: Vec<crate::extras::Extra>,
 }
 
 /// Puts a game's files in place: a download unpacked into the games folder (an installer or a
@@ -149,7 +162,7 @@ pub fn place(game: &Game, progress: &dyn Fn(f64)) -> Result<Placed, String> {
         let (store, id) = owned_in(game).ok_or_else(|| format!("{} isn't owned in a store lobby is signed in to.", game.name))?;
         let folder = store.install(&id, progress)?;
         let lines = vec![format!("✓ Downloaded it from {} into {}.", store.name(), folder.display())];
-        return Ok(Placed { target: folder, name: Some(game.name.clone()), lines });
+        return Ok(Placed { target: folder, name: Some(game.name.clone()), lines, extras: Vec::new() });
     }
     let file = download(game).ok_or_else(|| format!("{}'s download isn't there any more.", game.name))?;
     if let Some(part) = download_parts(game).and_then(|parts| gamefix::download::unfinished(&parts).into_iter().next()) {
@@ -157,12 +170,18 @@ pub fn place(game: &Game, progress: &dyn Fn(f64)) -> Result<Placed, String> {
     }
     // An unpacked game is named as lobby names it; an installer or a disc image is run by
     // gamefix, which names it after what it installs.
+    let extras = crate::extras::for_download(&file);
     if archive_kind(&file).is_some() {
         let folder = unpack_into_games(game, &file)?;
         let lines = vec![format!("✓ Unpacked it into {}.", folder.display())];
-        return Ok(Placed { target: folder, name: Some(game.name.clone()), lines });
+        return Ok(Placed { target: folder, name: Some(game.name.clone()), lines, extras });
     }
-    Ok(Placed { target: file, name: None, lines: Vec::new() })
+    Ok(Placed { target: file, name: None, lines: Vec::new(), extras })
+}
+
+/// The patches and fixes Install puts in after the game, for `lobby how`.
+pub fn extras(game: &Game) -> Vec<crate::extras::Extra> {
+    download(game).map(|f| crate::extras::for_download(&f)).unwrap_or_default()
 }
 
 /// gamefix sets the placed game up (an app-menu entry with its fixes, which starts it).
@@ -170,12 +189,34 @@ pub fn set_up(placed: Placed) -> Installed {
     let mut lines = placed.lines;
     match crate::launch::set_up(&placed.target, placed.name.as_deref()) {
         Ok((done, entry)) => {
-            lines.extend(done);
-            Installed { lines, entry }
+            let target = entry.as_deref().and_then(crate::extras::Target::from_entry);
+            let (Some(target), false) = (target, placed.extras.is_empty()) else {
+                lines.extend(done);
+                return Installed { lines, entry, extras: Vec::new() };
+            };
+            // The game's patches and fixes, then gamefix again, which sees the game as they
+            // left it (a No-CD program instead of a protected one, a fix's DLLs to load); its
+            // earlier warnings were about the game before them.
+            lines.extend(done.into_iter().filter(|l| !l.starts_with('✗')));
+            let (put_lines, extras) = crate::log::timed("install: patches and fixes", || crate::extras::put_in(&placed.extras, &target));
+            lines.extend(put_lines);
+            if extras.is_empty() {
+                return Installed { lines, entry, extras };
+            }
+            match crate::launch::set_up(&placed.target, placed.name.as_deref()) {
+                Ok((again, entry)) => {
+                    lines.extend(again.into_iter().filter(|l| l.starts_with('✗')));
+                    Installed { lines, entry, extras }
+                }
+                Err(e) => {
+                    lines.push(format!("✗ {e}"));
+                    Installed { lines, entry, extras }
+                }
+            }
         }
         Err(e) => {
             lines.push(format!("✗ {e}"));
-            Installed { lines, entry: None }
+            Installed { lines, entry: None, extras: Vec::new() }
         }
     }
 }

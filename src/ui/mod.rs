@@ -2355,6 +2355,7 @@ impl Ui {
                 Ok(done) => {
                     let failed = done.lines.iter().any(|l| l.starts_with('✗'));
                     match (&done.entry, failed) {
+                        (Some(_), false) if !done.extras.is_empty() => u.toast(&format!("{} is installed, with {} downloaded beside it. Press Play to start it.", game.name, and_list(&done.extras))),
                         (Some(_), false) => u.toast(&format!("{} is installed. Press Play to start it.", game.name)),
                         (Some(_), true) => u.alert(&format!("{} is installed, with a warning", game.name), &done.lines.join("\n")),
                         (None, _) => u.alert(&format!("{} couldn't be set up", game.name), &done.lines.join("\n")),
@@ -5264,4 +5265,13 @@ fn move_choices() -> Vec<(String, std::path::PathBuf, u64, bool)> {
         }
     }
     out
+}
+
+/// "a", "a and b", "a, b and c".
+fn and_list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
