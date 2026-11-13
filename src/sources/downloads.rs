@@ -112,7 +112,7 @@ fn holds(names: &[String]) -> Holds {
 }
 
 /// A disc image is a game's when it installs one on Windows: an autorun.inf or a program at
-/// its top (not a Linux system's disc: Fedora's, Rescuezilla's).
+/// its top (not a system's install disc: Fedora's, Rescuezilla's, Windows' own).
 fn game_disc(names: &[String]) -> bool {
     // A live Linux system (Ubuntu's casper, Fedora's LiveOS, isolinux) may still carry an
     // autorun.inf for Windows users.
@@ -120,7 +120,12 @@ fn game_disc(names: &[String]) -> bool {
         let n = n.to_lowercase();
         ["casper", "liveos", "isolinux", "live"].iter().any(|d| n == *d || n.starts_with(&format!("{d}/")))
     });
-    !linux && names.iter().any(|n| {
+    // Windows' install disc: its boot manager at the top, the system image in sources/.
+    let windows = names.iter().any(|n| {
+        let n = n.to_lowercase().replace('\\', "/");
+        n == "bootmgr" || ["sources/install.wim", "sources/install.esd", "sources/boot.wim"].contains(&n.as_str())
+    });
+    !linux && !windows && names.iter().any(|n| {
         let n = n.to_lowercase().replace('\\', "/");
         n == "autorun.inf" || (!n.contains('/') && n.ends_with(".exe"))
     })
@@ -447,5 +452,7 @@ mod tests {
         assert!(game_disc(&names(&["AUTORUN.INF", "Setup.exe"])));
         assert!(!game_disc(&names(&["casper/vmlinuz", "EFI/boot/grubx64.efi"])));
         assert!(!game_disc(&names(&["autorun.inf", "autorun.exe", "casper", "casper/vmlinuz"])));
+        assert!(!game_disc(&names(&["autorun.inf", "bootmgr", "setup.exe", "sources/install.wim"])));
+        assert!(!game_disc(&names(&["AUTORUN.INF", "SETUP.EXE", "SOURCES\\INSTALL.ESD"])));
     }
 }
