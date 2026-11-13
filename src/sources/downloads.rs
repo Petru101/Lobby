@@ -19,7 +19,7 @@ pub fn wanted(path: &Path) -> bool {
     if name.rsplit_once(".part").is_some_and(|(_, part)| part.trim_end_matches(".rar").parse::<u32>().is_ok_and(|n| n > 1)) {
         return false;
     }
-    ext == "exe" || ext == "jar" || ARCHIVES.contains(&ext.as_str())
+    ext == "exe" || ext == "jar" || ext == "appimage" || ARCHIVES.contains(&ext.as_str())
 }
 
 /// Files in a .jar that make it a Minecraft mod or a server plugin, not a game.
@@ -95,8 +95,9 @@ fn holds(names: &[String]) -> Holds {
     if ends(&[".esp", ".esm", ".esl", ".ba2", ".bsa", ".pex"]) || lower.iter().any(|n| n.starts_with("f4se/") || n.starts_with("skse/") || n.contains("/f4se/") || n.contains("/skse/")) {
         return Holds::Mod;
     }
-    // Linux builds' programs have no extension, but they bring libraries (.so).
-    let program = ends(&[".exe", ".x86_64", ".x86", ".appimage", ".love", ".swf", ".jar", ".iso", ".pck", ".so"]) || lower.iter().any(|n| n.contains("_data/") || n.contains(".so."));
+    // Linux builds' programs have no extension, but they bring libraries (.so), or GameMaker's
+    // game.unx (its program, "runner" or the game's name, needs none).
+    let program = ends(&[".exe", ".x86_64", ".x86", ".appimage", ".love", ".swf", ".jar", ".iso", ".pck", ".so", "/game.unx"]) || lower.iter().any(|n| n.contains("_data/") || n.contains(".so."));
     // A download packed twice: only archives inside ("InsertPointless.zip" holds a zip).
     let nested = !lower.is_empty() && lower.iter().all(|n| [".zip", ".rar", ".7z"].iter().any(|e| n.ends_with(e)));
     if program || nested {
@@ -296,6 +297,15 @@ pub fn look(file: &Path, strict: bool) -> Option<Entry> {
         e.kind = if plain.contains("install") || plain.contains("setup") { Kind::Download } else { Kind::Game };
         return Some(e);
     }
+    if ext == "appimage" {
+        // A Linux game in one file (not Lobby's own AppImage; an old dumping-ground folder's
+        // are as likely tools).
+        if strict || super::folders::lobby_itself(file) || !matches!(gamefix::binary::identify(file)?, gamefix::binary::Binary::Elf(_)) {
+            return None;
+        }
+        e.kind = Kind::Game;
+        return Some(e);
+    }
     if ext == "exe" {
         if strict || hardware_makers(file) {
             return None;
@@ -425,6 +435,9 @@ mod tests {
         assert_eq!(holds(&names(&["F4SE/Plugins/Buffout4.dll", "F4SE/Plugins/Buffout4.toml"])), Holds::Mod);
         assert_eq!(holds(&names(&["Endless_Runner/Content/Paks/x.pak", "Endless_Runner.exe"])), Holds::Game);
         assert_eq!(holds(&names(&["Minato.x86_64", "Minato_Data/"])), Holds::Game);
+        // GameMaker's Linux builds: a program without extension and assets/game.unx.
+        assert_eq!(holds(&names(&["LDJAM46", "assets/game.unx", "assets/audiogroup1.dat"])), Holds::Game);
+        assert_eq!(holds(&names(&["REDPULSE/runner", "REDPULSE/assets/game.unx"])), Holds::Game);
         assert_eq!(holds(&names(&["hooks/readonly-guard.py", "README.md"])), Holds::Other);
         assert_eq!(holds(&names(&["EFI/BOOT/BOOTX64.EFI", "LiveOS/squashfs.img"])), Holds::Other);
         assert_eq!(holds(&names(&["SlimeTime.app/Contents/MacOS/SlimeTime"])), Holds::Mac);

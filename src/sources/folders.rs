@@ -94,7 +94,7 @@ fn holds_vms(dir: &Path) -> bool {
 }
 
 /// Lobby's own AppImage (a copy kept to test it, its self-update's download).
-fn lobby_itself(program: &Path) -> bool {
+pub(super) fn lobby_itself(program: &Path) -> bool {
     let file = program.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
     file.starts_with("lobby") && file.ends_with(".appimage")
 }

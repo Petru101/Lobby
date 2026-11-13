@@ -387,6 +387,11 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
     };
     let mut c = Command::new(bwrap);
     c.args(args_for(&spec)).args(wineserver_args()).arg("--").arg(program).args(args).envs(env.iter().cloned());
+    // An AppImage mounts itself with FUSE, which the sandbox has no way to: it unpacks itself
+    // into the sandbox's /tmp instead (gone when it ends).
+    if gamefix::binary::appimage_offset(Path::new(program)).is_some() {
+        c.env("APPIMAGE_EXTRACT_AND_RUN", "1");
+    }
     if let Some(dir) = cwd {
         c.current_dir(dir);
     }
