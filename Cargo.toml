@@ -1,6 +1,6 @@
 [package]
 name = "lobby"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "One game library for Linux: Steam, Epic, GOG, itch.io, Lutris, Faugus, Heroic and games found on your drives"
@@ -16,7 +16,7 @@ minisign-verify = "0.3"
 # Built in from github.com/Petru101/gamefix at this commit (run/pin-gamefix.sh moves it); a gamefix
 # checkout beside this one (../gaming) is used instead when .cargo/config.toml patches it in
 # (run/cargo.sh writes that).
-gamefix = { git = "https://github.com/Petru101/gamefix", rev = "952cf2e5604ceb993d6b65fff6afcb0365edd43c" }
+gamefix = { git = "https://github.com/Petru101/gamefix", rev = "461f739f5c1e47e82a547d68eab5d1f13c65f4b7" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
