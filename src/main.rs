@@ -7,6 +7,7 @@ mod battlenet;
 mod clients;
 mod covers;
 mod drives;
+mod evdev;
 mod extras;
 mod fixing;
 mod free;
@@ -21,6 +22,7 @@ mod leftovers;
 mod library;
 mod log;
 mod moving;
+mod pad_keys;
 mod places;
 mod programs;
 mod run;
@@ -69,6 +71,8 @@ const USAGE: &str = "usage: lobby                   open the window
                                (like Steam's: -dx11, or VAR=1 %command% -dx11; '' clears them)
        lobby hide|unhide|favourite|unfavourite <game>  out of sight or back; starred or not
        lobby frame-rate <game> [on|off]  MangoHud's overlay (frame rate ...) when Play starts it
+       lobby controller <game id> [arrows|wasd] [a=z ...|off]  the controller as keys and mouse
+                               while it runs, for a game without controller support
        lobby anticheat         games whose online play may not work here (anti-cheat, online only)
        lobby leftovers [--delete <game>]  downloads whose game is installed (with sizes and where to
                                get them again); --delete removes that game's (to the Trash when
@@ -147,6 +151,7 @@ fn main() -> ExitCode {
         (Some(what @ ("hide" | "unhide" | "favourite" | "unfavourite")), words) if !words.is_empty() => mark(what, &words.join(" ")),
         (Some("proton"), [game, pick @ ..]) if pick.len() <= 1 => proton(game, pick.first().copied(), args.iter().any(|a| a == "--anyway")),
         (Some("frame-rate"), [game, on @ ..]) if on.len() <= 1 => frame_rate(game, on.first().copied()),
+        (Some("controller"), [_, ..]) => controller(&args[1], &args[2..].join(" ")),
         (Some("anticheat"), []) => list_online_warnings(),
         (Some("leftovers"), []) => list_leftovers(),
         (Some("leftovers"), ["--delete", game @ ..]) if !game.is_empty() => delete_leftovers(&game.join(" ")),
@@ -454,6 +459,30 @@ fn launch_options(query: &str, text: &str, set: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Shows a game's controller-as-keys layout, or sets it (`off` turns it off).
+fn controller(query: &str, text: &str) -> Result<(), String> {
+    let mut lib = Library::load().map_or_else(scan, Ok)?;
+    let game = lib.find(query)?.clone();
+    let text = text.trim();
+    if text.is_empty() {
+        match &game.controller {
+            Some(l) => println!("{}: controller as keys: {}\n  {}", game.name, l, pad_keys::Layout::parse(l)?.describe()),
+            None => println!("{}: controller as keys: off", game.name),
+        }
+        return Ok(());
+    }
+    let layout = (text != "off").then(|| pad_keys::Layout::parse(text).map(|l| (text.to_string(), l))).transpose()?;
+    if let Some(g) = lib.get_mut(&game.id) {
+        g.controller = layout.as_ref().map(|(t, _)| t.clone());
+    }
+    lib.save()?;
+    match layout {
+        Some((_, l)) => println!("{}: controller as keys while it runs: {}", game.name, l.describe()),
+        None => println!("{}: controller as keys: off", game.name),
+    }
+    Ok(())
+}
+
 /// Shows how a game is protected, or changes it.
 fn protection(query: &str, level: Option<&str>, args: &[String]) -> Result<(), String> {
     let mut lib = Library::load().map_or_else(scan, Ok)?;
@@ -504,7 +533,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     // A shortcut naming a game the library lost (deleted, say) still starts it, at Standard.
     let game = Library::load().unwrap_or_default().games.into_iter().find(|g| g.id == id).unwrap_or_else(|| {
         eprintln!("lobby: no game \"{id}\" in the library: starting it with Standard protection.");
-        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
+        Game { id: id.to_string(), name: id.to_string(), kind: Kind::Game, entries: Vec::new(), missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None }
     });
     // The launch options and frame rate, for Play and the shortcuts alike (Play leaves them to
     // this). Not Battle.net's: its options are set in Battle.net. A shortcut still starts when
@@ -534,6 +563,12 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
         }
     };
     let command = &command[..];
+    // The controller as keys, for as long as the game runs (this waits for it).
+    if let Some(layout) = std::env::var(pad_keys::ENV).ok().or_else(|| game.controller.clone()).filter(|_| !battle_net) {
+        if let Err(e) = pad_keys::start(&layout) {
+            eprintln!("lobby: no controller as keys: {e}");
+        }
+    }
     let start = store::now();
     // Its output goes to its log, unless it already does (Play's): from a shortcut it would
     // go to the journal, and the log is where a failed start's reason is read.

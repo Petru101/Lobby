@@ -330,7 +330,7 @@ mod tests {
         fs::write(dir.join("Game/__Installer/installerdata.xml"), "<launcher><filePath>[HKEY_LOCAL_MACHINE\\SOFTWARE\\BioWare\\Mass Effect Andromeda\\Install Dir]MassEffectAndromeda.exe</filePath></launcher>").unwrap();
         let mut e = Entry::new(Source::Folder, "G");
         e.program = Some(dir.join("Game/MassEffectAndromeda.exe"));
-        let g = Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None };
+        let g = Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None };
         let (key, root) = ea_install_key(&g).unwrap();
         assert_eq!((key.as_str(), root), ("SOFTWARE\\BioWare\\Mass Effect Andromeda", dir.join("Game")));
         fs::create_dir_all(dir.join("pfx/pfx")).unwrap();
@@ -344,7 +344,7 @@ mod tests {
         let mut e = Entry::new(source, "G");
         e.folder = Some(dir.to_path_buf());
         e.program = Some(dir.join("Game.exe"));
-        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
+        Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None }
     }
 
     #[test]

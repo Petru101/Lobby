@@ -349,7 +349,7 @@ mod tests {
         let game = |name: &str, folder: PathBuf| {
             let mut e = crate::library::Entry::new(Source::Folder, name);
             e.folder = Some(folder);
-            Game { id: name.into(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
+            Game { id: name.into(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None }
         };
         let mut games = vec![game("a", win.join("A")), game("b", win.join("B")), game("c", linux.join("C"))];
         let found = read_only_with_games(&games, &mounts);

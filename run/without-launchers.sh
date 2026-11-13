@@ -7,6 +7,8 @@
 #   run/without-launchers.sh play <id>   really starts a game with them gone, on an invisible
 #                                        screen with no sound, and lists what's running after $WAIT s (45)
 #   PROTON=<name> plays it with that Proton (the choice is thrown away with the view).
+#   DURING=<shell command> runs alongside the game on its screen ($DISPLAY, $OUT for results).
+#   SCREEN=gamescope: a headless gamescope instead of KWin's invisible screen.
 #   GONE=no plays it with the launchers there, to tell a launcher's absence from a game's fault.
 #   ONLY=<game id> looks at just that game; ALSO_GONE=<path in the home> removes more, to prove
 #   the check catches a loss (ALSO_GONE=.local/share/Terraria ONLY=terraria reports its saves).
@@ -96,15 +98,25 @@ case ${1:-check} in
         done
         timeout $((${WAIT:-45} + 60)) bwrap "${args[@]}" --setenv WAIT "${WAIT:-45}" dbus-run-session -- bash -c '
             for p in "$@"; do rm -rf "${HOME:?}/$p"; done
-            kwin_wayland --virtual --xwayland --no-lockscreen --width 1280 --height 720 --socket lobby-test >/dev/null 2>&1 &
-            for _ in {1..20}; do [ -S "$XDG_RUNTIME_DIR/lobby-test" ] && break; sleep 0.5; done
+            if [ "${SCREEN:-kwin}" = gamescope ]; then
+                # gamescope gives the game the focus itself (KWin moved it off a full-screen game
+                # at the first key put in with XTEST, and the game minimised itself).
+                setpriv --no-new-privs gamescope --backend headless -W 1280 -H 720 -w 1280 -h 720 -- sleep infinity >/dev/null 2>&1 &
+                socket=gamescope-0
+            else
+                kwin_wayland --virtual --xwayland --no-lockscreen --width 1280 --height 720 --socket lobby-test >/dev/null 2>&1 &
+                socket=lobby-test
+            fi
+            for _ in {1..20}; do [ -S "$XDG_RUNTIME_DIR/$socket" ] && break; sleep 0.5; done
             sleep 3
             x=$(ls /tmp/.X11-unix | head -1)
             [ -n "$x" ] || { echo "No X display: nothing here proves a picture."; exit 1; }
-            export WAYLAND_DISPLAY=lobby-test DISPLAY=:${x#X}
+            export WAYLAND_DISPLAY=$socket DISPLAY=:${x#X}
             [ -n "$PROTON" ] && "$LOBBY" proton "$GAME" "$PROTON" --anyway 2>&1 | tail -1 | cut -c1-200
             "$LOBBY" how "$GAME" | sed -n 1,2p | cut -c1-200
             "$LOBBY" play "$GAME" 2>&1 | tail -5 | cut -c1-300 &
+            # A check of its own while the game runs, on the same screen (DURING=<shell command>).
+            [ -n "${DURING:-}" ] && bash -c "$DURING" &
             sleep "$WAIT"
             echo "--- running after $WAIT s"
             ps -eo args | grep -v -E "^(bash|bwrap|dbus|ps|grep|sleep|tail|cut|\[|kwin|Xwayland|ARGS|COMMAND|/usr/bin/(dbus|kwin|Xwayland)|.*kwin_|.*xdg-|.*wineserver|.*services.exe|.*winedevice|.*plugplay|.*rpcss|.*explorer.exe|.*svchost|.*tabtip|.*pressure-vessel|.*steam-runtime|.*reaper|.*xdg-dbus-proxy)" | cut -c1-200

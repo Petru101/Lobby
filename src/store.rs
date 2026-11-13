@@ -107,6 +107,7 @@ impl Library {
             game.favourite = o.favourite;
             game.frame_rate = o.frame_rate;
             game.proton = o.proton;
+            game.controller = o.controller;
             // A cover no source gives any more: the copy kept of it.
             game.kept_cover = game.kept_cover.take().or(o.kept_cover);
             game.kept_icon = game.kept_icon.take().or(o.kept_icon);
@@ -151,7 +152,7 @@ impl Library {
     /// formatted, tools once taken for games.)
     pub fn forget_missing(&mut self, closed: &[String]) {
         self.games.retain(|g| {
-            let kept = g.played.is_some() || g.launch_options.is_some() || !g.protection.is_default() || g.chosen_cover.is_some() || g.hidden || g.favourite || g.frame_rate || g.proton.is_some();
+            let kept = g.played.is_some() || g.launch_options.is_some() || !g.protection.is_default() || g.chosen_cover.is_some() || g.hidden || g.favourite || g.frame_rate || g.proton.is_some() || g.controller.is_some();
             let closed_drive = g.entries.iter().flat_map(|e| [e.folder.as_deref(), e.program.as_deref()]).flatten().any(|p| crate::drives::on_closed(p, closed));
             !g.gone || kept || closed_drive
         });
@@ -235,7 +236,7 @@ mod tests {
     fn game(name: &str, key: Key) -> Game {
         let mut e = Entry::new(Source::Steam, name);
         e.keys.push(key);
-        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
+        Game { id: String::new(), name: name.into(), kind: Kind::Game, entries: vec![e], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None }
     }
 
     #[test]

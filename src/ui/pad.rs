@@ -48,63 +48,7 @@ const SCROLL_TICK: Duration = Duration::from_millis(16);
 /// How long Steam's virtual controller gets to pass on a press of the real one it hides.
 const STEAM_PASSES_ON: Duration = Duration::from_millis(100);
 
-const EV_KEY: u16 = 0x01;
-const EV_ABS: u16 = 0x03;
-const BTN_SOUTH: u16 = 0x130;
-const BTN_EAST: u16 = 0x131;
-const BTN_NORTH: u16 = 0x133;
-const BTN_WEST: u16 = 0x134;
-const BTN_TL: u16 = 0x136;
-const BTN_TR: u16 = 0x137;
-const BTN_TL2: u16 = 0x138;
-const BTN_TR2: u16 = 0x139;
-const BTN_START: u16 = 0x13b;
-/// The pad as buttons (up, down, left, right), on drivers without a hat.
-const BTN_DPAD_UP: u16 = 0x220;
-const BTN_DPAD_RIGHT: u16 = 0x223;
-const ABS_X: u16 = 0x00;
-const ABS_Y: u16 = 0x01;
-const ABS_Z: u16 = 0x02;
-const ABS_RX: u16 = 0x03;
-const ABS_RY: u16 = 0x04;
-const ABS_RZ: u16 = 0x05;
-const ABS_HAT0X: u16 = 0x10;
-const ABS_HAT0Y: u16 = 0x11;
-
-/// _IOC(_IOC_READ, 'E', nr, size): the evdev ioctls that read.
-fn eviocg(nr: u64, size: usize) -> u64 {
-    (2 << 30) | ((size as u64) << 16) | ((b'E' as u64) << 8) | nr
-}
-
-fn bits(fd: i32, ev: u16) -> Vec<u8> {
-    let mut buf = vec![0u8; 96];
-    let r = unsafe { libc::ioctl(fd, eviocg(0x20 + ev as u64, buf.len()) as _, buf.as_mut_ptr()) };
-    if r < 0 {
-        buf.clear();
-    }
-    buf
-}
-
-fn has(bits: &[u8], code: u16) -> bool {
-    bits.get(code as usize / 8).is_some_and(|b| b & (1 << (code % 8)) != 0)
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct AbsInfo {
-    value: i32,
-    minimum: i32,
-    maximum: i32,
-    fuzz: i32,
-    flat: i32,
-    resolution: i32,
-}
-
-fn abs_range(fd: i32, code: u16) -> Option<(i32, i32)> {
-    let mut info = AbsInfo::default();
-    let r = unsafe { libc::ioctl(fd, eviocg(0x40 + code as u64, std::mem::size_of::<AbsInfo>()) as _, &mut info) };
-    (r >= 0 && info.maximum > info.minimum).then_some((info.minimum, info.maximum))
-}
+use crate::evdev::*;
 
 /// One controller and where its sticks, triggers and pad are now.
 struct Pad {
@@ -134,13 +78,6 @@ fn ignored_by_steam(list: &str) -> Vec<(u16, u16)> {
             Some((hex(v)?, hex(p)?))
         })
         .collect()
-}
-
-/// The device's vendor and product (struct input_id: bus, vendor, product, version).
-fn ids(fd: i32) -> Option<(u16, u16)> {
-    let mut id = [0u16; 4];
-    let r = unsafe { libc::ioctl(fd, eviocg(0x02, 8) as _, id.as_mut_ptr()) };
-    (r >= 0).then_some((id[1], id[2]))
 }
 
 impl Pad {

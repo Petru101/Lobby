@@ -234,6 +234,10 @@ pub struct Game {
     pub kept_cover: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_icon: Option<PathBuf>,
+    /// The controller as keyboard and mouse while it runs: its layout (`pad_keys`), for a game
+    /// without controller support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<String>,
 }
 
 impl Game {
@@ -577,7 +581,7 @@ pub fn merge(mut entries: Vec<Entry>, too_wide: &[PathBuf]) -> Vec<Game> {
             };
             let paths: Vec<&PathBuf> = entries.iter().flat_map(|e| [e.folder.as_ref(), e.program.as_ref()]).flatten().collect();
             let missing = !paths.is_empty() && !paths.iter().any(|p| p.exists());
-            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None }
+            Game { id: String::new(), name, kind, entries, missing, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None }
         })
         .collect();
     games.sort_by_key(|g| g.name.to_lowercase());
