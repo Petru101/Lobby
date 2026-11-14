@@ -947,6 +947,19 @@ pub fn frame_rate_unsupported(plan: &Plan) -> Option<String> {
     }
 }
 
+/// Why the controller can't be turned into keys for how the plan starts the game, if it can't:
+/// that's done while `lobby sandbox` or `lobby run` waits for the game.
+pub fn controller_unsupported(plan: &Plan) -> Option<String> {
+    match plan {
+        Plan::Run { protect: true, .. } | Plan::SetUp(_) | Plan::NeedsClient { .. } => None,
+        Plan::Run { command, .. } if command.first().is_some_and(|w| w == "steam") => Some("Steam starts it: Steam Input does this for Steam's games (the controller button on its page in Steam's library).".into()),
+        Plan::BattleNet { .. } => Some("Battle.net starts it, so Lobby isn't there while it runs.".into()),
+        Plan::Run { command, .. } if hands_over(command).is_some() => hands_over(command),
+        Plan::Run { how, .. } => Some(format!("It starts with {how}, which Lobby couldn't read, so Lobby isn't there while it runs.")),
+        Plan::Cannot(why) => Some(why.clone()),
+    }
+}
+
 /// Why launch options can't apply to how the plan starts the game, if they can't.
 pub fn options_unsupported(plan: &Plan) -> Option<String> {
     match plan {

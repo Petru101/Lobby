@@ -165,12 +165,77 @@ impl Layout {
         Ok(layout)
     }
 
-    /// For people: "A enter, B escape, …, right stick: mouse".
+    /// For people: "Pad and left stick: arrow keys. A → Enter, B → Escape, … Right stick: mouse."
     pub fn describe(&self) -> String {
-        let mut parts: Vec<String> = INPUTS.iter().filter_map(|(n, i)| self.keys.get(i).map(|&k| format!("{} {}", n.to_uppercase(), key_name(k)))).collect();
-        parts.push(format!("right stick: {}", if self.mouse { "mouse" } else { "keys" }));
-        parts.join(", ")
+        let four = |ins: [Input; 4]| -> Option<String> {
+            let keys: Vec<Option<u16>> = ins.iter().map(|i| self.keys.get(i).copied()).collect();
+            match keys.as_slice() {
+                [None, None, None, None] => None,
+                [Some(103), Some(108), Some(105), Some(106)] => Some("arrow keys".into()),
+                [Some(17), Some(31), Some(30), Some(32)] => Some("WASD".into()),
+                _ => Some(["up", "down", "left", "right"].iter().zip(&keys).filter_map(|(d, k)| k.map(|k| format!("{d} → {}", spoken(k)))).collect::<Vec<_>>().join(", ")),
+            }
+        };
+        let pad = four([Input::Up, Input::Down, Input::Left, Input::Right]);
+        let left = four([Input::LUp, Input::LDown, Input::LLeft, Input::LRight]);
+        let right = if self.mouse { Some("mouse".to_string()) } else { four([Input::RUp, Input::RDown, Input::RLeft, Input::RRight]) };
+        let mut parts = Vec::new();
+        match (&pad, &left) {
+            (Some(p), Some(l)) if p == l => parts.push(format!("Pad and left stick: {p}.")),
+            _ => {
+                parts.extend(pad.map(|p| format!("Pad: {p}.")));
+                parts.extend(left.map(|l| format!("Left stick: {l}.")));
+            }
+        }
+        let names = [("A", Input::A), ("B", Input::B), ("X", Input::X), ("Y", Input::Y), ("LB", Input::Lb), ("RB", Input::Rb), ("LT", Input::Lt), ("RT", Input::Rt), ("Back", Input::Back), ("Start", Input::Start), ("left stick press", Input::Ls), ("right stick press", Input::Rs)];
+        let buttons: Vec<String> = names.iter().filter_map(|(n, i)| self.keys.get(i).map(|&k| format!("{n} → {}", spoken(k)))).collect();
+        if !buttons.is_empty() {
+            parts.push(format!("{}.", buttons.join(", ")));
+        }
+        parts.extend(right.map(|r| format!("Right stick: {r}.")));
+        parts.join(" ")
     }
+}
+
+/// A key as people call it: Enter, Escape, G, right click.
+fn spoken(code: u16) -> String {
+    match code {
+        0x110 => "click".into(),
+        0x111 => "right click".into(),
+        0x112 => "middle click".into(),
+        1 => "Escape".into(),
+        _ => {
+            let n = key_name(code);
+            match n.len() {
+                1 => n.to_uppercase(),
+                _ if n.starts_with('f') && n[1..].parse::<u8>().is_ok() => n.to_uppercase(),
+                _ => {
+                    let mut c = n.chars();
+                    c.next().map_or(n.clone(), |f| f.to_uppercase().chain(c).collect())
+                }
+            }
+        }
+    }
+}
+
+/// The game's layout (or one for this start, `ENV`), started when there is one; a layout that
+/// can't start (no /dev/uinput) is said in the game's log, and the game starts anyway.
+pub fn start_for(game: &crate::library::Game) {
+    if let Some(layout) = std::env::var(ENV).ok().or_else(|| game.controller.clone()) {
+        if let Err(e) = start(&layout) {
+            eprintln!("lobby: no controller as keys: {e}");
+        }
+    }
+}
+
+/// A saved layout's two parts: its base layout's name (`arrows`, `wasd`) and the changes after.
+pub fn split(text: &str) -> (&'static str, String) {
+    let mut words = text.split_whitespace().peekable();
+    let base = words.peek().and_then(|w| LAYOUTS.iter().find(|(n, _)| n == w)).map(|(n, _)| *n);
+    if base.is_some() {
+        words.next();
+    }
+    (base.unwrap_or(LAYOUTS[0].0), words.collect::<Vec<_>>().join(" "))
 }
 
 /// Starts the thread for as long as this program runs; says in its log what it does.
@@ -406,6 +471,8 @@ mod tests {
         assert!(Layout::parse("a=banana").is_err());
         assert!(Layout::parse("q=z").is_err());
         assert!(Layout::parse("wasd x").is_err());
+        assert_eq!(Layout::parse("arrows rb=g").unwrap().describe(), "Pad and left stick: arrow keys. A → Enter, B → Escape, X → Space, Y → Ctrl, LB → Shift, RB → G, LT → right click, RT → click, Back → Tab, Start → Escape. Right stick: mouse.");
+        assert!(Layout::parse("wasd").unwrap().describe().starts_with("Pad: up → 1, down → 3, left → 4, right → 2. Left stick: WASD. A → Space"));
     }
 
     #[test]

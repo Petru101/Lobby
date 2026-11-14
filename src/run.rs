@@ -64,6 +64,8 @@ pub fn run(game: &Game) -> Result<(), String> {
     // In the game's sandbox: the store's sign-in and its saves' sync stay out here.
     let mut sandboxed = crate::sandbox::command(game, &env, &words, cwd.as_deref().filter(|d| d.is_dir()))?;
     println!("lobby: protection: {}", crate::sandbox::summary(game));
+    // The controller as keys while it runs (this waits for it).
+    crate::pad_keys::start_for(game);
     // umu-run returns when the game has quit (Proton's waitforexitandrun).
     let start = crate::store::now();
     let status = sandboxed.command.stdin(Stdio::null()).status().map_err(|e| format!("{}: {e}", words[0]))?;

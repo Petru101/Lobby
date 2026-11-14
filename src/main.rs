@@ -564,10 +564,8 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
     };
     let command = &command[..];
     // The controller as keys, for as long as the game runs (this waits for it).
-    if let Some(layout) = std::env::var(pad_keys::ENV).ok().or_else(|| game.controller.clone()).filter(|_| !battle_net) {
-        if let Err(e) = pad_keys::start(&layout) {
-            eprintln!("lobby: no controller as keys: {e}");
-        }
+    if !battle_net {
+        pad_keys::start_for(&game);
     }
     let start = store::now();
     // Its output goes to its log, unless it already does (Play's): from a shortcut it would

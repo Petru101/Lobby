@@ -859,7 +859,7 @@ fn build(app: &adw::Application) {
 /// shows that game as just installed, LOBBY_SNAPSHOT_ACCOUNTS=1 the accounts,
 /// LOBBY_SNAPSHOT_SIGNIN=epic|gog a store's sign-in page, LOBBY_SNAPSHOT_UNINSTALL=<game id>
 /// the question before uninstalling it, LOBBY_SNAPSHOT_FREE=1 the free games,
-/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page, LOBBY_SNAPSHOT_SCROLL=proton|protection|saves
+/// LOBBY_SNAPSHOT_CLAIM=<title> a free game's claim page, LOBBY_SNAPSHOT_SCROLL=proton|controller|protection|saves
 /// scrolls a game's page to its Proton, Protection or Saves),
 /// then quits.
 fn snapshot_for_checking(ui: &Rc<Ui>) {
@@ -4307,8 +4307,10 @@ impl Ui {
         }
         let protection = self.protection_group(&game, &plan);
         let proton = self.proton_group(&game, &plan);
+        let controller = self.controller_group(&game, &plan);
         if game.kind == Kind::Game {
             content.append(&self.frame_rate_group(&game, &plan));
+            content.append(&controller);
             content.append(&proton);
             content.append(&self.options_group(&game, &plan));
             content.append(&protection);
@@ -4336,10 +4338,11 @@ impl Ui {
         view.add_top_bar(&adw::HeaderBar::builder().show_title(false).build());
         let scrolled = gtk::ScrolledWindow::builder().child(&content).propagate_natural_height(true).hscrollbar_policy(gtk::PolicyType::Never).build();
         view.set_content(Some(&scrolled));
-        // A checking run's snapshot of the page further down (LOBBY_SNAPSHOT_SCROLL=proton|protection|saves).
+        // A checking run's snapshot of the page further down (LOBBY_SNAPSHOT_SCROLL=proton|controller|protection|saves).
         if let Some(target) = std::env::var("LOBBY_SNAPSHOT_SCROLL").ok().and_then(|s| match s.as_str() {
             "protection" => Some(protection.clone().upcast::<gtk::Widget>()),
             "proton" => Some(proton.clone().upcast::<gtk::Widget>()),
+            "controller" => Some(controller.clone().upcast::<gtk::Widget>()),
             "saves" => Some(save_folders.clone().upcast::<gtk::Widget>()),
             "files" => Some(files.clone().upcast::<gtk::Widget>()),
             "gamefix" => Some(fixes.clone().upcast::<gtk::Widget>()),
@@ -4471,6 +4474,80 @@ impl Ui {
             }
         });
         group.add(&row);
+        group
+    }
+
+    /// The controller as keys on a game's page (`pad_keys`): off, or a layout and its changes.
+    fn controller_group(self: &Rc<Self>, game: &Game, plan: &Plan) -> adw::PreferencesGroup {
+        use crate::pad_keys::{self, Layout};
+        let unsupported = launch::controller_unsupported(plan);
+        let help = unsupported.clone().unwrap_or_else(|| "For a game that only knows the keyboard: while it runs, the controller presses keys, and the right stick moves the mouse. Arrow keys suit menus and 2D games, WASD and mouse 3D ones. Leave it off for a game with controller support of its own, or it gets both.".into());
+        let group = adw::PreferencesGroup::builder().title("Controller").description(&help).build();
+        let choices = gtk::StringList::new(&["Off", "Arrow keys", "WASD and mouse"]);
+        let (base, changes) = game.controller.as_deref().map_or(("arrows", String::new()), pad_keys::split);
+        let selected = match (&game.controller, base) {
+            (None, _) => 0,
+            (_, "wasd") => 2,
+            _ => 1,
+        };
+        let describe = |text: &str| Layout::parse(text).map(|l| l.describe()).unwrap_or_default();
+        let combo = adw::ComboRow::builder().title("Controller as keys").model(&choices).selected(selected).sensitive(unsupported.is_none() || game.controller.is_some()).build();
+        let buttons = adw::ActionRow::builder().title("Buttons").subtitle(game.controller.as_deref().map(describe).unwrap_or_default()).subtitle_lines(0).visible(selected != 0).build();
+        let entry = adw::EntryRow::builder().title("Button changes, like a=z b=x start=enter").text(&changes).show_apply_button(true).visible(selected != 0).sensitive(unsupported.is_none()).build();
+        // The choice and the changes are saved together, from either.
+        let save: Rc<dyn Fn()> = {
+            let (u, id, combo, entry, buttons) = (self.clone(), game.id.clone(), combo.clone(), entry.clone(), buttons.clone());
+            Rc::new(move || {
+                let text = match combo.selected() {
+                    0 => None,
+                    i => Some(format!("{} {}", if i == 2 { "wasd" } else { "arrows" }, entry.text().trim()).trim().to_string()),
+                };
+                if let Some(Err(e)) = text.as_deref().map(Layout::parse) {
+                    u.alert("Those button changes can't be used", &e);
+                    return;
+                }
+                let saved = u.change_lib(|lib| {
+                    if let Some(g) = lib.get_mut(&id) {
+                        g.controller = text.clone();
+                    }
+                });
+                buttons.set_subtitle(&text.as_deref().map(describe).unwrap_or_default());
+                buttons.set_visible(text.is_some());
+                entry.set_visible(text.is_some());
+                match saved {
+                    Ok(()) if text.is_some() => u.toast("The controller presses keys from the next Play."),
+                    Ok(()) => u.toast("The controller doesn't press keys any more."),
+                    Err(e) => u.toast(&format!("Couldn't save the library: {e}")),
+                }
+            })
+        };
+        let s = save.clone();
+        combo.connect_selected_notify(move |_| s());
+        entry.connect_apply(move |_| save());
+        // A checking run picks a choice and types changes, as a click would
+        // (LOBBY_SNAPSHOT_CONTROLLER=<0|1|2>[:<changes>]); saved to the library it reads.
+        if let Some(pick) = std::env::var("LOBBY_SNAPSHOT_CONTROLLER").ok().filter(|_| std::env::var_os("LOBBY_SNAPSHOT").is_some()) {
+            let (combo, entry) = (combo.clone(), entry.clone());
+            glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || {
+                let (choice, changes) = pick.split_once(':').unwrap_or((&pick, ""));
+                if !changes.is_empty() {
+                    entry.set_text(changes);
+                }
+                let choice = choice.parse().unwrap_or(0);
+                if combo.selected() == choice {
+                    entry.emit_by_name::<()>("apply", &[]);
+                } else {
+                    combo.set_selected(choice);
+                }
+            });
+        }
+        // Steam's games and the like: only why, as Proton's group does (a layout set before
+        // still shows, so it can be turned off).
+        if unsupported.is_none() || game.controller.is_some() {
+            group.add(&combo);
+            group.add(&buttons);
+            group.add(&entry);
+        }
         group
     }
 
