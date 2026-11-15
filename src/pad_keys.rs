@@ -220,6 +220,34 @@ fn spoken(code: u16) -> String {
 
 /// The game's layout (or one for this start, `ENV`), started when there is one; a layout that
 /// can't start (no /dev/uinput) is said in the game's log, and the game starts anyway.
+/// The gilrs-core version of a Windows program's controller code when it crashes under Wine as
+/// soon as a controller is connected (`gamefix::proton::gilrs_crash`: Rust games, Bevy 0.10 and
+/// later). Lobby starts such a game with Wine's controller service off (`launch::without_pad`),
+/// so it sees no controller, and keys from it are the only way to play it with one. Remembered
+/// by the program's size and time: finding out reads the whole .exe, hundreds of MB for some.
+pub fn crashes_with_pad(program: &Path) -> Option<String> {
+    let meta = std::fs::metadata(program).ok()?;
+    let stamp = format!("{}\t{}", meta.len(), meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs());
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")).join("lobby/gamepad-crash");
+    let name = program.to_string_lossy();
+    let text = std::fs::read_to_string(&cache).unwrap_or_default();
+    // Lines: size, time, the version (empty: fine), the program.
+    for line in text.lines() {
+        let mut f = line.splitn(4, '\t');
+        let (size, time, version, path) = (f.next()?, f.next()?, f.next()?, f.next()?);
+        if path == name && format!("{size}\t{time}") == stamp {
+            return (!version.is_empty()).then(|| version.to_string());
+        }
+    }
+    let version = gamefix::proton::gilrs_crash(program);
+    let mut lines: Vec<&str> = text.lines().filter(|l| l.splitn(4, '\t').nth(3) != Some(&name)).collect();
+    let new = format!("{stamp}\t{}\t{name}", version.as_deref().unwrap_or_default());
+    lines.push(&new);
+    let _ = std::fs::create_dir_all(cache.parent().unwrap_or(Path::new("/")));
+    let _ = std::fs::write(&cache, lines.join("\n") + "\n");
+    version
+}
+
 pub fn start_for(game: &crate::library::Game) {
     if let Some(layout) = std::env::var(ENV).ok().or_else(|| game.controller.clone()) {
         if let Err(e) = start(&layout) {

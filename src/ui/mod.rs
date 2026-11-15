@@ -4541,6 +4541,18 @@ impl Ui {
                 }
             });
         }
+        // Controller code that crashes under Wine (looked for in the background: it reads the
+        // whole .exe the first time): the game never sees the controller, so say this is the way.
+        if unsupported.is_none() {
+            if let Some(exe) = launch::proton_program(game, plan) {
+                let group = group.clone();
+                glib::spawn_future_local(async move {
+                    if let Ok(Some(version)) = gio::spawn_blocking(move || pad_keys::crashes_with_pad(&exe)).await {
+                        group.set_description(Some(&format!("This game's controller code (gilrs {version}) crashes under Proton once a controller is connected, so Lobby keeps the controller hidden from it. To play it with a controller, turn this on: the controller then presses keys, and the right stick moves the mouse. Arrow keys suit menus and 2D games, WASD and mouse 3D ones.")));
+                    }
+                });
+            }
+        }
         // Steam's games and the like: only why, as Proton's group does (a layout set before
         // still shows, so it can be turned off).
         if unsupported.is_none() || game.controller.is_some() {

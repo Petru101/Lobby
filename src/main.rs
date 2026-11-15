@@ -106,7 +106,16 @@ const USAGE: &str = "usage: lobby                   open the window
 /// the AppImage file when it runs as one (its insides are mounted somewhere new each start),
 /// else this program.
 pub fn me() -> std::path::PathBuf {
-    std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).filter(|p| p.is_file()).or_else(|| std::env::current_exe().ok()).unwrap_or_else(|| "lobby".into())
+    std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).filter(|p| p.is_file()).or_else(|| std::env::current_exe().ok().map(installed_again)).unwrap_or_else(|| "lobby".into())
+}
+
+/// Lobby reinstalled while it runs: Linux then names the running program "<path> (deleted)",
+/// and the new copy at that path is the one to start (Play failed with "No such file").
+fn installed_again(path: std::path::PathBuf) -> std::path::PathBuf {
+    match path.to_str().and_then(|p| p.strip_suffix(" (deleted)")) {
+        Some(p) if std::path::Path::new(p).is_file() => p.into(),
+        _ => path,
+    }
 }
 
 /// Whether this runs in gaming mode: Steam's own screen in gamescope's session (Bazzite, SteamOS
@@ -469,6 +478,9 @@ fn controller(query: &str, text: &str) -> Result<(), String> {
             Some(l) => println!("{}: controller as keys: {}\n  {}", game.name, l, pad_keys::Layout::parse(l)?.describe()),
             None => println!("{}: controller as keys: off", game.name),
         }
+        if let Some(version) = launch::proton_program(&game, &launch::plan(&game)).and_then(|p| pad_keys::crashes_with_pad(&p)) {
+            println!("  Its controller code (gilrs {version}) crashes under Wine once a controller is connected, so Lobby keeps the controller hidden from it: keys from the controller are the way to play it with one.");
+        }
         return Ok(());
     }
     let layout = (text != "off").then(|| pad_keys::Layout::parse(text).map(|l| (text.to_string(), l))).transpose()?;
@@ -554,6 +566,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
             Err(e) => eprintln!("lobby: {e}"),
         }
     }
+    let original = command;
     let command = match launch::add_extras(&game, command.to_vec()) {
         Ok(c) if !battle_net => c,
         Ok(_) => command.to_vec(),
@@ -562,6 +575,9 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
             command.to_vec()
         }
     };
+    if command.iter().any(|w| w.contains("windows.gaming.input")) && !original.iter().any(|w| w.contains("windows.gaming.input")) {
+        println!("lobby: its controller code crashes under Wine once a controller is connected: started without Wine's controller service ({}).", gamefix::proton::NO_GAMEPAD);
+    }
     let command = &command[..];
     // The controller as keys, for as long as the game runs (this waits for it).
     if !battle_net {
@@ -1322,4 +1338,23 @@ fn open_drives() -> Result<(), String> {
     }
     show(&scan()?, false);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reinstalled_while_running() {
+        let dir = std::env::temp_dir().join(format!("lobby-me-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let new = dir.join("lobby");
+        let deleted = std::path::PathBuf::from(format!("{} (deleted)", new.display()));
+        // No new copy there: the name stays as it was.
+        assert_eq!(installed_again(deleted.clone()), deleted);
+        std::fs::write(&new, "").unwrap();
+        assert_eq!(installed_again(deleted), new);
+        assert_eq!(installed_again(new.clone()), new);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

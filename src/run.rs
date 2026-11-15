@@ -51,7 +51,7 @@ pub fn run(game: &Game) -> Result<(), String> {
     // The user's launch options: variables for the game, words after its arguments.
     let options = crate::launch::parse_options(game.launch_options.as_deref().unwrap_or_default())?;
     let program: Vec<String> = program.into_iter().chain(options.args).collect();
-    let words: Vec<String> = wine.umu.iter().cloned().chain(program).collect();
+    let words: Vec<String> = wine.umu.iter().cloned().chain(program.iter().cloned()).collect();
     // Show frame rate: MangoHud's Vulkan layer (Proton draws with Vulkan).
     let frame_rate = game.frame_rate.then(|| ("MANGOHUD".to_string(), "1".to_string()));
     // Proton's anti-cheat runtimes, as Steam passes them (`anticheat::runtimes`), downloaded the
@@ -60,7 +60,18 @@ pub fn run(game: &Game) -> Result<(), String> {
         eprintln!("lobby: {e}");
     }
     let runtimes = crate::anticheat::runtimes().into_iter().filter(|(var, _)| !env.iter().any(|(k, _)| k == var)).map(|(var, dir)| (var.to_string(), dir.display().to_string())).collect::<Vec<_>>();
-    let env: Vec<(String, String)> = env.into_iter().chain(runtimes).chain(extra_env).chain(frame_rate).chain(options.vars).collect();
+    let mut env: Vec<(String, String)> = env.into_iter().chain(runtimes).chain(extra_env).chain(frame_rate).chain(options.vars).collect();
+    // Controller code that crashes under Wine once a controller is connected: Wine's controller
+    // service off (as `launch::without_pad` does for Play).
+    let crashes = wine.umu.is_some() && !env.iter().any(|(_, v)| v.contains("windows.gaming.input"));
+    if let Some(version) = program.first().filter(|_| crashes).and_then(|p| crate::pad_keys::crashes_with_pad(std::path::Path::new(p))) {
+        let off = gamefix::proton::NO_GAMEPAD;
+        match env.iter_mut().rev().find(|(k, _)| k == "WINEDLLOVERRIDES") {
+            Some((_, v)) => *v = format!("{v};{off}"),
+            None => env.push(("WINEDLLOVERRIDES".into(), off.into())),
+        }
+        println!("lobby: its controller code (gilrs {version}) crashes under Wine once a controller is connected: started without Wine's controller service ({off}).");
+    }
     // In the game's sandbox: the store's sign-in and its saves' sync stay out here.
     let mut sandboxed = crate::sandbox::command(game, &env, &words, cwd.as_deref().filter(|d| d.is_dir()))?;
     println!("lobby: protection: {}", crate::sandbox::summary(game));

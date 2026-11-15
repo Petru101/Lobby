@@ -238,7 +238,46 @@ pub fn add_extras(game: &Game, command: Vec<String>) -> Result<Vec<String>, Stri
     let command = with_proton(command, game.proton.as_deref())?;
     let command = with_runtimes(command, &crate::anticheat::runtimes());
     let command = with_options(command, game.launch_options.as_deref())?;
+    let command = without_pad(command, |exe| crate::pad_keys::crashes_with_pad(exe).is_some());
     if game.frame_rate { with_frame_rate(command) } else { Ok(command) }
+}
+
+/// The Windows program a command runs through umu-run.
+fn umu_program(command: &[String]) -> Option<PathBuf> {
+    let at = command.iter().position(|w| Path::new(w).file_name().is_some_and(|n| n == "umu-run"))?;
+    command.get(at + 1).map(PathBuf::from)
+}
+
+/// The Windows program the game runs: umu-run's in Play's command, or `lobby run`'s.
+pub fn proton_program(game: &Game, plan: &Plan) -> Option<PathBuf> {
+    match plan {
+        Plan::Run { command, .. } => umu_program(command).or_else(|| wine_command(game).filter(|w| w.umu.is_some()).and_then(|w| w.program.first().map(PathBuf::from))),
+        _ => None,
+    }
+}
+
+/// A Windows game whose controller code crashes under Wine as soon as a controller is connected
+/// (`crashes`, `pad_keys::crashes_with_pad`) with Wine's controller service off
+/// (`gamefix::proton::NO_GAMEPAD`, added to its WINEDLLOVERRIDES): it starts, seeing no
+/// controller. gamefix's own entries have it already; this covers every other start.
+pub fn without_pad(command: Vec<String>, crashes: impl Fn(&Path) -> bool) -> Vec<String> {
+    let Some(exe) = umu_program(&command) else { return command };
+    if command.iter().any(|w| w.contains("windows.gaming.input")) || !crashes(&exe) {
+        return command;
+    }
+    let umu = command.iter().position(|w| Path::new(w).file_name().is_some_and(|n| n == "umu-run")).unwrap_or(0);
+    let mut c = command;
+    // The last one before umu-run is the one the game gets (the user's launch options come last).
+    if let Some(w) = c[..umu].iter_mut().rev().find(|w| w.starts_with("WINEDLLOVERRIDES=")) {
+        w.push_str(&format!(";{}", gamefix::proton::NO_GAMEPAD));
+        return c;
+    }
+    if c.first().is_none_or(|w| w != "env") {
+        c.insert(0, "env".into());
+    }
+    let at = 1 + c[1..].iter().take_while(|w| w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))).count();
+    c.insert(at, format!("WINEDLLOVERRIDES={}", gamefix::proton::NO_GAMEPAD));
+    c
 }
 
 /// The Protons Steam has, Valve's and the ones in its compatibilitytools.d (GE-Proton ...): the
@@ -1038,6 +1077,21 @@ pub fn set_up(folder: &Path, name: Option<&str>) -> Result<(Vec<String>, Option<
 mod tests {
     use super::*;
     use crate::library::Entry;
+
+    #[test]
+    fn crashing_controller_code_gets_no_pad() {
+        let cmd = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let yes = |_: &Path| true;
+        assert_eq!(without_pad(cmd(&["env", "WINEPREFIX=/p", "umu-run", "/g/tinywar.exe"]), yes), cmd(&["env", "WINEPREFIX=/p", "WINEDLLOVERRIDES=windows.gaming.input=d", "umu-run", "/g/tinywar.exe"]));
+        assert_eq!(without_pad(cmd(&["/usr/bin/umu-run", "/g/t.exe"]), yes), cmd(&["env", "WINEDLLOVERRIDES=windows.gaming.input=d", "/usr/bin/umu-run", "/g/t.exe"]));
+        // Added to the last one (the launch options'), not as another.
+        assert_eq!(without_pad(cmd(&["env", "WINEDLLOVERRIDES=a=n", "WINEDLLOVERRIDES=b=n", "umu-run", "/g/t.exe"]), yes), cmd(&["env", "WINEDLLOVERRIDES=a=n", "WINEDLLOVERRIDES=b=n;windows.gaming.input=d", "umu-run", "/g/t.exe"]));
+        // Already there (gamefix's entry), another game, or no Proton: as it was.
+        let had = cmd(&["env", "WINEDLLOVERRIDES=windows.gaming.input=d", "umu-run", "/g/t.exe"]);
+        assert_eq!(without_pad(had.clone(), yes), had);
+        assert_eq!(without_pad(cmd(&["umu-run", "/g/t.exe"]), |_| false), cmd(&["umu-run", "/g/t.exe"]));
+        assert_eq!(without_pad(cmd(&["/g/game.x86_64"]), yes), cmd(&["/g/game.x86_64"]));
+    }
 
     fn game(entries: Vec<Entry>) -> Game {
         Game { id: "g".into(), name: "G".into(), kind: Kind::Game, entries, missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None }
