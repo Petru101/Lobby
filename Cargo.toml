@@ -8,7 +8,7 @@ description = "One game library for Linux: Steam, Epic, GOG, itch.io, Lutris, Fa
 [dependencies]
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "ico"] }
 flate2 = "1"
 libc = "0.2"
 # Checks updates' signatures; no dependencies of its own.

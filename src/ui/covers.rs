@@ -28,6 +28,12 @@ fn decode(path: &Path) -> Option<(u32, u32, Vec<u8>)> {
     Some((rgba.width(), rgba.height(), rgba.into_raw()))
 }
 
+/// Whether a file is a picture Lobby can show (by what's in it, not its name: EA's discs name
+/// their bitmaps .016 and .256).
+pub fn readable(path: &Path) -> bool {
+    decode(path).is_some()
+}
+
 /// Big blocks of memory go back to the system as soon as they're freed. Otherwise the C library
 /// learns to keep them for reuse after the first few covers, and memory stays as high as it has
 /// been (700 MB after scrolling through 800 games, 420 MB with this).
@@ -208,5 +214,25 @@ fn look() {
     });
     if not_laid_out {
         glib::timeout_add_local_once(Duration::from_millis(100), soon);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_bitmaps_and_icons_whatever_their_name() {
+        let dir = std::env::temp_dir().join(format!("lobby-covers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::DynamicImage::new_rgba8(4, 2);
+        for (format, name) in [(image::ImageFormat::Bmp, "autorun.256"), (image::ImageFormat::Ico, "game.ico")] {
+            let path = dir.join(name);
+            img.save_with_format(&path, format).unwrap();
+            assert_eq!(decode(&path).map(|(w, h, _)| (w, h)), Some((4, 2)), "{name}");
+        }
+        std::fs::write(dir.join("notes.txt"), "not a picture").unwrap();
+        assert!(!readable(&dir.join("notes.txt")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

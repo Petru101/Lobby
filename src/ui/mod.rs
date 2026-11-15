@@ -4923,6 +4923,10 @@ impl Ui {
             let (u, p, d, i) = (u.clone(), p.clone(), d.clone(), i.clone());
             chooser.open(Some(&u.window.clone()), gio::Cancellable::NONE, move |result| {
                 let Some(path) = result.ok().and_then(|f| f.path()) else { return };
+                if !covers::readable(&path) {
+                    u.toast("Lobby can't show that kind of image. Try a PNG, JPEG, WebP, GIF, BMP or ICO file.");
+                    return;
+                }
                 // A copy of its own, so the cover stays if the file is moved or deleted.
                 let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "img".into());
                 let kept = store::dir().join("covers").join(format!("{i}.{ext}"));
