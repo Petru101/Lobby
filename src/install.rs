@@ -141,6 +141,67 @@ pub struct Installed {
     pub entry: Option<PathBuf>,
     /// The extras put in after it ("the patch", "the fix").
     pub extras: Vec<&'static str>,
+    /// From when to when the game ran during the install: an installer that starts the game
+    /// when it finishes keeps the install going until the game is closed, so that session is
+    /// timed here (`Watch`), not by `lobby sandbox`.
+    pub played: Option<(u64, u64)>,
+}
+
+/// Which Windows programs ran while something else was waited for, and when.
+#[derive(Default)]
+struct Seen {
+    /// Running before the watch began: another game's, not this install's.
+    before: Option<std::collections::HashSet<String>>,
+    times: std::collections::HashMap<String, (u64, u64)>,
+}
+
+impl Seen {
+    fn note(&mut self, running: std::collections::HashSet<String>, now: u64) {
+        let Some(before) = &self.before else {
+            self.before = Some(running);
+            return;
+        };
+        for name in running.into_iter().filter(|n| !before.contains(n)) {
+            self.times.entry(name).or_insert((now, now)).1 = now;
+        }
+    }
+
+    /// When the program ran, if for long enough to be play (not a first-run check).
+    fn played(&self, program: &Path) -> Option<(u64, u64)> {
+        let name = program.file_name()?.to_string_lossy().to_lowercase();
+        self.times.get(&name).copied().filter(|(start, end)| end - start >= 30)
+    }
+}
+
+/// Looks every few seconds at which Windows programs run, while an install goes on.
+struct Watch {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<Seen>,
+}
+
+impl Watch {
+    fn start(every: std::time::Duration) -> Watch {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut seen = Seen::default();
+            let mut last = None::<std::time::Instant>;
+            while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                if last.is_none_or(|t| t.elapsed() >= every) {
+                    seen.note(crate::running::windows_programs(), crate::store::now());
+                    last = Some(std::time::Instant::now());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            seen
+        });
+        Watch { stop, thread }
+    }
+
+    fn finish(self) -> Seen {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.thread.join().unwrap_or_default()
+    }
 }
 
 /// A game's files in place, not set up yet: the folder (or the installer, which gamefix runs),
@@ -186,13 +247,21 @@ pub fn extras(game: &Game) -> Vec<crate::extras::Extra> {
 
 /// gamefix sets the placed game up (an app-menu entry with its fixes, which starts it).
 pub fn set_up(placed: Placed) -> Installed {
+    let watch = Watch::start(std::time::Duration::from_secs(5));
+    let mut installed = set_up_unwatched(placed);
+    let seen = watch.finish();
+    installed.played = installed.entry.as_deref().and_then(crate::extras::Target::from_entry).and_then(|t| seen.played(&t.program));
+    installed
+}
+
+fn set_up_unwatched(placed: Placed) -> Installed {
     let mut lines = placed.lines;
     match crate::launch::set_up(&placed.target, placed.name.as_deref()) {
         Ok((done, entry)) => {
             let target = entry.as_deref().and_then(crate::extras::Target::from_entry);
             let (Some(target), false) = (target, placed.extras.is_empty()) else {
                 lines.extend(done);
-                return Installed { lines, entry, extras: Vec::new() };
+                return Installed { lines, entry, extras: Vec::new(), played: None };
             };
             // The game's patches and fixes, then gamefix again, which sees the game as they
             // left it (a No-CD program instead of a protected one, a fix's DLLs to load); its
@@ -201,22 +270,22 @@ pub fn set_up(placed: Placed) -> Installed {
             let (put_lines, extras) = crate::log::timed("install: patches and fixes", || crate::extras::put_in(&placed.extras, &target));
             lines.extend(put_lines);
             if extras.is_empty() {
-                return Installed { lines, entry, extras };
+                return Installed { lines, entry, extras, played: None };
             }
             match crate::launch::set_up(&placed.target, placed.name.as_deref()) {
                 Ok((again, entry)) => {
                     lines.extend(again.into_iter().filter(|l| l.starts_with('✗')));
-                    Installed { lines, entry, extras }
+                    Installed { lines, entry, extras, played: None }
                 }
                 Err(e) => {
                     lines.push(format!("✗ {e}"));
-                    Installed { lines, entry, extras }
+                    Installed { lines, entry, extras, played: None }
                 }
             }
         }
         Err(e) => {
             lines.push(format!("✗ {e}"));
-            Installed { lines, entry: None, extras: Vec::new() }
+            Installed { lines, entry: None, extras: Vec::new(), played: None }
         }
     }
 }
@@ -246,6 +315,36 @@ pub fn owned_in(game: &Game) -> Option<(crate::stores::Store, String)> {
 
 #[cfg(test)]
 mod tests {
+    /// A game its installer starts at the end is timed; one running before the install isn't.
+    #[test]
+    fn a_game_started_during_an_install_is_timed() {
+        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<std::collections::HashSet<_>>();
+        let mut seen = super::Seen::default();
+        seen.note(set(&["other.exe"]), 100);
+        seen.note(set(&["other.exe", "setup.exe"]), 105);
+        seen.note(set(&["other.exe", "setup.exe", "lichii.exe"]), 200);
+        seen.note(set(&["other.exe", "setup.exe", "lichii.exe"]), 1700);
+        assert_eq!(seen.played(std::path::Path::new("/games/Pokopia/Lichii.exe")), Some((200, 1700)));
+        assert_eq!(seen.played(std::path::Path::new("/games/Other/other.exe")), None);
+        // Open for a moment only (an installer's first-run check): not play.
+        seen.note(set(&["check.exe"]), 1701);
+        assert_eq!(seen.played(std::path::Path::new("/games/check.exe")), None);
+    }
+
+    /// The watch sees a real process named as Wine names its programs.
+    #[test]
+    fn the_watch_sees_a_wine_program() {
+        let watch = super::Watch::start(std::time::Duration::from_millis(300));
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let mut game = std::process::Command::new("sh").args(["-c", r#"exec -a 'E:\Pokemon Pokopia\lichii.exe' sleep 30"#]).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        game.kill().unwrap();
+        game.wait().unwrap();
+        let seen = watch.finish();
+        let (start, end) = seen.times.get("lichii.exe").copied().expect("the program was seen");
+        assert!(end > start);
+    }
+
     use super::*;
 
     #[test]

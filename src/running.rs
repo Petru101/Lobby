@@ -42,6 +42,17 @@ fn processes() -> Vec<Process> {
         .collect()
 }
 
+/// The Windows programs running now, by file name in lower case ("lichii.exe"): a Wine process
+/// names its program as a Windows path, on any drive letter.
+pub fn windows_programs() -> std::collections::HashSet<String> {
+    processes().iter().filter_map(|p| p.args.first()).filter_map(|a| windows_program(a)).collect()
+}
+
+fn windows_program(arg: &str) -> Option<String> {
+    let name = arg.rsplit(['\\', '/']).next()?.to_lowercase();
+    (arg.contains(":\\") && name.ends_with(".exe")).then_some(name)
+}
+
 /// A Wine process's program as a path here: `Z:\run\media\…` is the path itself, `C:\…` is in
 /// its prefix's drive_c.
 fn wine_path(arg: &str, pid: i32) -> Option<PathBuf> {

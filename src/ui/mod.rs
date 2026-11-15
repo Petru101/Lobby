@@ -2359,6 +2359,10 @@ impl Ui {
             }
             match result {
                 Ok(done) => {
+                    // Played inside the install (its installer started it at the end).
+                    if let Some((start, end)) = done.played {
+                        crate::playtime::session(&game.id, start, end);
+                    }
                     let failed = done.lines.iter().any(|l| l.starts_with('✗'));
                     match (&done.entry, failed) {
                         (Some(_), false) if !done.extras.is_empty() => u.toast(&format!("{} is installed, with {} downloaded beside it. Press Play to start it.", game.name, and_list(&done.extras))),

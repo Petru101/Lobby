@@ -885,6 +885,9 @@ fn install(query: &str) -> Result<(), String> {
     for l in &done.lines {
         println!("  {l}");
     }
+    if let Some((start, end)) = done.played {
+        playtime::session(&game.id, start, end);
+    }
     // Found as installed from now on.
     scan()?;
     match done.entry {
