@@ -7,7 +7,7 @@
 use crate::library::Game;
 use crate::stores::saves::{self, Direction, Synced};
 use crate::stores::Store;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub fn run(game: &Game) -> Result<(), String> {
     let (store, id) = crate::stores::installed_in(game).ok_or_else(|| format!("{} wasn't installed by lobby from a store.", game.name))?;
@@ -98,5 +98,5 @@ pub fn run(game: &Game) -> Result<(), String> {
 /// A desktop notification (the game's window is gone; lobby's may not be open).
 fn notify(title: &str, body: &str) {
     eprintln!("lobby: {body}");
-    let _ = Command::new("notify-send").args(["-a", "Lobby", title, body]).stdin(Stdio::null()).status();
+    crate::notify(None, title, body);
 }

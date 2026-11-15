@@ -1929,6 +1929,9 @@ impl Ui {
             u.read_only_banner.set_revealed(!read_only.is_empty());
             let warnings = gio::spawn_blocking(move || crate::log::timed("anti-cheat", || crate::anticheat::warnings(&all))).await.unwrap_or_default();
             u.online_warnings.replace(warnings);
+            // Saves that changed outside Lobby (Steam's own games): backed up, off this thread.
+            let saved = u.lib.borrow().games.clone();
+            gio::spawn_blocking(move || crate::log::timed("save backups", || crate::backups::catch_up(&saved)));
             u.show_leftover_banner();
             let Some(id) = u.offer_leftover.take() else { return };
             let mine: Vec<_> = u.leftovers.borrow().iter().filter(|l| l.id == id).cloned().collect();
@@ -2156,7 +2159,10 @@ impl Ui {
                             u.scan_again.set(true);
                         }
                     }
-                    gio::spawn_blocking(move || crate::log::timed("app-menu entries' protection", || crate::sandbox::sync_shortcuts(&games)));
+                    gio::spawn_blocking(move || {
+                        crate::repair_entries();
+                        crate::log::timed("app-menu entries' protection", || crate::sandbox::sync_shortcuts(&games))
+                    });
                 }
                 Ok(Err(e)) => u.alert("Couldn't look for games", &e),
                 Err(_) => u.alert("Couldn't look for games", "The scan stopped with an error."),
@@ -2635,8 +2641,8 @@ impl Ui {
             Rc::new(move || {
                 let list = crate::backups::list(&game.id);
                 row.set_subtitle(&match list.first() {
-                    None => "None yet. Lobby backs the saves up each time you finish playing, and before uninstalling.".to_string(),
-                    Some(b) => format!("{} kept, the newest from {}. Lobby backs the saves up each time you finish playing, and before uninstalling.", list.len(), crate::backups::time_text(b.when)),
+                    None => "None yet. Lobby backs the saves up each time you finish playing, when it finds them changed, and before uninstalling.".to_string(),
+                    Some(b) => format!("{} kept, the newest from {}. Lobby backs the saves up each time you finish playing, when it finds them changed, and before uninstalling.", list.len(), crate::backups::time_text(b.when)),
                 });
                 restore.set_sensitive(!list.is_empty());
                 let rows = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build();

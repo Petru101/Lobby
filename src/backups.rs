@@ -1,6 +1,7 @@
 //! Save backups: copies of a game's save folders (`save_folders::find`) in
 //! ~/.local/share/lobby/save-backups/<game>/<time>/, each with a backup.json saying where every
-//! folder came from. Taken after each session Lobby times (`lobby sandbox`, `lobby run`), before
+//! folder came from. Taken after each session Lobby times (`lobby sandbox`, `lobby run`), after
+//! each scan for saves that changed outside Lobby (`catch_up`: Steam's own games), before
 //! Uninstall deletes anything, before a restore, and when asked (Back up now on the game's page,
 //! `lobby backups <game> now`). One with the same files as the newest isn't taken again; the
 //! newest `KEEP` are kept. Restoring copies a backup's files back where they came from (newer
@@ -182,6 +183,30 @@ pub fn after_playing(game_id: &str) {
     if let Err(e) = take(&game, "after playing") {
         crate::log::line(&format!("saves not backed up: {}: {e}", game.name));
     }
+}
+
+/// A save written this recently may still be being written: its game is likely running.
+const SETTLED: u64 = 120;
+
+/// Every installed game's saves backed up when they changed since its newest backup: games
+/// Lobby doesn't time (Steam starts its own; anything started outside Lobby) never reach
+/// `after_playing`, and Particle Fleet had 843 hours and no backup. Run after each scan. A game
+/// saved in the last two minutes waits for the next one. Returns the names backed up.
+pub fn catch_up(games: &[Game]) -> Vec<String> {
+    let now = crate::store::now();
+    let mut taken = Vec::new();
+    for game in games.iter().filter(|g| !g.gone && g.kind == crate::library::Kind::Game) {
+        let newest = folders(game).iter().flat_map(|f| files(f)).map(|(_, _, time)| time).max();
+        if newest.is_none_or(|t| t + SETTLED > now) {
+            continue;
+        }
+        match take(game, "saves changed outside Lobby") {
+            Ok(Some(_)) => taken.push(game.name.clone()),
+            Ok(None) => {}
+            Err(e) => crate::log::line(&format!("saves not backed up: {}: {e}", game.name)),
+        }
+    }
+    taken
 }
 
 #[cfg(test)]

@@ -99,6 +99,7 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby shortcut <slug>   what such an app-menu entry runs: starts its program
        lobby proton <game> [<name> | default] [--anyway]  the Proton it starts with; pick another
                                of Steam's (default: the one it was set up with)
+       lobby backups           back up every game's saves that changed since their last backup
        lobby backups <game> [now | restore [<n>]]  its save backups (newest is 1); back up now;
                                put one back (the saves there now are backed up first)";
 
@@ -196,6 +197,7 @@ fn main() -> ExitCode {
             }
         }
         (Some("uninstall"), words) if !words.is_empty() => uninstall_game(&words.join(" "), args.iter().any(|a| a == "--keep-prefix")),
+        (Some("backups"), []) => back_up_changed(),
         (Some("backups"), [game, what @ ..]) if what.len() <= 2 => save_backups(game, what),
         (Some("saves"), [game, way @ ..]) if way.len() <= 1 => sync_saves(game, way.first().copied().unwrap_or("down")),
         // The question `lobby run` asks when saves changed both here and in the cloud (to see it).
@@ -310,7 +312,7 @@ fn change_shortcut(show: bool, query: &str) -> Result<(), String> {
 fn open_shortcut(slug: &str) -> Result<(), String> {
     let s = start_menu::by_slug(slug)?;
     let failed = |why: String| {
-        let _ = std::process::Command::new("notify-send").args(["-a", "Lobby", "-i", "dialog-warning", &format!("{} didn't start", s.name), &why]).stdin(std::process::Stdio::null()).status();
+        notify(Some("dialog-warning"), &format!("{} didn't start", s.name), &why);
         why
     };
     if s.gone() {
@@ -628,7 +630,7 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
         starts::record(id, failed.then(|| starts::Failed { when: store::now(), seconds: ran, why: why.clone(), sure: true }));
         if failed && !window_open() {
             let body = format!("It closed {} without showing anything. {}", starts::after(ran), why.unwrap_or_else(|| "Its page in Lobby has its log.".into()));
-            let _ = std::process::Command::new("notify-send").args(["-a", "Lobby", "-i", "dialog-warning", &format!("{} didn't start", game.name), &body]).stdin(std::process::Stdio::null()).status();
+            notify(Some("dialog-warning"), &format!("{} didn't start", game.name), &body);
         }
     }
     let status = status.map(|(st, _)| st);
@@ -685,6 +687,25 @@ fn windows_saves(query: &str, copy: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// A desktop notification, never waited for: with nothing running to show notifications (gaming
+/// mode, a bare window manager) notify-send waits on the session bus, 45 s and more, and that
+/// held a game's start up.
+pub fn notify(icon: Option<&str>, title: &str, body: &str) {
+    notify_with("notify-send", icon, title, body);
+}
+
+fn notify_with(program: &str, icon: Option<&str>, title: &str, body: &str) {
+    let mut command = std::process::Command::new(program);
+    command.args(["-a", "Lobby"]);
+    if let Some(icon) = icon {
+        command.args(["-i", icon]);
+    }
+    command.args([title, body]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    if let Ok(mut child) = command.spawn() {
+        std::thread::spawn(move || child.wait());
+    }
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
@@ -719,8 +740,23 @@ fn scan() -> Result<Library, String> {
     if log::timed("scan: importing", || import::run(&lib.games, false)).iter().any(|l| l.starts_with('✓')) {
         return scan();
     }
+    repair_entries();
     log::timed("scan: app-menu entries' protection", || sandbox::sync_shortcuts(&lib.games));
     Ok(lib)
+}
+
+/// gamefix's entries whose Proton or Steam runtime moved (a Steam library moved, a Steam
+/// update) pointed at where it is now: Lobby may be the only thing that runs. Before
+/// `sandbox::sync_shortcuts`, which wraps what they say.
+pub fn repair_entries() {
+    log::timed("gamefix's entries repaired", || {
+        for changed in gamefix::setup::repair_protons() {
+            log::line(&format!("Proton found again for {}", changed.display()));
+        }
+        for changed in gamefix::setup::repair_runtime() {
+            log::line(&format!("Steam's old runtime: {changed}"));
+        }
+    });
 }
 
 /// What Lobby needs that this computer lacks (Steam, programs, Ubuntu's permission), with how to
@@ -1120,6 +1156,14 @@ fn ask_need(name: &str, target: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Every game's saves that changed since their last backup, backed up now.
+fn back_up_changed() -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let taken = backups::catch_up(&lib.games);
+    println!("{}", if taken.is_empty() { "No game's saves changed since their last backup.".to_string() } else { format!("Backed up the saves of {}.", taken.join(", ")) });
+    Ok(())
+}
+
 fn save_backups(query: &str, what: &[&str]) -> Result<(), String> {
     let lib = Library::load().map_or_else(scan, Ok)?;
     let game = lib.find(query)?;
@@ -1342,6 +1386,18 @@ fn open_drives() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_notification_is_not_waited_for() {
+        use std::os::unix::fs::PermissionsExt;
+        let slow = std::env::temp_dir().join(format!("lobby-slow-notify-{}", std::process::id()));
+        std::fs::write(&slow, "#!/bin/sh\nsleep 20\n").unwrap();
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = std::time::Instant::now();
+        super::notify_with(slow.to_str().unwrap(), None, "Game", "Its cloud saves couldn't be checked.");
+        assert!(start.elapsed().as_secs() < 5);
+        std::fs::remove_file(&slow).unwrap();
+    }
+
     use super::*;
 
     #[test]
