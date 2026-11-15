@@ -436,11 +436,8 @@ pub fn bring_over(game_id: &str, found: &Found) -> Result<(usize, usize), String
             replaced += 1;
         }
         fs::create_dir_all(c.to.parent().unwrap()).map_err(|e| format!("{}: {e}", c.to.display()))?;
-        fs::copy(&c.from, &c.to).map_err(|e| format!("{}: {e}", c.from.display()))?;
-        // The save's own time, so newer-or-older stays right (and games that look at it agree).
-        if let Ok(t) = fs::metadata(&c.from).and_then(|m| m.modified()) {
-            let _ = fs::File::options().write(true).open(&c.to).and_then(|f| f.set_modified(t));
-        }
+        // With the save's own time, so newer-or-older stays right (and games that look at it agree).
+        crate::backups::copy(&c.from, &c.to).map_err(|e| format!("{}: {e}", c.from.display()))?;
         copied += 1;
     }
     crate::log::line(&format!("saves: {game_id}: copied {copied} from {}, {replaced} replaced (kept in {})", found.windows.display(), backup.display()));

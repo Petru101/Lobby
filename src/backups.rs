@@ -86,13 +86,30 @@ fn files(root: &Path) -> Vec<(PathBuf, u64, u64)> {
 }
 
 /// Copies a file with its time (a game may compare save times).
-fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Copies a file with its time. A read-only one too (Fallout's Fallout.ini, locked so the
+/// game's launcher leaves it alone): the copy is read-only as well, so it's unlocked to be
+/// written over or given its time, and locked again.
+pub(crate) fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(p) = to.parent() {
         fs::create_dir_all(p)?;
     }
+    let unlock = |p: &Path| {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = fs::metadata(p) {
+            let _ = fs::set_permissions(p, fs::Permissions::from_mode(m.permissions().mode() | 0o200));
+        }
+    };
+    if fs::metadata(to).is_ok_and(|m| m.permissions().readonly()) {
+        unlock(to);
+    }
     fs::copy(from, to)?;
-    if let Ok(t) = fs::metadata(from).and_then(|m| m.modified()) {
+    let source = fs::metadata(from)?;
+    if let Ok(t) = source.modified() {
+        if source.permissions().readonly() {
+            unlock(to);
+        }
         fs::File::options().write(true).open(to)?.set_modified(t)?;
+        fs::set_permissions(to, source.permissions())?;
     }
     Ok(())
 }
@@ -224,6 +241,18 @@ mod tests {
         let copied = root.join("copy/slot/1.sav");
         copy(&root.join("slot/1.sav"), &copied).unwrap();
         assert_eq!(fs::metadata(&copied).unwrap().modified().unwrap(), fs::metadata(root.join("slot/1.sav")).unwrap().modified().unwrap());
+        // A read-only save: copied with its time and its lock, and written over again.
+        let locked = root.join("locked.ini");
+        fs::write(&locked, "1").unwrap();
+        let mut mode = fs::metadata(&locked).unwrap().permissions();
+        mode.set_readonly(true);
+        fs::set_permissions(&locked, mode).unwrap();
+        for _ in 0..2 {
+            copy(&locked, &root.join("copy/locked.ini")).unwrap();
+        }
+        let made = fs::metadata(root.join("copy/locked.ini")).unwrap();
+        assert!(made.permissions().readonly());
+        assert_eq!(made.modified().unwrap(), fs::metadata(&locked).unwrap().modified().unwrap());
         fs::remove_dir_all(&root).unwrap();
     }
 }
