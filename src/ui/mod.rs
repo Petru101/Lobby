@@ -4913,6 +4913,8 @@ impl Ui {
             u.set_cover(&i, None, &d);
         });
         let (u, p, d, i) = (self.clone(), picker.clone(), details.clone(), id.to_string());
+        // The file chooser opens in the game's folder: its own pictures are the likeliest pick.
+        let folder = game.folder().map(Path::to_path_buf).or_else(|| game.program().and_then(Path::parent).map(Path::to_path_buf));
         file.connect_clicked(move |_| {
             let filter = gtk::FileFilter::new();
             filter.add_mime_type("image/*");
@@ -4920,6 +4922,9 @@ impl Ui {
             let filters = gio::ListStore::new::<gtk::FileFilter>();
             filters.append(&filter);
             let chooser = gtk::FileDialog::builder().title("Choose a cover").filters(&filters).modal(true).build();
+            if let Some(folder) = folder.as_ref().filter(|f| f.is_dir()) {
+                chooser.set_initial_folder(Some(&gio::File::for_path(folder)));
+            }
             let (u, p, d, i) = (u.clone(), p.clone(), d.clone(), i.clone());
             chooser.open(Some(&u.window.clone()), gio::Cancellable::NONE, move |result| {
                 let Some(path) = result.ok().and_then(|f| f.path()) else { return };
