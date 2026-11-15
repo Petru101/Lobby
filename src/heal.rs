@@ -80,7 +80,9 @@ pub fn run(games: &[Game], dry: bool) -> Vec<String> {
             done.push(format!("{name} moved from {} to {}", m.from.display(), m.to.display()));
             continue;
         }
-        match crate::moving::follow(&m.from, &m.to, &games[m.game]) {
+        // Its Windows setup, when that was beside it and came along.
+        let setup = crate::setups::follow(&m.from, &m.to) as usize;
+        match crate::moving::follow(&m.from, &m.to, &games[m.game]).map(|n| n + setup) {
             Ok(0) => {}
             Ok(n) => {
                 crate::log::line(&format!("found again: {name} moved from {} to {}: {n} records pointed there", m.from.display(), m.to.display()));

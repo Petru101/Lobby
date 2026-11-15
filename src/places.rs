@@ -7,8 +7,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Where games' Windows setups (Wine prefixes) are kept: `crate::setups`.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Setups {
+    /// In one folder in the home, where gamefix makes them.
+    #[default]
+    Central,
+    /// Beside each game, as "<its folder> (Windows setup)".
+    Beside,
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Places {
+    /// The user's pick of where Windows setups are kept.
+    #[serde(default)]
+    pub windows_setups: Setups,
     /// Folders the user added: looked into.
     #[serde(default)]
     pub added: Vec<PathBuf>,

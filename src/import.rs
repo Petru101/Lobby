@@ -67,7 +67,7 @@ fn prefix_moves(games: &[Game]) -> Vec<(PathBuf, PathBuf, Vec<String>)> {
 }
 
 /// The folder that is the prefix as a whole: Proton's `<folder>/pfx` is its folder.
-fn unit(prefix: &Path) -> PathBuf {
+pub(crate) fn unit(prefix: &Path) -> PathBuf {
     match prefix.file_name() {
         Some(n) if n == "pfx" && prefix.parent().is_some_and(|p| p.join("pfx").is_dir()) => prefix.parent().unwrap().to_path_buf(),
         _ => prefix.to_path_buf(),
@@ -118,7 +118,7 @@ fn home_for(from: &Path) -> Option<PathBuf> {
 
 /// Something runs in the prefix now (a game, its wineserver, a launcher): its environment
 /// names it, or its working folder is in it.
-fn in_use(prefix: &Path) -> bool {
+pub(crate) fn in_use(prefix: &Path) -> bool {
     let real = library::norm(prefix);
     fs::read_dir("/proc").into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit())).any(|p| {
         let env = fs::read(p.path().join("environ")).unwrap_or_default();
@@ -128,7 +128,7 @@ fn in_use(prefix: &Path) -> bool {
 }
 
 /// Lobby's own files that name places: pointed at a prefix's or tool's new place.
-fn point_records(from: &Path, to: &Path) -> Result<(), String> {
+pub(crate) fn point_records(from: &Path, to: &Path) -> Result<(), String> {
     let lobby = crate::store::dir();
     let mut files: Vec<PathBuf> = ["library.json", "taken-over.json", "wine-setups.json", "gog-installed.json"].iter().map(|f| lobby.join(f)).collect();
     files.push(crate::stores::config_home().join("lobby/places.json"));

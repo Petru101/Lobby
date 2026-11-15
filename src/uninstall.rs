@@ -334,7 +334,14 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
     }
     // Gone with the folder already when the folder was the prefix (gamefix's installs).
     if let Some(p) = delete_prefix.filter(|p| p.exists()) {
-        crate::log::timed("uninstall: deleting the prefix", || fs::remove_dir_all(&p)).map_err(|e| format!("Couldn't delete its Wine prefix {}: {e}", p.display()))?;
+        // A link (the setup is beside the game: `setups`): the setup itself goes, then the link.
+        let target = fs::read_link(&p).ok().map(|t| if t.is_absolute() { t } else { p.parent().unwrap_or(Path::new("/")).join(t) });
+        let whole = target.clone().unwrap_or_else(|| p.clone());
+        crate::log::timed("uninstall: deleting the prefix", || fs::remove_dir_all(&whole)).map_err(|e| format!("Couldn't delete its Wine prefix {}: {e}", whole.display()))?;
+        if target.is_some() {
+            let _ = fs::remove_file(&p);
+        }
+        crate::setups::forget(&whole);
         done.push(format!("✓ Deleted its Wine prefix {} (its settings and saves on this computer).", p.display()));
     } else if let (false, Some(p)) = (with_prefix, &prefix) {
         done.push(format!("Kept its Wine prefix {} (its settings and saves).", p.display()));

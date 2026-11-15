@@ -36,6 +36,7 @@ mod sources;
 mod start_menu;
 mod steam_move;
 mod search;
+mod setups;
 mod starts;
 mod store;
 mod taken;
@@ -95,6 +96,8 @@ const USAGE: &str = "usage: lobby                   open the window
                                behind) and copy launchers' Proton builds (each scan does)
        lobby moved [--dry]     games moved by hand: point their old records, app-menu entries and
                                Steam shortcuts at where they are now (each scan does)
+       lobby windows-setups [beside|central] [--dry]  where games' Windows setups (Wine prefixes)
+                               are kept: beside each game, or in one folder in your home
        lobby own-wine-setup <game>  give a game in a shared Wine setup a copy of its own
        lobby shortcuts [list|add <name>|remove <name>]  what's in the app menu: games with an entry
                                there, and Windows programs' Start Menu shortcuts (Proton keeps
@@ -154,6 +157,7 @@ fn main() -> ExitCode {
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("import"), []) => import_now(args.iter().any(|a| a == "--dry")),
+        (Some("windows-setups"), rest) => windows_setups(rest, args.iter().any(|a| a == "--dry")),
         (Some("moved"), []) => moved_now(args.iter().any(|a| a == "--dry")),
         (Some("own-wine-setup"), words) if !words.is_empty() => own_wine_setup(&words.join(" ")),
         (Some("gamefix"), [what @ ("check" | "fix" | "undo" | "protons"), game @ ..]) if !game.is_empty() => gamefix_game(what, &game.join(" ")),
@@ -748,6 +752,10 @@ fn scan() -> Result<Library, String> {
     if log::timed("scan: importing", || import::run(&lib.games, false)).iter().any(|l| l.starts_with('✓')) {
         return scan();
     }
+    // Windows setups go where the user's pick says.
+    if log::timed("scan: windows setups", || setups::run(&lib.games, false)).iter().any(|l| l.starts_with('✓')) {
+        return scan();
+    }
     repair_entries();
     log::timed("scan: app-menu entries' protection", || sandbox::sync_shortcuts(&lib.games));
     Ok(lib)
@@ -1227,6 +1235,42 @@ fn save_backups(query: &str, what: &[&str]) -> Result<(), String> {
         }
         _ => Err(USAGE.to_string()),
     }
+}
+
+/// Shows or sets where Windows setups are kept, and moves the ones that aren't there.
+fn windows_setups(args: &[&str], dry: bool) -> Result<(), String> {
+    let mut places = places::Places::load();
+    match args.iter().find(|a| !a.starts_with("--")).copied() {
+        Some("beside") => places.windows_setups = places::Setups::Beside,
+        Some("central") => places.windows_setups = places::Setups::Central,
+        Some(_) => return Err("lobby windows-setups [beside|central] [--dry]".into()),
+        None => {}
+    }
+    println!("{}", match places.windows_setups {
+        places::Setups::Beside => "Windows setups are kept beside each game, as \"<its folder> (Windows setup)\".",
+        places::Setups::Central => "Windows setups are kept in one folder in your home (~/.local/share/gamefix/prefixes).",
+    });
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    if dry {
+        let would = setups::moves(&lib.games, places.windows_setups);
+        println!("{} would move:", would.len());
+        for m in would {
+            println!("  {}: {} → {}", m.name, m.from.display(), m.to.display());
+        }
+        return Ok(());
+    }
+    places.save()?;
+    let done = setups::run(&lib.games, false);
+    if done.is_empty() {
+        println!("Every setup is where it should be.");
+    }
+    for l in &done {
+        println!("  {l}");
+    }
+    if done.iter().any(|l| l.starts_with('✓')) {
+        scan()?;
+    }
+    Ok(())
 }
 
 /// Points what names hand-moved games' old places at their new ones now (--dry: says which).

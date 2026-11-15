@@ -482,6 +482,7 @@ fn build(app: &adw::Application) {
     let accounts_button = menu_item("Store Accounts");
     let places_button = menu_item("Where Lobby Looks");
     let shortcuts_button = menu_item("App Menu Shortcuts");
+    let setups_button = menu_item("Windows Setups");
     let about_button = menu_item("About Lobby");
     // Gaming mode: the window fills the screen and no desktop answers its window buttons, which
     // a controller can't reach either. Closing it is in the menu instead.
@@ -755,6 +756,11 @@ fn build(app: &adw::Application) {
         u.places();
     });
     let (u, m) = (ui.clone(), main_menu.clone());
+    setups_button.connect_clicked(move |_| {
+        m.popdown();
+        u.windows_setups();
+    });
+    let (u, m) = (ui.clone(), main_menu.clone());
     shortcuts_button.connect_clicked(move |_| {
         m.popdown();
         u.windows_shortcuts();
@@ -1009,6 +1015,9 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         }
         if std::env::var_os("LOBBY_SNAPSHOT_SHORTCUTS").is_some() {
             u.windows_shortcuts();
+        }
+        if std::env::var_os("LOBBY_SNAPSHOT_SETUPS").is_some() {
+            u.windows_setups();
         }
         let searching = std::env::var_os("LOBBY_SNAPSHOT_DRIVES").is_some();
         if searching {
@@ -2156,7 +2165,9 @@ impl Ui {
                         // launchers' Proton builds copied): looked at again after.
                         let importing = games.clone();
                         let imported = gio::spawn_blocking(move || crate::log::timed("importing", || crate::import::run(&importing, false))).await.unwrap_or_default();
-                        if imported.iter().any(|l| l.starts_with('✓')) {
+                        let placing = games.clone();
+                        let placed = gio::spawn_blocking(move || crate::log::timed("windows setups", || crate::setups::run(&placing, false))).await.unwrap_or_default();
+                        if imported.iter().chain(&placed).any(|l| l.starts_with('✓')) {
                             u.scan_again.set(true);
                         }
                     }
@@ -2939,6 +2950,77 @@ impl Ui {
 
     /// Where lobby looks: the folders it looks in by itself, the ones added, the games taken
     /// from the search, and the search of all drives.
+    /// "Windows Setups" in the menu: where games' Windows setups are kept (`crate::setups`).
+    fn windows_setups(self: &Rc<Self>) {
+        use crate::places::Setups;
+        let page = adw::PreferencesPage::new();
+        let view = adw::ToolbarView::new();
+        view.add_top_bar(&adw::HeaderBar::new());
+        view.set_content(Some(&page));
+        let dialog = adw::Dialog::builder().title("Windows setups").content_width(640).content_height(560).child(&view).build();
+        let group = adw::PreferencesGroup::builder()
+            .title("Where games keep their Windows setup")
+            .description("A Windows game runs in a Windows setup: a folder with its own copy of Windows' files, where the game also keeps its settings and saves.")
+            .build();
+        let pick = crate::places::Places::load().windows_setups;
+        let status = adw::ActionRow::builder().build();
+        let say = {
+            let (u, status) = (self.clone(), status.clone());
+            move |pick: Setups| {
+                let n = crate::setups::moves(&u.lib.borrow().games, pick).len();
+                status.set_title(&match n {
+                    0 => "Every setup is where this says.".to_string(),
+                    1 => "1 setup moves there now.".to_string(),
+                    n => format!("{n} setups move there now."),
+                });
+                status.set_subtitle(if n == 0 { "" } else { "One whose game is running waits until it's closed. A link stays at the old place, so shortcuts keep working." });
+            }
+        };
+        let mut first: Option<gtk::CheckButton> = None;
+        for (which, title, subtitle) in [
+            (Setups::Central, "In one folder in your home", "In ~/.local/share/gamefix/prefixes. Game folders stay as they are; settings and saves stay on this drive whatever happens to a game's folder."),
+            (Setups::Beside, "Beside each game", "As \u{201c}<game> (Windows setup)\u{201d} next to the game's folder. Settings and saves are on the game's drive, and go with it when Lobby moves it or you move both folders."),
+        ] {
+            let check = gtk::CheckButton::builder().valign(gtk::Align::Center).active(pick == which).build();
+            match &first {
+                Some(f) => check.set_group(Some(f)),
+                None => first = Some(check.clone()),
+            }
+            let row = adw::ActionRow::builder().title(title).subtitle(subtitle).use_markup(false).activatable_widget(&check).build();
+            row.add_prefix(&check);
+            group.add(&row);
+            let (u, say) = (self.clone(), say.clone());
+            check.connect_toggled(move |c| {
+                if !c.is_active() {
+                    return;
+                }
+                let mut places = crate::places::Places::load();
+                if places.windows_setups == which {
+                    return;
+                }
+                places.windows_setups = which;
+                match places.save() {
+                    Ok(()) => {
+                        say(which);
+                        u.rescan();
+                    }
+                    Err(e) => u.toast(&format!("Couldn't save that: {e}")),
+                }
+            });
+        }
+        page.add(&group);
+        let now = adw::PreferencesGroup::new();
+        say(pick);
+        now.add(&status);
+        page.add(&now);
+        let covers = adw::PreferencesGroup::builder()
+            .title("Which games")
+            .description("Games you run from a folder of their own. Not games put in by an installer (they're inside their setup, or it's beside them already), Steam's and the stores' games, games on a Windows-format drive, or a one-file game in a folder of downloads.")
+            .build();
+        page.add(&covers);
+        dialog.present(Some(&self.window));
+    }
+
     fn places(self: &Rc<Self>) {
         let page = adw::PreferencesPage::new();
         let view = adw::ToolbarView::new();

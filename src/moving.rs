@@ -188,6 +188,9 @@ pub fn move_game(game: &Game, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec
         places.games.push(written.clone());
         places.save()?;
     }
+    if !plan.prefix {
+        done.extend(crate::setups::take_along(&plan.from, &to));
+    }
     if !same_drive {
         fs::remove_dir_all(&plan.from).map_err(|e| format!("It's in the new place and starts from there, but the old copy couldn't be deleted ({e}): delete {} yourself.", plan.from.display()))?;
         done.push(format!("Deleted the old copy in {}.", plan.from.display()));
