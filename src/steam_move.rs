@@ -73,13 +73,42 @@ fn same_files(a: &Path, b: &Path) -> bool {
 /// Moves the game (in `<old library>/steamapps/common/<dir>`), its manifest and its Proton
 /// prefix if it has one there into Steam's library; `progress` gets 0 to 100.
 pub fn move_into_steam(home: &Home, folder: &Path, appid: u32, progress: &dyn Fn(f64)) -> Result<Moved, String> {
+    let lib = target(home, size_of(folder))?;
+    move_to_library(folder, appid, &lib, progress)
+}
+
+/// A Steam game's folder, its app manifest, its Proton prefix (its saves may be in it) and
+/// its Workshop files moved into another of Steam's libraries. Steam must be closed: it reads
+/// its libraries when it starts and writes manifests while it runs.
+pub fn move_to_library(folder: &Path, appid: u32, lib: &Path, progress: &dyn Fn(f64)) -> Result<Moved, String> {
     let steamapps = folder.parent().and_then(Path::parent).filter(|p| p.ends_with("steamapps")).ok_or("It isn't in a Steam library's steamapps/common.")?;
     let manifest = steamapps.join(format!("appmanifest_{appid}.acf"));
     if !manifest.is_file() {
         return Err("Its app manifest isn't there, so Steam couldn't take it.".into());
     }
     let total = size_of(folder);
-    let lib = target(home, total)?;
+    let moved = move_files(folder, appid, lib, steamapps, &manifest, total, progress)?;
+    // Workshop files: Steam looks for them in the game's library.
+    let mut left: Vec<String> = moved.left.into_iter().collect();
+    let (items, new_items) = (steamapps.join("workshop/content").join(appid.to_string()), lib.join("steamapps/workshop/content").join(appid.to_string()));
+    if items.is_dir() && !new_items.exists() {
+        let _ = fs::create_dir_all(new_items.parent().unwrap());
+        match fs::rename(&items, &new_items).or_else(|_| copy_then_delete(&items, &new_items, &|_| {}).map_err(std::io::Error::other)) {
+            Ok(()) => {
+                let record = format!("appworkshop_{appid}.acf");
+                let (old, new) = (steamapps.join("workshop").join(&record), lib.join("steamapps/workshop").join(&record));
+                if old.is_file() && fs::rename(&old, &new).is_err() && fs::copy(&old, &new).is_ok() {
+                    let _ = fs::remove_file(&old);
+                }
+            }
+            Err(e) => left.push(format!("its Workshop files: {e}")),
+        }
+    }
+    Ok(Moved { left: (!left.is_empty()).then(|| left.join("; ")) })
+}
+
+fn move_files(folder: &Path, appid: u32, lib: &Path, steamapps: &Path, manifest: &Path, total: u64, progress: &dyn Fn(f64)) -> Result<Moved, String> {
+    let manifest = manifest.to_path_buf();
     let into = lib.join("steamapps/common").join(folder.file_name().ok_or("no folder name")?);
     let new_manifest = lib.join("steamapps").join(format!("appmanifest_{appid}.acf"));
     if new_manifest.exists() || into.exists() {

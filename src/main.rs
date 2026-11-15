@@ -1001,7 +1001,8 @@ fn how(query: &str) -> Result<(), String> {
         return Ok(());
     }
     match moving::plan(game) {
-        Ok(p) => println!("Move: {} {} can go to another folder or drive", if p.prefix { "its Windows setup (Wine prefix) holding it," } else { "its folder," }, p.from.display()),
+        Ok(p) if p.steam.is_some() => println!("Move: its folder, {}, can go to another of Steam's libraries", p.from.display()),
+        Ok(p) => println!("Move: {} {} can go to another folder or drive", if p.prefix { "its Windows setup (Wine prefix) holding it," } else if p.file { "its one file," } else { "its folder," }, p.from.display()),
         Err(why) => println!("Move: {why}"),
     }
     for f in save_folders::find(game) {

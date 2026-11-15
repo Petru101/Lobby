@@ -20,6 +20,21 @@ pub struct Plan {
     pub prefix: bool,
     /// An Epic game Lobby installed: legendary is told where it went.
     pub epic: Option<String>,
+    /// A one-file game in a folder of other things (an .exe in Downloads): only the file
+    /// moves, into a folder of the game's name.
+    pub file: bool,
+    /// Steam's game, by its app id: it moves to another of Steam's libraries.
+    pub steam: Option<u32>,
+    /// The game's name, as a folder's.
+    pub name: String,
+}
+
+/// The game's file, when that's all there is of it: a program lying in a folder with other
+/// things, which the scan gave no folder of its own.
+fn lone_file(game: &Game) -> Option<PathBuf> {
+    let program = real(game.program()?);
+    let lone = |e: &crate::library::Entry| e.source == crate::library::Source::Folder && e.kind == crate::library::Kind::Game && e.folder.is_none() && e.program.as_deref().map(real).as_ref() == Some(&program);
+    (program.is_file() && game.entries.iter().any(lone)).then_some(program)
 }
 
 /// What would move, or why the game can't be moved by Lobby.
@@ -28,8 +43,12 @@ pub fn plan(game: &Game) -> Result<Plan, String> {
     if game.kind != crate::library::Kind::Game || game.gone {
         return Err("Only an installed game can be moved.".into());
     }
+    let name: String = game.name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '\0') { ' ' } else { c }).collect::<String>().trim().to_string();
     match crate::uninstall::how(game) {
-        How::Steam(_) => return Err("Steam moves its own games: in Steam, its Properties → Installed Files → Move install folder.".into()),
+        How::Steam(id) => {
+            let folder = game.folder().map(real).filter(|f| f.is_dir() && f.parent().and_then(Path::parent).is_some_and(|p| p.ends_with("steamapps"))).ok_or("Lobby doesn't know which Steam library it's in.")?;
+            return Ok(Plan { from: folder, prefix: false, epic: None, file: false, steam: Some(id), name });
+        }
         How::SteamCopy(..) => return Err("It's in a Steam library Steam doesn't use: Move into Steam puts it in one of Steam's.".into()),
         _ => {}
     }
@@ -50,12 +69,17 @@ pub fn plan(game: &Game) -> Result<Plan, String> {
     // A game inside its Wine prefix goes with the whole prefix.
     let prefix = game.entries.iter().filter_map(|e| e.prefix.clone()).chain(crate::windows_saves::prefix(game)).map(|p| real(&p)).find(|p| p.join("drive_c").is_dir() && real(&folder).starts_with(p));
     let from = prefix.clone().unwrap_or_else(|| real(&folder));
+    if prefix.is_none() && crate::uninstall::found_folder(game, &from).is_err() {
+        if let Some(file) = lone_file(game) {
+            return Ok(Plan { from: file, prefix: false, epic: None, file: true, steam: None, name });
+        }
+    }
     crate::uninstall::found_folder(game, &from).map_err(|what| {
         // found_folder says "which holds …" or "the top of a drive".
         let what = what.strip_prefix("which ").map_or(format!("is {what}"), str::to_string);
         format!("Its folder, {}, {what}, so Lobby can't tell what's only this game's.", from.display())
     })?;
-    Ok(Plan { from, prefix: prefix.is_some(), epic })
+    Ok(Plan { from, prefix: prefix.is_some(), epic, file: false, steam: None, name })
 }
 
 fn real(p: &Path) -> PathBuf {
@@ -75,6 +99,9 @@ pub fn free_space(dir: &Path) -> Option<u64> {
 
 /// Files and bytes under a folder (links not followed).
 pub fn measure(dir: &Path) -> (u64, u64) {
+    if let Some(m) = dir.symlink_metadata().ok().filter(|m| m.is_file()) {
+        return (1, m.len());
+    }
     let (mut files, mut bytes) = (0, 0);
     let mut dirs = vec![dir.to_path_buf()];
     while let Some(d) = dirs.pop() {
@@ -91,9 +118,68 @@ pub fn measure(dir: &Path) -> (u64, u64) {
     (files, bytes)
 }
 
-/// Where the game goes when moved into `into`: a folder of its own name there.
+/// Where the game goes when moved into `into`: a folder of its own name there (a one-file
+/// game's file in a folder named after the game; Steam's game in that library's games folder).
 pub fn target(plan: &Plan, into: &Path) -> Option<PathBuf> {
-    Some(into.join(plan.from.file_name()?))
+    let name = plan.from.file_name()?;
+    Some(if plan.steam.is_some() {
+        into.join("steamapps/common").join(name)
+    } else if plan.file {
+        into.join(&plan.name).join(name)
+    } else {
+        into.join(name)
+    })
+}
+
+/// Steam's libraries a game can move to: what to call each, its folder, its free room, and
+/// whether it's on a Windows-format drive (Proton's setups can't be there).
+pub fn steam_libraries() -> Vec<(String, PathBuf, u64, bool)> {
+    let Some(home) = crate::sources::Home::find() else { return Vec::new() };
+    let mounts = crate::drives::mounts();
+    crate::sources::steam::known_libraries(&home)
+        .into_iter()
+        .filter(|l| l.join("steamapps").is_dir())
+        .filter_map(|l| {
+            let mount = crate::drives::mount_of(&l, &mounts)?;
+            let drive = mount.point.file_name().filter(|_| mount.point.starts_with("/run/media") || mount.point.starts_with("/media")).map(|n| n.to_string_lossy().into_owned());
+            let title = drive.map_or("Steam's library in your home folder".to_string(), |d| format!("Steam's library on the {d} drive"));
+            Some((title, l.clone(), free_space(&l)?, mount.windows_format()))
+        })
+        .collect()
+}
+
+/// Steam's game to another of its libraries: Steam closed for it, and opened again if it was.
+fn move_steam(game: &Game, plan: &Plan, appid: u32, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec<String>, String> {
+    let into = if into.ends_with("steamapps") { into.parent().unwrap_or(into).to_path_buf() } else { into.to_path_buf() };
+    let libraries = steam_libraries();
+    let Some((_, lib, free, windows)) = libraries.iter().find(|(_, l, ..)| real(l) == real(&into)) else {
+        return Err(format!("Steam's games go into one of Steam's libraries: {}. (Add one in Steam: Settings → Storage.)", libraries.iter().map(|(_, l, ..)| l.display().to_string()).collect::<Vec<_>>().join(", ")));
+    };
+    let to = target(plan, lib).ok_or("no folder name")?;
+    if real(&to) == real(&plan.from) {
+        return Err(format!("It's already in {}.", lib.display()));
+    }
+    if *windows {
+        return Err("That library is on a Windows-format drive, where Proton can't keep a game's Windows setup.".into());
+    }
+    let (_, bytes) = measure(&plan.from);
+    if device(&plan.from) != device(lib) && *free < bytes + bytes / 50 + (100 << 20) {
+        return Err(format!("There's not enough room there: it needs {}, and {} is free.", crate::windows_saves::size_text(bytes), crate::windows_saves::size_text(*free)));
+    }
+    let steam = gamefix::steam::Steam::find();
+    let was_open = steam.as_ref().is_some_and(|s| s.running());
+    if was_open && !steam.as_ref().is_some_and(|s| s.shut_down()) {
+        return Err("Steam didn't close within a minute: close it yourself, then move the game.".into());
+    }
+    let moved = crate::steam_move::move_to_library(&plan.from, appid, lib, &|percent| progress(percent / 100.0));
+    if was_open {
+        let _ = crate::launch::start("Steam", &["steam".to_string()], None, &crate::store::log_file("steam"));
+    }
+    let moved = moved?;
+    crate::log::line(&format!("moved {} from {} to {}", game.name, plan.from.display(), to.display()));
+    let mut done = vec![format!("Moved it to Steam's library {}.", lib.display())];
+    done.extend(moved.left.map(|l| format!("Couldn't be deleted from the old place: {l}.")));
+    Ok(done)
 }
 
 /// Moves the game into `into` (its folder keeps its name). `progress` gets 0.0–1.0 while
@@ -107,6 +193,9 @@ pub fn move_game(game: &Game, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec
     let into = real(into);
     if !into.is_dir() {
         return Err(format!("{} isn't a folder.", into.display()));
+    }
+    if let Some(appid) = plan.steam {
+        return move_steam(game, &plan, appid, &into, progress);
     }
     let to = target(&plan, &into).ok_or("no folder name")?;
     if real(&to) == real(&plan.from) {
@@ -130,7 +219,11 @@ pub fn move_game(game: &Game, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec
     }
     let same_drive = device(&plan.from) == device(&into);
     let mut done = Vec::new();
-    if same_drive {
+    if plan.file {
+        if let Some(size) = carry_file(&plan.from, &to)? {
+            done.push(format!("Copied it ({}) to {}.", crate::windows_saves::size_text(size), to.display()));
+        }
+    } else if same_drive {
         fs::rename(&plan.from, &to).map_err(|e| format!("Couldn't move {}: {e}", plan.from.display()))?;
     } else {
         let (files, bytes) = measure(&plan.from);
@@ -173,7 +266,13 @@ pub fn move_game(game: &Game, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec
             0
         }
     };
-    let n = by_gamefix + point_records(&plan.from, &written, game, &shortcut_files)?;
+    let mut n = by_gamefix + point_records(&plan.from, &written, game, &shortcut_files)?;
+    if plan.file {
+        // Its entries start it in the folder it was in: in its own now.
+        if let (Some(old), Some(new)) = (plan.from.parent(), written.parent()) {
+            n += start_folders(game, old, new, &written);
+        }
+    }
     done.push(format!("Pointed {n} records at the new place."));
     if let Some(app) = &plan.epic {
         let mut c = crate::stores::epic::legendary_command()?;
@@ -184,19 +283,73 @@ pub fn move_game(game: &Game, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec
     // Looked at from now on, wherever that is.
     let mut places = crate::places::Places::load();
     let roots: Vec<PathBuf> = crate::sources::Home::find().map(|h| crate::sources::folders::roots(&h)).unwrap_or_default().iter().map(|r| real(r)).collect();
-    if !roots.iter().any(|r| to.starts_with(r)) && !places.games.iter().any(|g| real(g) == to) {
-        places.games.push(written.clone());
+    // A one-file game is its new folder from now on.
+    let (place, written_place) = if plan.file { (to.parent().unwrap_or(&to).to_path_buf(), written.parent().unwrap_or(&written).to_path_buf()) } else { (to.clone(), written.clone()) };
+    if !roots.iter().any(|r| place.starts_with(r)) && !places.games.iter().any(|g| real(g) == place) {
+        places.games.push(written_place);
         places.save()?;
     }
-    if !plan.prefix {
+    if !plan.prefix && !plan.file {
         done.extend(crate::setups::take_along(&plan.from, &to));
     }
-    if !same_drive {
+    if plan.file {
+        // Renamed away already on the same drive.
+        if plan.from.exists() {
+            fs::remove_file(&plan.from).map_err(|e| format!("It's in the new place and starts from there, but the old copy couldn't be deleted ({e}): delete {} yourself.", plan.from.display()))?;
+        }
+    } else if !same_drive {
         fs::remove_dir_all(&plan.from).map_err(|e| format!("It's in the new place and starts from there, but the old copy couldn't be deleted ({e}): delete {} yourself.", plan.from.display()))?;
         done.push(format!("Deleted the old copy in {}.", plan.from.display()));
     }
     crate::log::line(&format!("moved {} from {} to {}", game.name, plan.from.display(), to.display()));
     Ok(done)
+}
+
+/// A one-file game's file moved to `to`, its folder made: renamed on the same drive (None),
+/// else copied under another name, checked, named, with the old one left for the caller to
+/// delete once the records follow (the bytes copied).
+fn carry_file(from: &Path, to: &Path) -> Result<Option<u64>, String> {
+    let folder = to.parent().ok_or("no folder")?;
+    fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    if device(from) == device(folder) && fs::rename(from, to).is_ok() {
+        return Ok(None);
+    }
+    let temp = folder.join(format!(".lobby-moving-{}", to.file_name().unwrap_or_default().to_string_lossy()));
+    let size = fs::metadata(from).map(|m| m.len()).map_err(|e| e.to_string())?;
+    if free_space(folder).is_some_and(|free| free < size + (100 << 20)) {
+        return Err(format!("There's not enough room there: it needs {}.", crate::windows_saves::size_text(size)));
+    }
+    let copied = fs::copy(from, &temp).map_err(|e| e.to_string()).and_then(|n| if n == size { Ok(()) } else { Err(format!("the copy has {n} bytes, not {size}")) });
+    if let Err(e) = copied.and_then(|()| fs::rename(&temp, to).map_err(|e| e.to_string())) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("Couldn't copy it: {e}. Nothing changed: it's still in {}.", from.display()));
+    }
+    Ok(Some(size))
+}
+
+/// App-menu entries naming a one-file game's new file that still start it in the folder it
+/// was in (`Path=`): in its new folder. How many changed.
+fn start_folders(game: &Game, old: &Path, new: &Path, file: &Path) -> usize {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
+    let mut files: Vec<PathBuf> = [data.join("applications"), home.join("Desktop")].iter().flat_map(|d| fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "desktop")).collect();
+    files.extend(game.entries.iter().flat_map(|e| e.keys.iter()).filter_map(|k| if let Key::Desktop(p) = k { Some(p.clone()) } else { None }));
+    files.sort();
+    files.dedup();
+    let (names, olds) = (spellings(file), spellings(old));
+    let mut changed = 0;
+    for f in files {
+        let Ok(text) = fs::read_to_string(&f) else { continue };
+        if !names.iter().any(|n| text.contains(n.as_str())) {
+            continue;
+        }
+        let lines: Vec<String> = text.lines().map(|l| if l.strip_prefix("Path=").is_some_and(|p| olds.iter().any(|o| o == p.trim_end_matches('/'))) { format!("Path={}", new.display()) } else { l.to_string() }).collect();
+        let fixed = lines.join("\n") + if text.ends_with('\n') { "\n" } else { "" };
+        if fixed != text && fs::write(&f, fixed).is_ok() {
+            changed += 1;
+        }
+    }
+    changed
 }
 
 /// A game already in its new place (moved by hand, found again by `heal`): everything naming
@@ -429,6 +582,37 @@ fn point_records(from: &Path, to: &Path, game: &Game, shortcut_files: &[PathBuf]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_one_file_game_goes_into_a_folder_of_its_name() {
+        let plan = Plan { from: "/home/p/Downloads/katb.exe".into(), prefix: false, epic: None, file: true, steam: None, name: "Operation K.A.T.B.".into() };
+        assert_eq!(target(&plan, Path::new("/run/media/p/Games")), Some(PathBuf::from("/run/media/p/Games/Operation K.A.T.B./katb.exe")));
+        let steam = Plan { from: "/a/steamapps/common/From Dust".into(), prefix: false, epic: None, file: false, steam: Some(33460), name: "From Dust".into() };
+        assert_eq!(target(&steam, Path::new("/b/SteamLibrary")), Some(PathBuf::from("/b/SteamLibrary/steamapps/common/From Dust")));
+
+        let dir = std::env::temp_dir().join(format!("lobby-onefile-{}", std::process::id()));
+        let (old, new) = (dir.join("Downloads"), dir.join("Games/Operation K.A.T.B."));
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("katb.exe"), "MZ").unwrap();
+        assert_eq!(carry_file(&old.join("katb.exe"), &new.join("katb.exe")), Ok(None));
+        assert!(!old.join("katb.exe").exists() && fs::read_to_string(new.join("katb.exe")).unwrap() == "MZ");
+        assert_eq!(measure(&new.join("katb.exe")), (1, 2));
+        // Its entry started it in Downloads: in its own folder now. Another game's stays.
+        let entry = |file: &Path, folder: &Path| format!("[Desktop Entry]\nExec=umu-run \"{}\"\nPath={}\n", file.display(), folder.display());
+        let apps = dir.join("data/applications");
+        fs::create_dir_all(&apps).unwrap();
+        fs::write(apps.join("katb.desktop"), entry(&new.join("katb.exe"), &old)).unwrap();
+        fs::write(apps.join("other.desktop"), entry(&old.join("other.exe"), &old)).unwrap();
+        let game = Game { id: "g".into(), name: "G".into(), kind: crate::library::Kind::Game, entries: vec![{
+            let mut e = crate::library::Entry::new(crate::library::Source::AppMenu, "G");
+            e.keys = vec![Key::Desktop(apps.join("katb.desktop")), Key::Desktop(apps.join("other.desktop"))];
+            e
+        }], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None };
+        assert_eq!(start_folders(&game, &old, &new, &new.join("katb.exe")), 1);
+        assert_eq!(fs::read_to_string(apps.join("katb.desktop")).unwrap(), entry(&new.join("katb.exe"), &new));
+        assert_eq!(fs::read_to_string(apps.join("other.desktop")).unwrap(), entry(&old.join("other.exe"), &old));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_new_place_with_a_space_is_quoted_in_an_entry() {

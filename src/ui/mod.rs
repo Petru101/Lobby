@@ -2439,9 +2439,17 @@ impl Ui {
         let u = self.clone();
         glib::spawn_future_local(async move {
             let from = plan.from.clone();
-            let (choices, (_, bytes)) = gio::spawn_blocking(move || (move_choices(), crate::moving::measure(&from))).await.unwrap_or_default();
+            let steam = plan.steam.is_some();
+            let (choices, (_, bytes)) = gio::spawn_blocking(move || (if steam { crate::moving::steam_libraries() } else { move_choices() }, crate::moving::measure(&from))).await.unwrap_or_default();
             let windows = if plan.prefix { " It lives in its Windows setup (Wine prefix), which Proton needs on a Linux-format drive, so Windows-format ones are greyed out." } else { "" };
-            let group = adw::PreferencesGroup::builder().description(format!("{} takes {}. It goes into a folder of its own name in the folder you pick.{windows}", game.name, crate::windows_saves::size_text(bytes))).build();
+            let how = if steam {
+                "It's Steam's game, so it goes into the Steam library you pick, with its Windows setup and Workshop files. Steam is closed for the move and opened again after. A library on a Windows-format drive is greyed out: Proton can't keep a game's Windows setup there."
+            } else if plan.file {
+                "It's one file among other things, so only that file moves, into a folder named after the game in the folder you pick."
+            } else {
+                "It goes into a folder of its own name in the folder you pick."
+            };
+            let group = adw::PreferencesGroup::builder().description(format!("{} takes {}. {how}{windows}", game.name, crate::windows_saves::size_text(bytes))).build();
             let page = adw::PreferencesPage::new();
             page.add(&group);
             let view = adw::ToolbarView::new();
@@ -2450,12 +2458,12 @@ impl Ui {
             let dialog = adw::Dialog::builder().title(format!("Move {}", game.name)).content_width(560).content_height(460).child(&view).build();
             for (title, folder, free, windows) in choices {
                 // Where it already is: listed, so the drive isn't missing, but not a choice.
-                let here = plan.from.parent().map(crate::library::norm) == Some(crate::library::norm(&folder));
+                let here = crate::moving::target(&plan, &folder).is_some_and(|t| crate::library::norm(&t) == crate::library::norm(&plan.from));
                 let room = if here { "it's here now".to_string() } else { format!("{} free", crate::windows_saves::size_text(free)) };
                 let row = adw::ActionRow::builder().title(&title).subtitle(format!("{} · {room}{}", folder.display(), if windows { " · Windows format" } else { "" })).activatable(true).use_markup(false).build();
                 row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
                 let tight = free < bytes + bytes / 50 + (100 << 20) && !plan.from.starts_with(&folder);
-                row.set_sensitive(!here && !tight && !(windows && plan.prefix));
+                row.set_sensitive(!here && !tight && !(windows && (plan.prefix || steam)));
                 let (u, d, id) = (u.clone(), dialog.clone(), game.id.clone());
                 row.connect_activated(move |_| {
                     d.close();
@@ -2475,7 +2483,10 @@ impl Ui {
                     }
                 });
             });
-            group.add(&other);
+            // Steam's games only go into Steam's libraries.
+            if !steam {
+                group.add(&other);
+            }
             dialog.present(Some(&u.window));
         });
     }
