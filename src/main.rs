@@ -10,6 +10,7 @@ mod drives;
 mod evdev;
 mod extras;
 mod fixing;
+mod heal;
 mod free;
 mod import;
 mod install;
@@ -92,6 +93,8 @@ const USAGE: &str = "usage: lobby                   open the window
        lobby take-over-heroic  make the Epic and GOG games Heroic installed lobby's (each scan does)
        lobby import [--dry]    move imported games' Wine setups into Lobby's folders (a link left
                                behind) and copy launchers' Proton builds (each scan does)
+       lobby moved [--dry]     games moved by hand: point their old records, app-menu entries and
+                               Steam shortcuts at where they are now (each scan does)
        lobby own-wine-setup <game>  give a game in a shared Wine setup a copy of its own
        lobby shortcuts [list|add <name>|remove <name>]  what's in the app menu: games with an entry
                                there, and Windows programs' Start Menu shortcuts (Proton keeps
@@ -151,6 +154,7 @@ fn main() -> ExitCode {
         (Some("accounts"), []) => accounts(),
         (Some("take-over-heroic"), []) => take_over_heroic(),
         (Some("import"), []) => import_now(args.iter().any(|a| a == "--dry")),
+        (Some("moved"), []) => moved_now(args.iter().any(|a| a == "--dry")),
         (Some("own-wine-setup"), words) if !words.is_empty() => own_wine_setup(&words.join(" ")),
         (Some("gamefix"), [what @ ("check" | "fix" | "undo" | "protons"), game @ ..]) if !game.is_empty() => gamefix_game(what, &game.join(" ")),
         (Some("gamefix"), ["proton", tool, game @ ..]) if !game.is_empty() => gamefix_proton(tool, &game.join(" ")),
@@ -736,6 +740,10 @@ fn scan() -> Result<Library, String> {
     if !log::timed("scan: taking games over", || taken::take_over(&lib.games)).is_empty() {
         return scan();
     }
+    // Games moved by hand: what names their old place follows, and they're looked at again.
+    if heal_once(&lib.games) {
+        return scan();
+    }
     // What imported games need becomes Lobby's (their Wine prefixes, launchers' Proton builds).
     if log::timed("scan: importing", || import::run(&lib.games, false)).iter().any(|l| l.starts_with('✓')) {
         return scan();
@@ -743,6 +751,21 @@ fn scan() -> Result<Library, String> {
     repair_entries();
     log::timed("scan: app-menu entries' protection", || sandbox::sync_shortcuts(&lib.games));
     Ok(lib)
+}
+
+/// Points what names a hand-moved game's old place at its new one (`heal`); whether anything
+/// changed, so the games are worth looking at again. A few times per run at most: a record
+/// that keeps changing must not keep Lobby scanning.
+pub fn heal_once(games: &[library::Game]) -> bool {
+    static TIMES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    if TIMES.load(std::sync::atomic::Ordering::Relaxed) >= 3 {
+        return false;
+    }
+    let changed = !log::timed("scan: games moved by hand", || heal::run(games, false)).is_empty();
+    if changed {
+        TIMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    changed
 }
 
 /// gamefix's entries whose Proton or Steam runtime moved (a Steam library moved, a Steam
@@ -1204,6 +1227,22 @@ fn save_backups(query: &str, what: &[&str]) -> Result<(), String> {
         }
         _ => Err(USAGE.to_string()),
     }
+}
+
+/// Points what names hand-moved games' old places at their new ones now (--dry: says which).
+fn moved_now(dry: bool) -> Result<(), String> {
+    let lib = Library::load().map_or_else(scan, Ok)?;
+    let done = heal::run(&lib.games, dry);
+    if done.is_empty() {
+        println!("No game was moved by hand since Lobby last looked.");
+    }
+    for l in &done {
+        println!("  {l}");
+    }
+    if !dry && !done.is_empty() {
+        scan()?;
+    }
+    Ok(())
 }
 
 /// Makes what imported games need Lobby's own now (--dry: says what it would do).

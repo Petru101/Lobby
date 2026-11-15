@@ -2148,7 +2148,8 @@ impl Ui {
                     // such after a rescan), and app-menu entries start games as Play does.
                     let taking = games.clone();
                     let taken = gio::spawn_blocking(move || crate::taken::take_over(&taking)).await.unwrap_or_default();
-                    if !taken.is_empty() {
+                    let moved = games.clone();
+                    if !taken.is_empty() || gio::spawn_blocking(move || crate::heal_once(&moved)).await.unwrap_or(false) {
                         u.scan_again.set(true);
                     } else {
                         // What imported games need becomes Lobby's (their Wine prefixes moved,

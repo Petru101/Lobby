@@ -196,6 +196,24 @@ pub fn move_game(game: &Game, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec
     Ok(done)
 }
 
+/// A game already in its new place (moved by hand, found again by `heal`): everything naming
+/// the old one follows, as after Lobby's own move. Steam's shortcuts only while Steam is
+/// closed (it writes them on quitting): they're done by a later scan. How many files changed.
+pub fn follow(from: &Path, to: &Path, game: &Game) -> Result<usize, String> {
+    let steam_open = gamefix::steam::Steam::find().is_some_and(|s| s.running());
+    let names = spellings(from);
+    let shortcut_files: Vec<PathBuf> = if steam_open { Vec::new() } else { shortcut_files().into_iter().filter(|f| fs::read(f).is_ok_and(|d| names.iter().any(|n| contains(&d, n.as_bytes())))).collect() };
+    let written = crate::library::norm(to);
+    let by_gamefix = match gamefix::setup::relocate(from, &written) {
+        Ok(changed) => changed.len(),
+        Err(e) => {
+            crate::log::line(&format!("found again: {}: gamefix: {e}", game.name));
+            0
+        }
+    };
+    Ok(by_gamefix + point_records(from, &written, game, &shortcut_files)?)
+}
+
 /// Copies a folder: files (their permissions and times), links as links (one pointing inside
 /// the folder moving, `moving.0`, by its full path points to the same file in its new place,
 /// `moving.1`), folders.
@@ -291,10 +309,54 @@ fn repoint_beside(text: &str, from: &Path, to: &Path, siblings: Option<&[String]
     out
 }
 
+/// An app-menu entry's `Exec` lines (and the copy Lobby's wrapper keeps) with every word naming `to` in double quotes, when `to`
+/// needs them (a space, say) and the word has none: the old place may have needed no quotes
+/// (~/Downloads/game → ~/Downloads/Downloaded Games/game), and unquoted, the entry starts
+/// nothing. A word is what stood there before: up to the spaces around the new place, since
+/// what follows it in the word had no space while it was unquoted.
+pub fn quote_exec(text: &str, to: &Path) -> String {
+    let needs = |s: &str| s.chars().any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '>' | '<' | '~' | '|' | '&' | ';' | '$' | '*' | '?' | '#' | '(' | ')' | '`'));
+    let places: Vec<String> = spellings(to).into_iter().filter(|s| needs(s)).collect();
+    if places.is_empty() {
+        return text.to_string();
+    }
+    let fix = |line: &str| -> String {
+        let mut line = line.to_string();
+        for place in &places {
+            let mut from = 0;
+            while let Some(i) = line[from..].find(place.as_str()).map(|i| i + from) {
+                let quoted = line[..i].chars().filter(|c| *c == '"').count() % 2 == 1;
+                let end = i + place.len();
+                // /var/home/… holds /home/…: not a place of its own inside the longer one.
+                let inside = line[..i].ends_with(|c: char| c.is_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'));
+                if quoted || inside {
+                    from = end;
+                    continue;
+                }
+                let start = line[..i].rfind(' ').map_or(0, |s| s + 1).max(line.find('=').map_or(0, |e| e + 1).min(i));
+                let stop = line[end..].find(' ').map_or(line.len(), |s| s + end);
+                let word: String = line[start..stop].chars().flat_map(|c| if matches!(c, '"' | '`' | '$' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
+                let new = format!("\"{word}\"");
+                from = start + new.len();
+                line.replace_range(start..stop, &new);
+            }
+        }
+        line
+    };
+    let mut out: Vec<String> = text.lines().map(|l| if l.starts_with("Exec=") || l.starts_with("X-Lobby-Original-Exec=") { fix(l) } else { l.to_string() }).collect();
+    if text.ends_with('\n') {
+        out.push(String::new());
+    }
+    out.join("\n")
+}
+
 /// Rewrites a text file naming the old place; whether it changed.
 pub(crate) fn repoint_file(file: &Path, from: &Path, to: &Path) -> Result<bool, String> {
     let Ok(text) = fs::read_to_string(file) else { return Ok(false) };
-    let new = repoint(&text, from, to, file.extension().is_some_and(|x| x == "desktop"));
+    let entry = file.extension().is_some_and(|x| x == "desktop");
+    let new = repoint(&text, from, to, entry);
+    // gamefix may have pointed it already: the quotes are still looked at.
+    let new = if entry { quote_exec(&new, to) } else { new };
     if new == text {
         return Ok(false);
     }
@@ -364,6 +426,19 @@ fn point_records(from: &Path, to: &Path, game: &Game, shortcut_files: &[PathBuf]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_place_with_a_space_is_quoted_in_an_entry() {
+        let to = Path::new("/home/p/Downloads/Kept Games/simant");
+        let entry = "Name=SimAnt\nExec=/home/p/.local/bin/lobby sandbox simant -- flatpak run --filesystem=/home/p/Downloads/Kept Games/simant io.dosbox -exit /var/home/p/Downloads/Kept Games/simant/SIMANT.EXE\nPath=/home/p/Downloads/Kept Games/simant\n";
+        let right = "Name=SimAnt\nExec=/home/p/.local/bin/lobby sandbox simant -- flatpak run \"--filesystem=/home/p/Downloads/Kept Games/simant\" io.dosbox -exit \"/var/home/p/Downloads/Kept Games/simant/SIMANT.EXE\"\nPath=/home/p/Downloads/Kept Games/simant\n";
+        assert_eq!(quote_exec(entry, to), right);
+        // Already quoted, or no need: untouched.
+        assert_eq!(quote_exec(right, to), right);
+        assert_eq!(quote_exec("Exec=umu-run /home/p/Games/simant/S.EXE\n", Path::new("/home/p/Games/simant")), "Exec=umu-run /home/p/Games/simant/S.EXE\n");
+        // The first word of the line.
+        assert_eq!(quote_exec("Exec=/home/p/Downloads/Kept Games/simant/run.sh -x", to), "Exec=\"/home/p/Downloads/Kept Games/simant/run.sh\" -x");
+    }
 
     #[test]
     fn only_whole_paths_are_repointed() {

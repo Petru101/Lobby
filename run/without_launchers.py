@@ -17,8 +17,10 @@ ENTRY_PATHS = ("folder", "program", "prefix")
 def paths_in(words):
     for word in words:
         word = word.split("=", 1)[1] if re.match(r"^[A-Z_]+=", word) else word
-        if word.startswith("/"):
-            yield word
+        # A list of folders (PATH, LD_PRELOAD) is several paths; a start's log isn't there before it.
+        for part in word.split(":") if word.startswith("/") else []:
+            if part.startswith("/") and "/lobby/logs/" not in part:
+                yield part
 
 
 def missing(paths):
@@ -56,7 +58,8 @@ def collect(lobby, out):
         games = json.load(f)["games"]
     with open(os.path.join(data, "lobby/playtime.json")) as f:
         playtime = json.load(f)
-    chosen = [g for g in games if g["kind"] in LOOKED_AT]
+    # Games Lobby itself shows as gone or missing aren't looked at: it knows, and hides them.
+    chosen = [g for g in games if g["kind"] in LOOKED_AT and not g.get("gone") and not g.get("missing")]
     if os.environ.get("ONLY"):
         chosen = [g for g in chosen if g["id"] == os.environ["ONLY"]]
     with ThreadPoolExecutor(8) as pool:
