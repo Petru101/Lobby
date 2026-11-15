@@ -131,6 +131,9 @@ fn engine_folders(program: &Path, prefix: Option<&Path>, homes: &[PathBuf]) -> V
         out.push((dir.join("www/save"), "Saves"));
         out.push((dir.join("save"), "Saves"));
     }
+    // A Switch game packed with its emulator (yuzu's family: Eden, Lichii ...), which keeps its
+    // data in "user" beside the program: the console's save storage.
+    out.push((dir.join("user/nand/user/save"), "Saves"));
     out
 }
 
