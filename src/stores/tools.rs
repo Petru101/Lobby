@@ -30,16 +30,6 @@ pub const GOGDL: Tool = Tool {
     sha256: "7a6f22da4943bdb4c00baf6250fcee7085c1104ba2ac401479e70ec96e722b59",
 };
 
-/// umu-launcher, which runs Windows games with Proton: github.com/Open-Wine-Components/umu-launcher's
-/// zipapp (umu-run, one Python program), for systems without an umu-run of their own (Bazzite
-/// has one; Ubuntu, Fedora and Arch don't install it).
-pub const UMU: Tool = Tool {
-    name: "umu-launcher",
-    version: "1.4.4",
-    url: "https://github.com/Open-Wine-Components/umu-launcher/releases/download/1.4.4/umu-launcher-1.4.4-zipapp.tar",
-    sha256: "eb590691841f7fad3fc3ad8fd5db4ccb87849fe7948e62b28ece7a4ee48cc851",
-};
-
 /// Programs of Lobby's own that games and gamefix find by name (umu-run, steam), at the end of
 /// Lobby's PATH so that the system's own come first.
 pub fn bin() -> PathBuf {
@@ -76,24 +66,15 @@ pub fn provide() {
     }
 }
 
-/// umu-run out of umu's release, as `bin`/umu-run (a link to this version's).
+/// umu-run as `bin`/umu-run: a link to gamefix's copy, which gamefix downloads when there's
+/// none (umu's pinned release, checked by hash, in ~/.local/share/gamefix/tools: one copy for
+/// both). A copy Lobby downloaded itself before (tools/umu-run-<version>) stays in use.
 fn own_umu(bin: &std::path::Path) -> Result<(), String> {
-    let program = crate::store::dir().join("tools").join(format!("umu-run-{}", UMU.version));
     let link = bin.join("umu-run");
-    if fs::read_link(&link).is_ok_and(|l| l == program) && program.is_file() {
+    if link.is_file() {
         return Ok(());
     }
-    if !program.is_file() {
-        let release = UMU.path()?;
-        let out = Command::new("tar").arg("-xOf").arg(&release).arg("umu/umu-run").stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
-        if !out.status.success() || out.stdout.is_empty() {
-            return Err(format!("couldn't unpack {}", release.display()));
-        }
-        let part = program.with_extension("part");
-        fs::write(&part, &out.stdout).map_err(|e| e.to_string())?;
-        fs::set_permissions(&part, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
-        fs::rename(&part, &program).map_err(|e| e.to_string())?;
-    }
+    let program = gamefix::proton::umu_run(&mut Vec::new())?;
     fs::create_dir_all(bin).map_err(|e| e.to_string())?;
     let _ = fs::remove_file(&link);
     std::os::unix::fs::symlink(&program, &link).map_err(|e| e.to_string())

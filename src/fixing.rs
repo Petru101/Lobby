@@ -156,11 +156,30 @@ fn read(game: &Game, how: &How) -> Result<gamefix::scan::Game, String> {
     Ok(read)
 }
 
+/// What the game's last start printed, when that start failed: gamefix reads it for what was
+/// missing and the files didn't show (`Report::with_start_log`).
+fn failed_log(game: &Game) -> Option<String> {
+    crate::starts::failed(&game.id)?;
+    fs::read(crate::store::log_file(&game.id)).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// gamefix's report on the game, with what its last failed start showed.
+fn check(game: &Game, read: &gamefix::scan::Game) -> gamefix::check::Report {
+    let system = gamefix::system::System::load();
+    let mut report = gamefix::check::check(read, &system);
+    if let Some(log) = failed_log(game) {
+        if let Some(hint) = report.with_start_log(read, &system, &log) {
+            crate::log::line(&format!("{}: its failed start's log told gamefix more ({hint:?})", game.name));
+        }
+    }
+    report
+}
+
 /// Checks the game (reads its files: seconds on a big one, so not on the window's thread).
 pub fn look(game: &Game) -> Result<Option<Look>, String> {
     let Some(how) = how(game, &launch::plan(game)) else { return Ok(None) };
     let read = read(game, &how)?;
-    let report = gamefix::check::check(&read, &gamefix::system::System::load());
+    let report = check(game, &read);
     let word = match how {
         How::Steam(_) => "Fix",
         How::FirstPlay(_) => "Play",
@@ -205,12 +224,12 @@ pub fn fix(game: &Game) -> Result<Vec<String>, String> {
     match how(game, &launch::plan(game)) {
         Some(how @ How::Steam(_)) => {
             let read = read(game, &how)?;
-            let report = gamefix::check::check(&read, &gamefix::system::System::load());
+            let report = check(game, &read);
             let outcome = setup::setup(&read, &report, &Targets { menu: false, steam: true })?;
             Ok(outcome.done.iter().map(|l| format!("✓ {l}")).chain(outcome.not_fixed.iter().map(|l| format!("✗ {l}"))).collect())
         }
         Some(How::Menu { target, name }) => {
-            let (lines, entry) = launch::set_up(&target, Some(&name))?;
+            let (lines, entry) = launch::set_up_after(&target, Some(&name), failed_log(game).as_deref())?;
             // A launcher's game in a Wine prefix of its own now: its saves come too.
             if let Some(entry) = &entry {
                 if let Err(e) = crate::windows_saves::from_launcher(game, entry) {

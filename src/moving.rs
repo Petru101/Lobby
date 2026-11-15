@@ -163,7 +163,17 @@ pub fn move_game(game: &Game, into: &Path, progress: &dyn Fn(f64)) -> Result<Vec
     // Everything that names the old place, written as the scan writes paths (/home, not
     // /var/home: else the next scan wouldn't know its own game).
     let written = crate::library::norm(&to);
-    let n = point_records(&plan.from, &written, game, &shortcut_files)?;
+    // gamefix's own first (its records and entries, and what a text rewrite can't do: the links
+    // in its folders into the game's, a game's libs/). Lobby's pass below then finds those
+    // already right, and does everything else. Steam was seen closed above.
+    let by_gamefix = match gamefix::setup::relocate(&plan.from, &written) {
+        Ok(changed) => changed.len(),
+        Err(e) => {
+            crate::log::line(&format!("moving {}: gamefix: {e}", game.name));
+            0
+        }
+    };
+    let n = by_gamefix + point_records(&plan.from, &written, game, &shortcut_files)?;
     done.push(format!("Pointed {n} records at the new place."));
     if let Some(app) = &plan.epic {
         let mut c = crate::stores::epic::legendary_command()?;
@@ -270,7 +280,7 @@ fn repoint_beside(text: &str, from: &Path, to: &Path, siblings: Option<&[String]
             let tail = &rest[i + old.len()..];
             let after = tail.chars().next();
             let space = after == Some(' ') && siblings.is_some_and(|sib| !sib.iter().any(|s| tail.starts_with(&s[name_len..])));
-            let ends = space || after.is_none_or(|c| matches!(c, '/' | '"' | '\'' | '\n' | '\t' | '\\' | ';' | '\0'));
+            let ends = space || after.is_none_or(|c| matches!(c, '/' | '"' | '\'' | '\n' | '\t' | '\\' | ';' | ':' | '\0'));
             result.push_str(&rest[..i]);
             result.push_str(if ends { &to } else { &old });
             rest = &rest[i + old.len()..];
@@ -359,6 +369,8 @@ mod tests {
     fn only_whole_paths_are_repointed() {
         let (from, to) = (Path::new("/run/media/p/Games/Woodo"), Path::new("/home/p/Games/Woodo"));
         let entry = "Exec=env WINEPREFIX=/var/home/p/pfx umu-run /run/media/p/Games/Woodo/Woodo.exe\nPath=/run/media/p/Games/Woodo\nX-Other=/run/media/p/Games/Woodo 2/x.exe\n";
+        // A list of folders: the game's own, then a colon.
+        assert_eq!(repoint_beside("LD_LIBRARY_PATH=/run/media/p/Games/Woodo:/usr/lib", from, to, None), "LD_LIBRARY_PATH=/home/p/Games/Woodo:/usr/lib");
         assert_eq!(repoint_beside(entry, from, to, Some(&["Woodo 2".into()])), "Exec=env WINEPREFIX=/var/home/p/pfx umu-run /home/p/Games/Woodo/Woodo.exe\nPath=/home/p/Games/Woodo\nX-Other=/run/media/p/Games/Woodo 2/x.exe\n");
         // A home path written either way.
         assert_eq!(repoint("\"WINEPREFIX=/var/home/p/Faugus/g\"", Path::new("/home/p/Faugus/g"), Path::new("/run/media/p/Games/g"), true), "\"WINEPREFIX=/run/media/p/Games/g\"");

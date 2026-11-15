@@ -1057,11 +1057,21 @@ pub fn setup_need(folder: &Path) -> Option<Need> {
 /// files: "MinutesTillDawn"). Returns what it did and the entry made, which starts it from
 /// then on.
 pub fn set_up(folder: &Path, name: Option<&str>) -> Result<(Vec<String>, Option<PathBuf>), String> {
+    set_up_after(folder, name, None)
+}
+
+/// `set_up` for a game whose last start failed: gamefix reads that start's output (`log`) for
+/// what was missing (a library, a Windows part) and gets it too.
+pub fn set_up_after(folder: &Path, name: Option<&str>, log: Option<&str>) -> Result<(Vec<String>, Option<PathBuf>), String> {
     let mut game = gamefix::scan::scan(folder).ok_or_else(|| format!("{}: nothing there gamefix can read", folder.display()))?;
     if let Some(name) = name {
         game.name = name.to_string();
     }
-    let report = gamefix::check::check(&game, &gamefix::system::System::load());
+    let system = gamefix::system::System::load();
+    let mut report = gamefix::check::check(&game, &system);
+    if let Some(log) = log {
+        report.with_start_log(&game, &system, log);
+    }
     if let Some(runner) = gamefix::setup::missing_runner(&game, &report) {
         return Err(format!("It needs {} (from Flathub) to run. gamefix setup \"{}\" installs it and sets the game up.", runner.name, folder.display()));
     }
