@@ -2524,18 +2524,24 @@ impl Ui {
         use crate::uninstall::How;
         let group = adw::PreferencesGroup::new();
         let row = adw::ActionRow::builder().title("Uninstall").build();
-        match crate::uninstall::how(game) {
-            How::Not(why) => row.set_subtitle(&why),
-            how => {
+        let parts = crate::uninstall::parts(game);
+        match parts.as_slice() {
+            [(_, How::Not(why))] => row.set_subtitle(why),
+            [(_, how)] => {
                 row.set_subtitle(match how {
                     How::Steam(_) => "Steam uninstalls it (it asks first).",
                     How::Found(_) => "Lobby found it on your drive: deletes its folder, its app-menu entry, and if you like its Windows setup.",
                     _ => "Deletes its files, its app-menu entry, and if you like its Wine prefix.",
                 });
+            }
+            several => row.set_subtitle(&format!("It's here {}: {}.", times(several.len()), several.iter().map(|(_, h)| copy_line(h)).collect::<Vec<_>>().join("; "))),
+        }
+        if parts.iter().any(|(_, h)| !matches!(h, How::Not(_))) {
+            {
                 let button = gtk::Button::builder().label("Uninstall…").valign(gtk::Align::Center).build();
                 button.add_css_class("destructive-action");
                 row.add_suffix(&button);
-                let (u, page, id, steam) = (self.clone(), page.clone(), game.id.clone(), matches!(how, How::Steam(_)));
+                let (u, page, id, steam) = (self.clone(), page.clone(), game.id.clone(), matches!(parts.as_slice(), [(_, How::Steam(_))]));
                 button.connect_clicked(move |_| {
                     let Some(page) = page.borrow().clone() else { return };
                     if steam {
@@ -2556,7 +2562,13 @@ impl Ui {
     fn ask_uninstall(self: &Rc<Self>, id: &str, page: &adw::Dialog) {
         let Some(game) = self.game(id) else { return };
         let folder = game.folder().or_else(|| game.program().and_then(Path::parent)).map(|f| f.display().to_string()).unwrap_or_default();
-        let alert = adw::AlertDialog::new(Some(&format!("Uninstall {}?", game.name)), Some(&format!("Its files in {folder} are deleted.")));
+        let parts = crate::uninstall::parts(&game);
+        let body = if parts.len() > 1 {
+            format!("It's here {}: {}.", times(parts.len()), parts.iter().map(|(_, h)| copy_line(h)).collect::<Vec<_>>().join("; "))
+        } else {
+            format!("Its files in {folder} are deleted.")
+        };
+        let alert = adw::AlertDialog::new(Some(&format!("Uninstall {}?", game.name)), Some(&body));
         alert.add_responses(&[("cancel", "Cancel"), ("uninstall", "Uninstall")]);
         alert.set_response_appearance("uninstall", adw::ResponseAppearance::Destructive);
         alert.set_default_response(Some("cancel"));
@@ -2596,20 +2608,28 @@ impl Ui {
             return;
         }
         let all = self.lib.borrow().games.clone();
+        let steam = crate::uninstall::parts(&game).iter().any(|(_, h)| matches!(h, crate::uninstall::How::Steam(_)));
         let u = self.clone();
         glib::spawn_future_local(async move {
             let g = game.clone();
             let result = u.with_progress(&game.id, "Uninstalling…", move |_| crate::uninstall::uninstall(&g, &all, with_prefix)).await.unwrap_or_else(|| Err("it stopped with an error".into()));
             // Its card goes now; the scan that follows shows what's left (a store game as not
-            // installed).
-            if result.is_ok() && !matches!(crate::uninstall::how(&game), crate::uninstall::How::Steam(_)) {
+            // installed). Not while Steam asks about its copy.
+            if result.is_ok() && !steam {
                 if let Some(g) = u.lib.borrow_mut().get_mut(&game.id) {
                     g.gone = true;
                 }
                 u.refilter();
             }
             match result {
-                Ok(done) if done.iter().all(|l| l.starts_with('✓') || l.starts_with("Steam")) => u.toast(&format!("{}: {}", game.name, if done.iter().any(|l| l.starts_with("Steam")) { "Steam asks you to confirm." } else { "uninstalled." })),
+                Ok(done) if done.iter().all(|l| l.starts_with('✓') || l.starts_with("Steam")) => {
+                    let (steam, deleted) = (done.iter().any(|l| l.starts_with("Steam")), done.iter().any(|l| l.starts_with("✓ Deleted") || l.starts_with("✓ Removed")));
+                    u.toast(&format!("{}: {}", game.name, match (steam, deleted) {
+                        (true, true) => "its copy on the drive is deleted; Steam asks you to confirm for its own.",
+                        (true, false) => "Steam asks you to confirm.",
+                        _ => "uninstalled.",
+                    }))
+                }
                 Ok(done) => u.alert(&format!("{} is uninstalled", game.name), &done.join("\n")),
                 Err(e) => u.alert(&format!("{} couldn't be uninstalled", game.name), &e),
             }
@@ -5475,5 +5495,20 @@ fn and_list(items: &[&str]) -> String {
         [] => String::new(),
         [one] => one.to_string(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn times(n: usize) -> String {
+    if n == 2 { "twice".into() } else { format!("{n} times") }
+}
+
+/// One copy Uninstall takes away, for the game's page and the question before it.
+fn copy_line(how: &crate::uninstall::How) -> String {
+    use crate::uninstall::How;
+    match how {
+        How::Steam(_) => "Steam uninstalls the Steam copy (it asks first)".into(),
+        How::Store(store, _) => format!("the {} copy's files are deleted", store.name()),
+        How::SteamCopy(f, _) | How::Folder(f) | How::Found(f) => format!("the copy in {} is deleted", f.display()),
+        How::Not(why) => format!("a copy stays ({})", why.trim_end_matches('.')),
     }
 }

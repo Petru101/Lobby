@@ -4,9 +4,9 @@
 //! asked, its Wine prefix: never one another game runs in, and only after its saves are in the
 //! store's cloud when the store keeps them. Steam's games are uninstalled by Steam.
 //! Games other launchers installed are theirs to uninstall; folders lobby only found aren't
-//! deleted (they may be anything).
+//! deleted (they may be anything). A card holding several copies loses each (`parts`).
 
-use crate::library::{Game, Key, Kind, Source};
+use crate::library::{Entry, Game, Key, Kind, Source};
 use crate::stores::saves::{self, Direction};
 use crate::stores::Store;
 use std::fs;
@@ -25,6 +25,79 @@ pub enum How {
     Found(PathBuf),
     /// Not lobby's to uninstall: why.
     Not(String),
+}
+
+/// Each copy of the game Uninstall takes away, as the card with only that copy's entries and
+/// how it goes. One card can hold several: Voltcube's Steam demo and the copy Lobby unpacked
+/// from its itch.io zip shared one, and Uninstall asked Steam and left the other. Copies on the
+/// drive first, a store's or Steam's (Steam asks) last; a copy that can't go is a `Not` among
+/// them, and alone when nothing can.
+pub fn parts(game: &Game) -> Vec<(Game, How)> {
+    let mut parts = Vec::new();
+    let mut left = game.clone();
+    for _ in 0..8 {
+        let how = how(&left);
+        if matches!(how, How::Not(_)) {
+            parts.push((left, how));
+            break;
+        }
+        let (this, rest) = split(&left, &how);
+        parts.push((this, how));
+        match rest {
+            Some(r) => left = r,
+            None => break,
+        }
+    }
+    parts.sort_by_key(|(_, h)| match h {
+        How::Not(_) => 2,
+        How::Steam(_) | How::Store(..) => 1,
+        _ => 0,
+    });
+    parts
+}
+
+/// The card's entries of the copy `how` takes away, and the rest when it holds another copy
+/// still on the drive. Entries that point nowhere (gamefix's note, a name) go with both.
+fn split(game: &Game, how: &How) -> (Game, Option<Game>) {
+    let mut places: Vec<PathBuf> = match how {
+        How::Store(store, id) => store.installed().into_iter().filter(|g| &g.id == id).map(|g| g.folder).collect(),
+        How::Steam(_) => game.entries.iter().filter(|e| e.source == Source::Steam).filter_map(|e| e.folder.clone()).collect(),
+        How::SteamCopy(f, _) | How::Found(f) => vec![f.clone()],
+        How::Folder(f) => std::iter::once(f.clone()).chain(installed_elsewhere(f).and_then(Result::ok)).collect(),
+        How::Not(_) => Vec::new(),
+    };
+    places.retain(|p| p.components().count() > 2);
+    let located = |e: &Entry| [e.folder.as_deref(), e.program.as_deref(), e.prefix.as_deref()].into_iter().flatten().next().is_some();
+    let mine = |e: &Entry| {
+        [e.folder.as_deref(), e.program.as_deref(), e.prefix.as_deref()].into_iter().flatten().any(|p| places.iter().any(|f| p.starts_with(f)))
+            || match how {
+                How::Store(store, id) => e.keys.iter().any(|k| matches!(k, Key::Store(s, i) if Store::from_id(s) == Some(*store) && i == id)),
+                How::Steam(id) | How::SteamCopy(_, id) => e.keys.contains(&Key::SteamApp(*id)),
+                _ => false,
+            }
+    };
+    let (mut this, mut rest) = (game.clone(), game.clone());
+    this.entries.retain(|e| mine(e) || !located(e));
+    rest.entries.retain(|e| !mine(e));
+    let on_drive = |e: &Entry| e.kind == Kind::Game && !e.annotation && [e.folder.as_deref(), e.program.as_deref()].into_iter().flatten().any(Path::exists);
+    let another = rest.entries.iter().any(on_drive);
+    (this, another.then_some(rest))
+}
+
+/// What Uninstall does with one copy, for `lobby how`.
+pub fn describe(game: &Game, how: &How) -> String {
+    match how {
+        How::Store(store, _) => format!("{}'s files go, through lobby's {} tool", game.name, store.name()),
+        How::Steam(id) => format!("Steam uninstalls it (app {id})"),
+        How::SteamCopy(f, _) => format!("deletes the copy in {}", f.display()),
+        How::Folder(f) => match installed_elsewhere(f) {
+            Some(Ok(game_folder)) => format!("deletes {} (lobby or gamefix put it there) and the game's folder {}", f.display(), game_folder.display()),
+            Some(Err(program)) => format!("deletes {} (lobby or gamefix put it there); the game's folder isn't plain from {}, so it stays", f.display(), program.display()),
+            None => format!("deletes {} (lobby or gamefix put it there)", f.display()),
+        },
+        How::Found(f) => format!("deletes {} (found on your drive)", f.display()),
+        How::Not(why) => why.clone(),
+    }
 }
 
 pub fn how(game: &Game) -> How {
@@ -245,17 +318,33 @@ fn undo_gamefix(game: &Game, folder: &Path, done: &mut Vec<String>) -> Result<()
 
 /// Uninstalls the game; with `with_prefix`, its prefix too when no other game runs in it.
 /// Returns what it did, a line each.
+/// Every copy on the card (`parts`): one that can't go, or fails, is a line among the others'.
 pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<String>, String> {
     crate::log::line(&format!("uninstall {}", game.name));
+    let parts = crate::log::timed("uninstall: what kind of install", || parts(game));
+    if let [(g, how)] = parts.as_slice() {
+        return uninstall_one(g, how, all, with_prefix, false);
+    }
     let mut done = Vec::new();
-    let how = crate::log::timed("uninstall: what kind of install", || how(game));
+    for (g, how) in &parts {
+        match uninstall_one(g, how, all, with_prefix, true) {
+            Ok(lines) => done.extend(lines),
+            Err(e) if matches!(how, How::Not(_)) => done.push(format!("Kept a copy: {e}")),
+            Err(e) => done.push(e),
+        }
+    }
+    Ok(done)
+}
+
+fn uninstall_one(game: &Game, how: &How, all: &[Game], with_prefix: bool, several: bool) -> Result<Vec<String>, String> {
+    let mut done = Vec::new();
     let prefix = crate::log::timed("uninstall: its prefix", || prefix(game));
-    let folder = match &how {
+    let folder = match how {
         How::Store(store, id) => store.installed().into_iter().find(|g| &g.id == id).map(|g| g.folder),
         How::Folder(f) | How::SteamCopy(f, _) | How::Found(f) => Some(f.clone()),
         How::Steam(id) => {
             crate::launch::start("Steam", &["steam".into(), format!("steam://uninstall/{id}")], None, &crate::store::log_file(&game.id))?;
-            return Ok(vec!["Steam asks you to confirm, then uninstalls it.".into()]);
+            return Ok(vec![if several { "Steam asks you to confirm, then uninstalls its Steam copy." } else { "Steam asks you to confirm, then uninstalls it." }.into()]);
         }
         How::Not(why) => return Err(why.clone()),
     };
@@ -276,7 +365,7 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
             done.push(format!("Kept {}: it doesn't look like a game's own Wine prefix.", p.display()));
         } else {
             let mut safe = true;
-            if let How::Store(store, id) = &how {
+            if let How::Store(store, id) = how {
                 if crate::log::timed("uninstall: cloud saves?", || saves::supported(*store, id)) {
                     let env = crate::launch::wine_command(game).map(|w| w.env).unwrap_or_default();
                     match crate::log::timed("uninstall: saves up", || saves::sync(*store, id, &env, Direction::Up)) {
@@ -301,7 +390,7 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
     if let Some(folder) = &folder {
         crate::log::timed("uninstall: gamefix undo", || undo_gamefix(game, folder, &mut done))?;
     }
-    match &how {
+    match how {
         How::Store(store, id) => {
             crate::log::timed("uninstall: store's uninstall", || store.uninstall(id))?;
             done.push(format!("✓ Removed its files ({}).", folder.as_ref().map_or_else(String::new, |f| f.display().to_string())));
@@ -347,4 +436,44 @@ pub fn uninstall(game: &Game, all: &[Game], with_prefix: bool) -> Result<Vec<Str
         done.push(format!("Kept its Wine prefix {} (its settings and saves).", p.display()));
     }
     Ok(done)
+}
+
+#[cfg(test)]
+mod copies_tests {
+    use super::*;
+
+    /// Voltcube: a Steam demo and the copy Lobby unpacked from the itch.io zip, on one card.
+    #[test]
+    fn a_steam_copy_and_an_unpacked_one_both_go() {
+        let dir = std::env::temp_dir().join(format!("lobby-copies-{}", std::process::id()));
+        let (steam_dir, unpacked) = (dir.join("SteamLibrary/steamapps/common/Voltcube Demo"), dir.join("Games/Voltcube"));
+        fs::create_dir_all(&steam_dir).unwrap();
+        fs::create_dir_all(&unpacked).unwrap();
+        fs::write(steam_dir.join("voltcube.jar"), "").unwrap();
+        fs::write(unpacked.join("voltcube.jar"), "").unwrap();
+        fs::write(unpacked.join(crate::install::SOURCE_NOTE), "/d/Voltcube Alpha Demo.zip\n").unwrap();
+        let mut steam = Entry::new(Source::Steam, "Voltcube Demo");
+        steam.folder = Some(steam_dir.clone());
+        steam.keys.push(Key::SteamApp(2009070));
+        let mut menu = Entry::new(Source::AppMenu, "Voltcube");
+        menu.folder = Some(unpacked.clone());
+        menu.program = Some(unpacked.join("voltcube.jar"));
+        menu.keys.push(Key::Desktop(dir.join("gamefix-voltcube.desktop")));
+        let mut note = Entry::new(Source::Gamefix, "voltcube");
+        note.annotation = true;
+        let mut zip = Entry::new(Source::Folder, "Voltcube Alpha Demo");
+        zip.kind = Kind::Download;
+        zip.program = Some(dir.join("Voltcube Alpha Demo.zip"));
+        let game = Game { id: "voltcube".into(), name: "Voltcube Demo".into(), kind: Kind::Game, entries: vec![steam, menu.clone(), note, zip], missing: false, gone: false, added: 0, played: None, chosen_cover: None, launch_options: None, protection: Default::default(), hidden: false, favourite: false, frame_rate: false, proton: None, kept_cover: None, kept_icon: None, controller: None };
+        let parts = parts(&game);
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0].1, How::Folder(f) if f == &unpacked));
+        assert!(parts[0].0.entries.iter().any(|e| e.source == Source::AppMenu));
+        assert!(parts[0].0.entries.iter().all(|e| e.source != Source::Steam));
+        assert!(matches!(parts[1].1, How::Steam(2009070)));
+        // One copy alone is as before.
+        let alone = Game { entries: vec![menu], ..game.clone() };
+        assert!(matches!(super::parts(&alone).as_slice(), [(_, How::Folder(_))]));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

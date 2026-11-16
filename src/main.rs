@@ -1008,18 +1008,8 @@ fn how(query: &str) -> Result<(), String> {
     for f in save_folders::find(game) {
         println!("{}: {}", f.what, f.path.display());
     }
-    println!("Uninstall: {}", match uninstall::how(game) {
-        uninstall::How::Store(store, _) => format!("{}'s files go, through lobby's {} tool", game.name, store.name()),
-        uninstall::How::Steam(id) => format!("Steam uninstalls it (app {id})"),
-        uninstall::How::SteamCopy(f, _) => format!("deletes the copy in {}", f.display()),
-        uninstall::How::Folder(f) => match uninstall::installed_elsewhere(&f) {
-            Some(Ok(game_folder)) => format!("deletes {} (lobby or gamefix put it there) and the game's folder {}", f.display(), game_folder.display()),
-            Some(Err(program)) => format!("deletes {} (lobby or gamefix put it there); the game's folder isn't plain from {}, so it stays", f.display(), program.display()),
-            None => format!("deletes {} (lobby or gamefix put it there)", f.display()),
-        },
-        uninstall::How::Found(f) => format!("deletes {} (found on your drive)", f.display()),
-        uninstall::How::Not(why) => why,
-    });
+    let parts: Vec<String> = uninstall::parts(game).iter().map(|(g, how)| uninstall::describe(g, how)).collect();
+    println!("Uninstall: {}", parts.join("; then "));
     Ok(())
 }
 
