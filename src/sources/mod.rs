@@ -1,6 +1,7 @@
 //! The places games are found: launchers' own lists, app-menu entries, folders of games and
 //! Wine prefixes. Each source reads what's there and never changes anything.
 
+pub mod apps;
 pub(crate) mod downloads;
 pub mod faugus;
 pub mod folders;
@@ -62,6 +63,7 @@ pub fn scan(home: &Home) -> Found {
     entries.extend(crate::log::timed("scan: Faugus", || faugus::games(home)));
     entries.extend(crate::log::timed("scan: gamefix records", || gamefix::records(home)));
     entries.extend(crate::log::timed("scan: app menu", || menu::entries(home)));
+    entries.extend(apps::offers());
     entries.extend(crate::log::timed("scan: games Lobby took over", crate::taken::entries));
     // A game imported from Heroic, Lutris or Faugus is Lobby's from then on: nothing of the
     // launcher's (its prefix, cover, play time) is used again, only Lobby's record of it.

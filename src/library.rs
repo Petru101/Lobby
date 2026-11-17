@@ -76,6 +76,9 @@ pub enum Key {
     Name(String),
     /// A game the user added by its program (Add a game): that program starts it.
     Added(PathBuf),
+    /// The Flatpak app a game is played through (Roblox's Sober: `sources::apps`), on its offer
+    /// and on the app's entry once installed.
+    Flatpak(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]

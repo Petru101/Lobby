@@ -85,6 +85,9 @@ fn plan_as_set_up(game: &Game) -> Plan {
     if game.kind == Kind::Download {
         return Plan::Cannot("It's downloaded, not installed yet. Install unpacks it into your games folder (or runs its installer) and sets it up.".into());
     }
+    if let Some(app) = crate::sources::apps::wanted(game) {
+        return Plan::Cannot(format!("It plays in {}, which isn't installed yet. Install gets it from Flathub.", app.app));
+    }
     if game.kind == Kind::Owned {
         if crate::install::steam_owned(game).is_some() {
             return Plan::Cannot("You own it on Steam; it isn't installed. Install opens Steam's install window for it.".into());

@@ -1045,6 +1045,12 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
                 });
             }
         }
+        // LOBBY_SNAPSHOT_PRESS_INSTALL=<id>: presses that game's Install (it really installs)
+        // and renders once it and the rescan after it had time.
+        if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_PRESS_INSTALL") {
+            u.install(&id);
+            glib::timeout_future(std::time::Duration::from_secs(40)).await;
+        }
         // The cover picker's searches take a while.
         let picker = std::env::var("LOBBY_SNAPSHOT_PICKER").ok();
         if let Some((id, details)) = picker.as_ref().and_then(|id| Some((id, u.details(id)?))) {
@@ -2324,6 +2330,25 @@ impl Ui {
                 Ok(()) => self.toast(&format!("Steam's install window for {} is opening. Once Steam has installed it, it shows here as installed.", game.name)),
                 Err(e) => self.alert(&format!("Steam couldn't be opened for {}", game.name), &e),
             }
+            return;
+        }
+        if let Some(app) = crate::sources::apps::wanted(&game) {
+            self.toast(&format!("Installing {} from Flathub for {}…", app.app, game.name));
+            let u = self.clone();
+            let id = game.id.clone();
+            glib::spawn_future_local(async move {
+                let result = u.with_progress(&id, "Installing…", move |_| crate::sources::apps::install(app)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
+                match result {
+                    Ok(()) => {
+                        u.toast(&format!("{} is installed. Press Play and sign in with your Roblox account.", app.app));
+                        u.rescan();
+                    }
+                    Err(e) => {
+                        u.fill();
+                        u.alert(&format!("{} couldn't be installed", game.name), &e);
+                    }
+                }
+            });
             return;
         }
         if game.kind == Kind::Owned {
@@ -4263,7 +4288,11 @@ impl Ui {
         cover.set_valign(gtk::Align::Start);
         let name = gtk::Label::builder().label(&game.name).wrap(true).xalign(0.0).build();
         name.add_css_class("title-1");
-        let found = gtk::Label::builder().label(format!("Found in: {}", game.found_in())).wrap(true).xalign(0.0).build();
+        let found_in = match crate::sources::apps::wanted(&game) {
+            Some(app) => format!("Free: plays in {}, an app from Flathub", app.app),
+            None => format!("Found in: {}", game.found_in()),
+        };
+        let found = gtk::Label::builder().label(found_in).wrap(true).xalign(0.0).build();
         found.add_css_class("dim-label");
 
         // The page's dialog, for buttons made before it is.
@@ -5260,6 +5289,9 @@ fn origin(g: &Game) -> String {
     }
     if g.kind == Kind::Download {
         return "Not installed yet".into();
+    }
+    if let Some(app) = crate::sources::apps::wanted(g) {
+        return format!("Free · plays in {}", app.app);
     }
     if g.kind == Kind::Owned {
         let store = if crate::install::steam_owned(g).is_some() { "Steam" } else { crate::install::owned_in(g).map_or("A store", |(s, _)| s.name()) };

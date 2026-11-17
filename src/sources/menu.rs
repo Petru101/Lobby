@@ -126,8 +126,14 @@ fn read(file: &Path, dirs: &[PathBuf]) -> Option<Entry> {
     if !game || lobby || get("Type").is_some_and(|t| t != "Application") || (get("NoDisplay") == Some("true") && !text.lines().any(|l| l.trim() == crate::start_menu::HIDDEN_BY_LOBBY)) || get("Hidden") == Some("true") {
         return None;
     }
-    let mut e = Entry::new(Source::AppMenu, name);
+    // An app a game is played through (Sober) is that game (Roblox), and its offer's card once
+    // installed.
+    let through = get("X-Flatpak").and_then(super::apps::known);
+    let mut e = Entry::new(Source::AppMenu, through.map_or(name, |a| a.game));
     e.keys.push(Key::Desktop(file.to_path_buf()));
+    if let Some(app) = through {
+        e.keys.push(Key::Flatpak(app.flatpak.to_string()));
+    }
     e.icon = get("Icon").and_then(|i| icon_file(i, dirs));
     if let Some(id) = exec.split("steam://rungameid/").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).and_then(|s| s.parse::<u64>().ok()) {
         // A non-Steam game's run id is its shortcut id shifted up (with 0x02000000 below).

@@ -909,6 +909,13 @@ fn install(query: &str) -> Result<(), String> {
         println!("Steam's install window for {} is opening; once Steam has it, `lobby scan` finds it.", game.name);
         return Ok(());
     }
+    if let Some(app) = sources::apps::wanted(&game) {
+        println!("Installing {} from Flathub for {}…", app.app, game.name);
+        sources::apps::install(app)?;
+        scan()?;
+        println!("{} is installed: lobby play \"{}\" starts it.", app.app, game.name);
+        return Ok(());
+    }
     println!("Installing {}…", game.name);
     let placed = install::place(&game, &progress_printer())?;
     ask_need(&game.name, &placed.target)?;
@@ -1376,7 +1383,7 @@ fn show(lib: &Library, json: bool) {
         ("Games no launcher knows about", Box::new(|g: &Game| g.kind == Kind::Game && !g.missing && !g.gone && g.unknown_to_launchers())),
         ("Downloaded, not installed yet", Box::new(|g: &Game| g.kind == Kind::Download && !g.missing && !g.gone)),
         ("Downloads for another system", Box::new(|g: &Game| g.kind == Kind::WrongSystem && !g.missing && !g.gone)),
-        ("Owned in a store, not installed", Box::new(|g: &Game| g.kind == Kind::Owned && !g.gone)),
+        ("Not installed: owned in a store, or free", Box::new(|g: &Game| g.kind == Kind::Owned && !g.gone)),
         ("Store apps", Box::new(|g: &Game| g.kind == Kind::StoreApp && !g.missing && !g.gone)),
         ("Listed somewhere, but not on disk", Box::new(|g: &Game| g.missing && !g.gone)),
         ("Not found any more (uninstalled, or on a drive that isn't plugged in)", Box::new(|g: &Game| g.gone)),
