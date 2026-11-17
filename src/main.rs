@@ -576,6 +576,10 @@ fn in_sandbox(id: &str, command: &[String]) -> ExitCode {
             Err(e) => eprintln!("lobby: {e}"),
         }
     }
+    // An app's controller setting that would only stop the game with a request (Sober's).
+    if let Some(said) = sources::apps::before_start(&game) {
+        eprintln!("lobby: {said}");
+    }
     let original = command;
     let command = match launch::add_extras(&game, command.to_vec()) {
         Ok(c) if !battle_net => c,

@@ -4636,6 +4636,42 @@ impl Ui {
         let unsupported = launch::controller_unsupported(plan);
         let help = unsupported.clone().unwrap_or_else(|| "For a game that only knows the keyboard: while it runs, the controller presses keys, and the right stick moves the mouse. Arrow keys suit menus and 2D games, WASD and mouse 3D ones. Leave it off for a game with controller support of its own, or it gets both.".into());
         let group = adw::PreferencesGroup::builder().title("Controller").description(&help).build();
+        // A game played through an app with a controller switch of its own (Roblox's Sober),
+        // which also needs every input device: on and off, both together.
+        if let Some(app) = crate::sources::apps::of_game(game).filter(|a| a.controller.is_some() && game.kind == Kind::Game) {
+            use crate::sources::apps;
+            let row = adw::SwitchRow::builder()
+                .title(format!("{}'s own controller support", game.name))
+                .subtitle(format!("On, {} can read every input device: your keyboard and mouse too, even while you type in other windows. Off takes that back.", app.app))
+                .subtitle_lines(0)
+                .active(apps::controller_on(app))
+                .build();
+            let u = self.clone();
+            row.connect_active_notify(move |row| {
+                let on = row.is_active();
+                // Set back after a failure: nothing to do.
+                if on == apps::controller_on(app) {
+                    return;
+                }
+                let (u, row) = (u.clone(), row.clone());
+                glib::spawn_future_local(async move {
+                    match gio::spawn_blocking(move || apps::set_controller(app, on)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                        Ok(()) if on => u.toast(&format!("{} gets the controller from the next Play (restart it if it's open).", app.app)),
+                        Ok(()) => u.toast(&format!("{} can't read your controller, keyboard or mouse any more.", app.app)),
+                        Err(e) => {
+                            row.set_active(!on);
+                            u.alert(&format!("{}'s controller support couldn't be changed", app.app), &e);
+                        }
+                    }
+                });
+            });
+            // A checking run flips it as a click would (LOBBY_SNAPSHOT_APP_CONTROLLER=on|off).
+            if let Ok(want) = std::env::var("LOBBY_SNAPSHOT_APP_CONTROLLER") {
+                let row = row.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || row.set_active(want == "on"));
+            }
+            group.add(&row);
+        }
         let choices = gtk::StringList::new(&["Off", "Arrow keys", "WASD and mouse"]);
         let (base, changes) = game.controller.as_deref().map_or(("arrows", String::new()), pad_keys::split);
         let selected = match (&game.controller, base) {
