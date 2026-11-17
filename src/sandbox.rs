@@ -334,9 +334,7 @@ impl Drop for Sandboxed {
 /// The game's command (`env` words and all) in its sandbox. `env` is what the caller adds to
 /// the command's environment (the paths in both are what the game gets to use).
 pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Option<&Path>) -> Result<Sandboxed, String> {
-    // umu-run by its path: Lobby's own (in its folder in the home) is then there, read-only,
-    // in an isolated home too.
-    let words: Vec<String> = words.iter().map(|w| if w == "umu-run" { crate::launch::program_on_path(w).map_or(w.clone(), |p| real(&p).display().to_string()) } else { w.clone() }).collect();
+    let words: Vec<String> = words.iter().map(|w| umu_by_real_path(w)).collect();
     // A Proton that moved since the game was set up (app-menu entries and shortcuts come here
     // with the old place).
     let words = crate::launch::proton_found(words);
@@ -782,6 +780,21 @@ fn too_wide(folder: &Path, home: &Path) -> bool {
 
 /// Absolute paths the command names (its words, `NAME=value` words and variables, values split
 /// at ':'), as they are: a program, a jar, PATH's folders, gamefix's sound settings.
+/// umu-run by its real path: Lobby's own (in its folder in the home) is then there, read-only,
+/// in an isolated home too. Not by a link to it: only the program a link leads to is shown to
+/// the game, so the link's own path wasn't there ("No such file or directory": Lobby's
+/// tools/bin/umu-run, a link to its older copy, which gamefix's entries name on installs from
+/// before gamefix kept umu).
+fn umu_by_real_path(word: &str) -> String {
+    if word == "umu-run" {
+        return crate::launch::program_on_path(word).map_or(word.to_string(), |p| real(&p).display().to_string());
+    }
+    if word.starts_with('/') && word.ends_with("/umu-run") && Path::new(word).is_symlink() {
+        return real(Path::new(word)).display().to_string();
+    }
+    word.to_string()
+}
+
 fn named_paths(env: &[(String, String)], words: &[String]) -> Vec<PathBuf> {
     let values = env.iter().map(|(_, v)| v.clone()).chain(words.iter().map(|w| w.split_once('=').map_or(w.clone(), |(_, v)| v.to_string())));
     let mut out = Vec::new();
@@ -900,6 +913,20 @@ mod tests {
         assert_eq!(comment_text(own, LOBBY_COMMENT), own);
     }
     use super::*;
+
+    /// umu-run named through a link (Lobby's tools/bin/umu-run) is started by its real path.
+    #[test]
+    fn umu_through_a_link_is_started_by_its_real_path() {
+        let dir = std::env::temp_dir().join(format!("lobby-umu-link-{}", std::process::id()));
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::write(dir.join("umu-run-1.4.4"), b"#!/bin/sh\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("umu-run-1.4.4"), dir.join("bin/umu-run")).unwrap();
+        let link = dir.join("bin/umu-run").display().to_string();
+        assert_eq!(umu_by_real_path(&link), real(&dir.join("umu-run-1.4.4")).display().to_string());
+        assert_eq!(umu_by_real_path("/usr/bin/true"), "/usr/bin/true");
+        assert_eq!(umu_by_real_path("/no/such/umu-run"), "/no/such/umu-run");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn knows_lobby_in_every_form() {
