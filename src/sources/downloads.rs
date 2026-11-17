@@ -89,6 +89,17 @@ fn engine_files(names: &[String]) -> bool {
     })
 }
 
+/// Games' official Linux launchers that come as a lone program in an archive: Minecraft's
+/// (minecraft.net's Minecraft.tar.gz).
+const LAUNCHERS: &[&str] = &["minecraft-launcher/minecraft-launcher"];
+
+/// Whether a program is one of those launchers: its maker's own, which needs the internet to
+/// fetch the game and sign in (not a download's unknown program, which is isolated at first).
+pub fn official_launcher(program: &Path) -> bool {
+    let p = program.to_string_lossy();
+    LAUNCHERS.iter().any(|l| p.ends_with(&format!("/{l}")))
+}
+
 fn holds(names: &[String]) -> Holds {
     let lower: Vec<String> = names.iter().map(|n| n.to_lowercase().replace('\\', "/")).collect();
     let ends = |exts: &[&str]| lower.iter().any(|n| exts.iter().any(|e| n.ends_with(e)));
@@ -324,6 +335,12 @@ pub fn look(file: &Path, strict: bool) -> Option<Entry> {
         return Some(e);
     }
     let names = contents(file)?;
+    // A game's own launcher, one Linux program fetching the game itself: no libraries or engine
+    // files beside it, which a game is otherwise told by.
+    if names.iter().any(|n| LAUNCHERS.contains(&n.trim_start_matches("./"))) {
+        e.kind = Kind::Download;
+        return Some(e);
+    }
     if strict && !engine_files(&names) {
         return None;
     }
@@ -432,6 +449,23 @@ mod tests {
         assert!(engine_files(&names(&["game.pck", "game.exe"])));
         assert!(!engine_files(&names(&["rufus-4.6.exe"])));
         assert!(!engine_files(&names(&["exiftool(-k).exe", "exiftool_files/perl.exe"])));
+    }
+
+    #[test]
+    fn minecrafts_launcher_is_a_download_and_a_lone_tool_isnt() {
+        let dir = std::env::temp_dir().join(format!("lobby-mc-{}", std::process::id()));
+        for (archive, program) in [("Minecraft.tar.gz", "minecraft-launcher/minecraft-launcher"), ("fzf.tar.gz", "fzf/fzf")] {
+            let inside = dir.join(archive.trim_end_matches(".tar.gz"));
+            std::fs::create_dir_all(inside.join(program).parent().unwrap()).unwrap();
+            std::fs::write(inside.join(program), b"\x7fELF").unwrap();
+            assert!(std::process::Command::new("tar").arg("-czf").arg(dir.join(archive)).arg("-C").arg(&inside).arg(program.split('/').next().unwrap()).status().unwrap().success());
+        }
+        for strict in [false, true] {
+            let mc = look(&dir.join("Minecraft.tar.gz"), strict).expect("Minecraft's launcher");
+            assert_eq!((mc.name.as_str(), mc.kind), ("Minecraft", Kind::Download));
+            assert!(look(&dir.join("fzf.tar.gz"), strict).is_none());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

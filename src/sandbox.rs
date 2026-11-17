@@ -87,8 +87,12 @@ pub fn internet(game: &Game) -> bool {
     game.protection.internet.unwrap_or(level(game) != Level::Isolated)
 }
 
-/// From itch.io or a download, and no store or launcher vouches for it.
+/// From itch.io or a download, and no store or launcher vouches for it. A game's official
+/// launcher (Minecraft's) vouches for itself: isolated without internet it couldn't fetch the game.
 fn untrusted(game: &Game) -> bool {
+    if game.entries.iter().filter_map(|e| e.program.as_deref()).any(crate::sources::downloads::official_launcher) {
+        return false;
+    }
     let from_download = game.entries.iter().any(|e| e.source == Source::Itch || e.keys.iter().any(|k| matches!(k, Key::Download(_))) || e.folder.as_ref().is_some_and(|f| f.join(".lobby-download").is_file()));
     game.unknown_to_launchers() && from_download
 }
