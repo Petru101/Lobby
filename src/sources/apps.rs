@@ -13,9 +13,13 @@ pub struct App {
     pub app: &'static str,
     /// The app's icon on Flathub, for the card before it's installed (its entry has its own).
     pub icon: &'static str,
+    /// What to know before installing it, on the game's page.
+    pub warning: &'static str,
 }
 
-pub const APPS: &[App] = &[App { game: "Roblox", flatpak: "org.vinegarhq.Sober", app: "Sober", icon: "https://dl.flathub.org/repo/appstream/x86_64/icons/128x128/org.vinegarhq.Sober.png" }];
+pub const APPS: &[App] = &[App { game: "Roblox", flatpak: "org.vinegarhq.Sober", app: "Sober", icon: "https://dl.flathub.org/repo/appstream/x86_64/icons/128x128/org.vinegarhq.Sober.png",
+    warning: "Roblox doesn't support Sober and may temporarily ban accounts that use it.",
+}];
 
 pub fn known(flatpak: &str) -> Option<&'static App> {
     APPS.iter().find(|a| a.flatpak == flatpak)

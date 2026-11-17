@@ -4289,7 +4289,7 @@ impl Ui {
         let name = gtk::Label::builder().label(&game.name).wrap(true).xalign(0.0).build();
         name.add_css_class("title-1");
         let found_in = match crate::sources::apps::wanted(&game) {
-            Some(app) => format!("Free: plays in {}, an app from Flathub", app.app),
+            Some(app) => format!("Free: plays in {}, an app from Flathub. {}", app.app, app.warning),
             None => format!("Found in: {}", game.found_in()),
         };
         let found = gtk::Label::builder().label(found_in).wrap(true).xalign(0.0).build();
