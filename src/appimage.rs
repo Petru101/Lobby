@@ -130,15 +130,6 @@ impl Updates {
         fs::write(&file, self.word()).map_err(|e| format!("{}: {e}", file.display()))
     }
 
-    /// As the About page's list says it.
-    pub fn label(self) -> &'static str {
-        match self {
-            Updates::Automatic => "Install them by itself",
-            Updates::Ask => "Ask me first",
-            Updates::Off => "Don't look for them",
-        }
-    }
-
     pub fn explained(self) -> &'static str {
         match self {
             Updates::Automatic => "Once a day while its window is open, Lobby asks GitHub for a newer version. If there is one, it downloads it and replaces itself, then tells you. The new version runs from the next start.",

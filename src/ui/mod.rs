@@ -138,26 +138,32 @@ pub fn ask_which_saves(game: &str, store: &str) -> Option<crate::stores::saves::
     choice.get()
 }
 
-/// Which games the grid shows: one of three pages, by whether they're installed.
+/// Which games the grid shows: one of four pages, by whether they're installed, and the online
+/// games Lobby offers (its list, `sources::apps::APPS`: Roblox).
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     Installed,
     Library,
     Downloads,
+    Online,
 }
 
 impl Page {
-    const ALL: [(Page, &'static str, &'static str, &'static str); 3] = [
+    const ALL: [(Page, &'static str, &'static str, &'static str); 4] = [
         (Page::Installed, "installed", "Installed", "Games ready to play on this computer"),
         (Page::Library, "library", "Library", "Every game you have: installed, and owned on Epic or GOG but not installed (sign in with Accounts)"),
         (Page::Downloads, "downloads", "Downloads", "Downloaded but not installed yet"),
+        (Page::Online, "online", "Online", "Free online games that run here through an app of their own, like Roblox"),
     ];
 
     fn wants(self, g: &Game) -> bool {
+        let online = crate::sources::apps::of_game(g).is_some();
         match self {
             Page::Installed => g.kind == Kind::Game,
-            Page::Library => matches!(g.kind, Kind::Game | Kind::Owned),
+            // An online game waiting to be installed is the Online page's, not something owned.
+            Page::Library => g.kind == Kind::Game || (g.kind == Kind::Owned && !online),
             Page::Downloads => matches!(g.kind, Kind::Download | Kind::WrongSystem),
+            Page::Online => online && matches!(g.kind, Kind::Game | Kind::Owned),
         }
     }
 }
@@ -1364,7 +1370,12 @@ impl Ui {
         self.recent.invalidate_filter();
         let shown = lib.games.iter().filter(|g| self.shows(g)).count();
         let total = on_page.len();
-        let noun = if page == Page::Downloads { "downloads" } else { "games" };
+        let noun = match (page == Page::Downloads, total == 1) {
+            (true, true) => "download",
+            (true, false) => "downloads",
+            (false, true) => "game",
+            (false, false) => "games",
+        };
         if !self.measuring.get() {
             self.count.set_label(&if shown == total { format!("{total} {noun}") } else { format!("{shown} of {total} {noun}") });
         }
@@ -3972,25 +3983,46 @@ impl Ui {
         });
     }
 
-    /// Check now, on the About page: says how it went on `row`, and asks before installing.
-    fn check_for_update(self: &Rc<Self>, row: adw::ActionRow) {
-        row.set_subtitle("Asking GitHub…");
-        let u = self.clone();
-        glib::spawn_future_local(async move {
-            let found = gio::spawn_blocking(|| crate::appimage::check().map(|up| up.map(|up| (up, crate::appimage::can_replace())))).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
-            match found {
-                Ok(None) => row.set_subtitle(&format!("You have the newest version, {}.", env!("CARGO_PKG_VERSION"))),
-                Ok(Some((up, can))) => {
-                    row.set_subtitle(&format!("Lobby {} is out.", up.version));
-                    if can {
-                        u.install_update(up);
-                    } else {
-                        u.update_out(up, false);
-                    }
+    /// The About page's one update button, a step at a time: Check now; then Install (Download
+    /// when Lobby can't replace its own file); then Restart. Says how it went on `row`.
+    async fn update_step(self: &Rc<Self>, row: &adw::ActionRow, button: &gtk::Button, found: &RefCell<Option<crate::appimage::Update>>) {
+        let offer = |label: &str| {
+            button.set_label(label);
+            button.add_css_class("suggested-action");
+        };
+        match button.label().as_deref() {
+            Some("Restart") => self.restart(),
+            Some("Download") => {
+                if let Some(up) = found.borrow().as_ref() {
+                    gtk::UriLauncher::new(&up.page).launch(Some(&self.window), gio::Cancellable::NONE, |_| {});
                 }
-                Err(e) => row.set_subtitle(&format!("Lobby couldn't ask GitHub. {e}")),
             }
-        });
+            Some("Install") => {
+                let Some(up) = found.borrow().clone() else { return };
+                row.set_subtitle(&format!("Installing Lobby {}…", up.version));
+                let to_install = up.clone();
+                match gio::spawn_blocking(move || crate::appimage::install(&to_install)).await.unwrap_or_else(|_| Err("it stopped with an error".into())) {
+                    Ok(()) => {
+                        offer("Restart");
+                        row.set_subtitle(&format!("Lobby {} is installed. Restart Lobby to use it.", up.version));
+                    }
+                    Err(e) => row.set_subtitle(&format!("Lobby couldn't install it: {e}")),
+                }
+            }
+            _ => {
+                row.set_subtitle("Asking GitHub…");
+                let checked = gio::spawn_blocking(|| crate::appimage::check().map(|up| up.map(|up| (up, crate::appimage::can_replace())))).await.unwrap_or_else(|_| Err("it stopped with an error".into()));
+                match checked {
+                    Ok(None) => row.set_subtitle(&format!("You have the newest version, {}.", env!("CARGO_PKG_VERSION"))),
+                    Ok(Some((up, can))) => {
+                        row.set_subtitle(&format!("Lobby {} is out.", up.version));
+                        offer(if can { "Install" } else { "Download" });
+                        found.replace(Some(up));
+                    }
+                    Err(e) => row.set_subtitle(&format!("Lobby couldn't ask GitHub. {e}")),
+                }
+            }
+        }
     }
 
     /// About: the version, how updates work and the choice about them, who makes Lobby, and what
@@ -4012,29 +4044,37 @@ impl Ui {
         let updates = adw::PreferencesGroup::builder().title("Updates").build();
         let mut pressed = None;
         if crate::appimage::file().is_some() {
-            let choices = gtk::StringList::new(&Updates::ALL.map(Updates::label));
-            let setting = Updates::load();
-            let choice = adw::ComboRow::builder().title("New versions").model(&choices).selected(Updates::ALL.iter().position(|u| *u == setting).unwrap_or(0) as u32).build();
-            let told = gtk::Label::builder().label(setting.explained()).wrap(true).xalign(0.0).build();
-            told.add_css_class("dim-label");
-            let (u, explained) = (self.clone(), told.clone());
-            choice.connect_selected_notify(move |row| {
-                let Some(picked) = Updates::ALL.get(row.selected() as usize).copied() else { return };
-                explained.set_label(picked.explained());
-                if let Err(e) = picked.save() {
+            // As Ferret does it: a switch for looking by itself, and one button that goes Check
+            // now, then Install (or Download), then Restart.
+            let automatic_text = "Once a day Lobby looks for a new version on GitHub and installs it; it's used from the next start. Turned off, Lobby never looks by itself: look below whenever you like.";
+            let switch = adw::SwitchRow::builder().title("Automatic updates").subtitle(automatic_text).subtitle_lines(0).active(Updates::load() == Updates::Automatic).build();
+            let u = self.clone();
+            switch.connect_active_notify(move |row| {
+                let setting = if row.is_active() { Updates::Automatic } else { Updates::Off };
+                if let Err(e) = setting.save() {
                     u.alert("Lobby couldn't save that", &e);
                 }
             });
-            updates.add(&choice);
+            updates.add(&switch);
             let check = adw::ActionRow::builder().title("Look for a new version").subtitle(format!("You have {version}.")).build();
             let button = gtk::Button::builder().label("Check now").valign(gtk::Align::Center).build();
             let (u, row) = (self.clone(), check.clone());
-            button.connect_clicked(move |_| u.check_for_update(row.clone()));
+            let found: Rc<RefCell<Option<crate::appimage::Update>>> = Rc::default();
+            let busy = Rc::new(Cell::new(false));
+            button.connect_clicked(move |button| {
+                if busy.replace(true) {
+                    return;
+                }
+                let (u, row, button, found, busy) = (u.clone(), row.clone(), button.clone(), found.clone(), busy.clone());
+                glib::spawn_future_local(async move {
+                    u.update_step(&row, &button, &found).await;
+                    busy.set(false);
+                });
+            });
             check.add_suffix(&button);
             updates.add(&check);
             pressed = Some(button);
             let about_updates = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).margin_top(12).build();
-            about_updates.append(&told);
             let fingerprint = gtk::Label::builder().label("An update is a new program replacing this one, from this project's GitHub page. Lobby installs it only if it carries a signature made with its maker's key, which is kept off GitHub, so someone breaking into that page can't push an update. It shows the update came from its maker, not that it's safe.").wrap(true).xalign(0.0).build();
             fingerprint.add_css_class("dim-label");
             about_updates.append(&fingerprint);
