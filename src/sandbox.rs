@@ -68,6 +68,11 @@ pub struct Protection {
     /// Folders an isolated game may use too (mods, a level editor's files).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<PathBuf>,
+    /// The user let it keep sign-ins in the desktop's password store (the Secret Service, KDE's
+    /// wallet): Minecraft's launcher keeps its sign-in there, and asked for it every start
+    /// without. It can then read the store's other passwords too, so it's off unless chosen.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub password_store: bool,
 }
 
 impl Protection {
@@ -367,7 +372,7 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
     }
     let (bwrap, overlays) = bwrap().ok_or("Protecting the game needs bubblewrap (bwrap), which isn't installed: install your system's bubblewrap package.")?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|r| r.is_dir());
-    let proxy = runtime.as_deref().and_then(start_proxy);
+    let proxy = runtime.as_deref().and_then(|r| start_proxy(r, game.protection.password_store && level != Level::Off));
     let private = (level == Level::Isolated).then(|| private_home(&game.id)).transpose()?;
     let spec = Spec {
         level,
@@ -458,6 +463,9 @@ fn flatpak_options(game: &Game, env: &[(String, String)], words: &[String], cwd:
     }
     if !internet(game) {
         o.push("--unshare=network".into());
+    }
+    if game.protection.password_store {
+        o.extend(PASSWORD_STORE.iter().map(|n| format!("--talk-name={n}")));
     }
     o
 }
@@ -856,8 +864,13 @@ fn x11_socket() -> Option<PathBuf> {
     Some(PathBuf::from(format!("/tmp/.X11-unix/X{n}"))).filter(|p| p.exists())
 }
 
-/// xdg-dbus-proxy in front of the session bus, letting through only what games use.
-fn start_proxy(runtime: &Path) -> Option<(Child, PathBuf)> {
+/// The desktop's password store on the session bus: the Secret Service (KDE's wallet or GNOME's
+/// keyring answer to it) and KDE's wallet by its own names (Chromium-based programs ask it).
+const PASSWORD_STORE: &[&str] = &["org.freedesktop.secrets", "org.kde.kwalletd6", "org.kde.kwalletd5"];
+
+/// xdg-dbus-proxy in front of the session bus, letting through only what games use (and the
+/// password store, when the user let the game keep sign-ins there).
+fn start_proxy(runtime: &Path, password_store: bool) -> Option<(Child, PathBuf)> {
     let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok()?;
     let proxy = crate::launch::program_on_path("xdg-dbus-proxy").or_else(|| Some(PathBuf::from("/usr/libexec/xdg-dbus-proxy")).filter(|p| p.is_file()))?;
     let dir = runtime.join("lobby");
@@ -882,6 +895,7 @@ fn start_proxy(runtime: &Path) -> Option<(Child, PathBuf)> {
         format!("--call={desktop}=org.freedesktop.DBus.Properties.*@/org/freedesktop/portal/desktop"),
         format!("--broadcast={desktop}=org.freedesktop.portal.Settings.SettingChanged@/org/freedesktop/portal/desktop"),
     ];
+    let rules = rules.into_iter().chain(password_store.then(|| PASSWORD_STORE.iter().map(|n| format!("--talk={n}"))).into_iter().flatten());
     let child = Command::new(proxy).arg(address).arg(&socket).args(rules).stdin(Stdio::null()).stdout(Stdio::null()).spawn().ok()?;
     for _ in 0..100 {
         if socket.exists() {
@@ -898,9 +912,10 @@ fn start_proxy(runtime: &Path) -> Option<(Child, PathBuf)> {
 pub fn summary(game: &Game) -> String {
     let level = level(game);
     let net = if internet(game) { "" } else { ", no internet" };
+    let store = if game.protection.password_store { " It may keep sign-ins in your password store, and so read the passwords saved there." } else { "" };
     match level {
         Level::Off => "Off: the game can do anything you can.".into(),
-        _ => format!("{}{net}. {}", level.name(), level.describe()),
+        _ => format!("{}{net}. {}{store}", level.name(), level.describe()),
     }
 }
 

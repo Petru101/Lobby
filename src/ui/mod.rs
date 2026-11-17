@@ -4916,9 +4916,17 @@ impl Ui {
             .active(sandbox::internet(game))
             .sensitive(level != Level::Off)
             .build();
+        let store = adw::SwitchRow::builder()
+            .title("Saved sign-ins")
+            .subtitle("Lets it keep sign-ins in your password store, so it stays signed in (Minecraft's launcher needs this). It can then read the other passwords saved there too.")
+            .subtitle_lines(0)
+            .active(game.protection.password_store)
+            .sensitive(level != Level::Off)
+            .build();
         if unsupported.is_none() {
             group.add(&combo);
             group.add(&internet);
+            group.add(&store);
         }
 
         let add = gtk::Button::builder().icon_name("list-add-symbolic").tooltip_text("Share a folder with it").valign(gtk::Align::Center).build();
@@ -4965,11 +4973,12 @@ impl Ui {
             });
         });
 
-        let (u, id, net, list) = (self.clone(), game.id.clone(), internet.clone(), folders.clone());
+        let (u, id, net, list, keys) = (self.clone(), game.id.clone(), internet.clone(), folders.clone(), store.clone());
         combo.connect_selected_notify(move |row| {
             let level = Level::ALL[row.selected() as usize];
             row.set_subtitle(level.describe());
             net.set_sensitive(level != Level::Off);
+            keys.set_sensitive(level != Level::Off);
             list.set_visible(level == Level::Isolated);
             u.change_protection(&id, |p| p.level = Some(level));
             // Internet not chosen yet: the new level's default (off when isolated).
@@ -4982,6 +4991,17 @@ impl Ui {
             let on = row.is_active();
             u.change_protection(&id, |p| p.internet = Some(on));
         });
+        let (u, id) = (self.clone(), game.id.clone());
+        store.connect_active_notify(move |row| {
+            let on = row.is_active();
+            u.change_protection(&id, |p| p.password_store = on);
+            u.toast(if on { "From the next Play it can keep sign-ins in your password store." } else { "From the next Play it can't reach your password store." });
+        });
+        // A checking run flips it as a click would (LOBBY_SNAPSHOT_PASSWORD_STORE=on|off).
+        if let Ok(want) = std::env::var("LOBBY_SNAPSHOT_PASSWORD_STORE").map(|w| w == "on") {
+            let store = store.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || store.set_active(want));
+        }
 
         let both = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(24).build();
         both.append(&group);

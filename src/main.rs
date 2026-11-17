@@ -81,7 +81,7 @@ const USAGE: &str = "usage: lobby                   open the window
                                its drive has one)
        lobby running           the games running now; lobby stop <game> ends one
        lobby move <game> <folder>  move a game there (another drive, say); its records follow
-       lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--share=<folder>] [--unshare=<folder>]
+       lobby protection <game> [standard|isolated|off|default] [--internet=on|off] [--password-store=on|off] [--share=<folder>] [--unshare=<folder>]
                                how lobby protects a game it starts; change it
        lobby check             what Lobby needs that this computer lacks, and how to install it
        lobby allow-sandbox     on Ubuntu: let lobby make the sandboxes Proton and protection need
@@ -510,7 +510,7 @@ fn protection(query: &str, level: Option<&str>, args: &[String]) -> Result<(), S
     let mut lib = Library::load().map_or_else(scan, Ok)?;
     let id = lib.find(query)?.id.clone();
     let flag = |name: &str| args.iter().find_map(|a| a.strip_prefix(&format!("--{name}=")).map(str::to_string));
-    let changing = level.is_some() || flag("internet").is_some() || flag("share").is_some() || flag("unshare").is_some();
+    let changing = level.is_some() || flag("internet").is_some() || flag("share").is_some() || flag("unshare").is_some() || flag("password-store").is_some();
     if changing {
         let g = lib.get_mut(&id).unwrap();
         match level {
@@ -522,6 +522,12 @@ fn protection(query: &str, level: Option<&str>, args: &[String]) -> Result<(), S
             Some("on") => g.protection.internet = Some(true),
             Some("off") => g.protection.internet = Some(false),
             Some(other) => return Err(format!("--internet={other}: on or off.")),
+            None => {}
+        }
+        match flag("password-store").as_deref() {
+            Some("on") => g.protection.password_store = true,
+            Some("off") => g.protection.password_store = false,
+            Some(other) => return Err(format!("--password-store={other}: on or off.")),
             None => {}
         }
         if let Some(f) = flag("share") {
