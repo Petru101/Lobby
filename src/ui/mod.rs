@@ -2340,7 +2340,7 @@ impl Ui {
                 let result = u.with_progress(&id, "Installing…", move |_| crate::sources::apps::install(app)).await.unwrap_or_else(|| Err("The install stopped with an error.".into()));
                 match result {
                     Ok(()) => {
-                        u.toast(&format!("{} is installed. Press Play and sign in with your Roblox account.", app.app));
+                        u.toast(&format!("{} is installed. {}", app.app, app.first_time_plain));
                         u.rescan();
                     }
                     Err(e) => {
@@ -4410,6 +4410,11 @@ impl Ui {
         let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).hexpand(true).build();
         text.append(&name);
         text.append(&found);
+        // A game played through an app that isn't signed in yet: how to get in.
+        if let Some(note) = crate::sources::apps::of_game(&game).filter(|_| game.kind == Kind::Game).and_then(crate::sources::apps::first_time) {
+            let first = gtk::Label::builder().label(note).use_markup(true).wrap(true).xalign(0.0).build();
+            text.append(&first);
+        }
         text.append(&buttons);
         let top = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(24).build();
         top.append(&cover);

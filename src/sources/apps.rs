@@ -18,6 +18,12 @@ pub struct App {
     /// The app's own controller switch: its settings file (in ~/.var/app/<id>) and the key in
     /// it. On, the app also needs Flatpak's access to every input device.
     pub controller: Option<(&'static str, &'static str)>,
+    /// A file (in ~/.var/app/<id>) that holds this text once the app is signed in.
+    pub signed_in: Option<(&'static str, &'static str)>,
+    /// How to sign in the first time, while it isn't (Pango markup, for the game's page), and
+    /// the same in plain words (after Install).
+    pub first_time: &'static str,
+    pub first_time_plain: &'static str,
 }
 
 pub const APPS: &[App] = &[App {
@@ -29,6 +35,12 @@ pub const APPS: &[App] = &[App {
     // Sober's documented setting (off by default; its first-run screens can turn it on). On
     // without the access, Sober only shows "Permission Update Required".
     controller: Some(("config/sober/config.json", "allow_gamepad_permission")),
+    // Roblox's sign-in cookie (only its name is looked for). Signing in inside Sober can stop
+    // at Roblox's bot check, which never finishes there, and so does the emailed code; Play on
+    // roblox.com hands Sober the sign-in through a roblox:// link.
+    signed_in: Some(("data/sober/cookies", ".ROBLOSECURITY")),
+    first_time: "First time: signing in inside Sober often gets stuck on Roblox's \u{201c}not a robot\u{201d} check. Sign in on <a href=\"https://www.roblox.com\">roblox.com</a> in your browser and press Play on any game there once: Sober opens signed in, and from then on Play here does too.",
+    first_time_plain: "First time, sign in on roblox.com in your browser and press Play on any game there: that signs Sober in (signing in inside Sober often gets stuck on Roblox's bot check). After that, Play in Lobby starts it signed in.",
 }];
 
 pub fn known(flatpak: &str) -> Option<&'static App> {
@@ -156,6 +168,14 @@ pub fn before_start(game: &crate::library::Game) -> Option<String> {
         Ok(()) => Some(format!("{}'s controller support was on without the input access it asks for, so it was turned off for {} to start. {}'s page in Lobby turns it on.", app.app, game.name, game.name)),
         Err(e) => Some(format!("{}'s controller support couldn't be turned off: {e}", app.app)),
     }
+}
+
+/// How to sign in, while the app is installed and not signed in yet.
+pub fn first_time(app: &'static App) -> Option<&'static str> {
+    let (file, text) = app.signed_in?;
+    let file = PathBuf::from(std::env::var_os("HOME")?).join(".var/app").join(app.flatpak).join(file);
+    let signed_in = std::fs::read(file).is_ok_and(|bytes| bytes.windows(text.len()).any(|w| w == text.as_bytes()));
+    (installed(app) && !signed_in).then_some(app.first_time)
 }
 
 /// The games whose app isn't installed, as games to install.

@@ -917,7 +917,7 @@ fn install(query: &str) -> Result<(), String> {
         println!("Installing {} from Flathub for {}…", app.app, game.name);
         sources::apps::install(app)?;
         scan()?;
-        println!("{} is installed: lobby play \"{}\" starts it.", app.app, game.name);
+        println!("{} is installed: lobby play \"{}\" starts it. {}", app.app, game.name, app.first_time_plain);
         return Ok(());
     }
     println!("Installing {}…", game.name);
