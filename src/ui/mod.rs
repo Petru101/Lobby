@@ -435,9 +435,11 @@ struct Ui {
     scan_again: Cell<bool>,
     /// Store lists and update checks are being brought up to date in the background.
     refreshing_stores: Cell<bool>,
-    /// The bar under the header saying what runs in the background (`show_busy`).
-    busy: gtk::Revealer,
+    /// The bar under the header saying what runs in the background (`show_busy`). Its room is
+    /// always kept: sliding it open moved every card down and back (the user asked for this).
+    busy: gtk::Box,
     busy_label: gtk::Label,
+    busy_spinner: gtk::Spinner,
     free_button: gtk::Button,
     /// Games being installed (one install each at a time), with how far each is: 0 to 100, or
     /// below 0 when the tool doesn't say (unpacking an archive).
@@ -525,10 +527,12 @@ fn build(app: &adw::Application) {
     // walks every drive's game folders (75 s here), and new games show only after it.
     let busy_label = gtk::Label::new(None);
     busy_label.add_css_class("dim-label");
-    let busy_box = gtk::Box::builder().spacing(10).halign(gtk::Align::Center).margin_top(6).margin_bottom(6).build();
-    busy_box.append(&gtk::Spinner::builder().spinning(true).build());
-    busy_box.append(&busy_label);
-    let busy = gtk::Revealer::builder().child(&busy_box).transition_type(gtk::RevealerTransitionType::SlideDown).build();
+    let busy_spinner = gtk::Spinner::new();
+    let busy = gtk::Box::builder().spacing(10).halign(gtk::Align::Center).margin_top(6).margin_bottom(6).opacity(0.0).build();
+    busy.append(&busy_spinner);
+    busy.append(&busy_label);
+    // Its height kept when empty, from a line of text.
+    busy_label.set_label(" ");
 
     let flow = gtk::FlowBox::builder()
         .valign(gtk::Align::Start)
@@ -614,7 +618,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), read_only_banner: read_only_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), looking_for_downloads: Cell::new(false), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), read_only_banner: read_only_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), looking_for_downloads: Cell::new(false), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label, busy_spinner });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -941,7 +945,7 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         // LOBBY_SNAPSHOT_BUSY=1: the bar a long scan shows (the snapshot waits for the scan).
         if std::env::var_os("LOBBY_SNAPSHOT_BUSY").is_some() {
             u.busy_label.set_label(SCANNING);
-            u.busy.set_reveal_child(true);
+            u.set_busy_shown(true);
             glib::timeout_future(std::time::Duration::from_secs(1)).await;
         }
         // LOBBY_SNAPSHOT_MOVE_STEAM=<id>: what Play asks for a game in a Steam library Steam
@@ -2271,17 +2275,23 @@ impl Ui {
             ""
         };
         if text.is_empty() || self.lib.borrow().games.is_empty() {
-            self.busy.set_reveal_child(false);
+            self.set_busy_shown(false);
             return;
         }
         self.busy_label.set_label(text);
         let u = self.clone();
         glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || {
-            if (u.scanning.get() || u.refreshing_stores.get()) && !u.busy.reveals_child() {
-                u.busy.set_reveal_child(true);
+            if (u.scanning.get() || u.refreshing_stores.get()) && u.busy.opacity() == 0.0 {
+                u.set_busy_shown(true);
                 crate::log::line(&format!("shown: {}", u.busy_label.label()));
             }
         });
+    }
+
+    /// The busy bar's words and spinner shown or not, in the room it always keeps.
+    fn set_busy_shown(&self, shown: bool) {
+        self.busy.set_opacity(if shown { 1.0 } else { 0.0 });
+        self.busy_spinner.set_spinning(shown);
     }
 
     fn game(&self, id: &str) -> Option<Game> {
