@@ -401,7 +401,20 @@ fn tool_shortcut(e: &Entry) -> bool {
 
 /// A name with only its letters and digits, for telling copies of one game apart from others.
 pub fn plain(name: &str) -> String {
-    name.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+    name.to_lowercase().split(|c: char| !c.is_alphanumeric()).map(numeral).collect()
+}
+
+/// A sequel's number written as a Roman numeral is its digit, wherever names are compared:
+/// "Minecraft Dungeons II" is Faugus's "Minecraft Dungeons 2", Epic's "Contractor: The Clean Up
+/// Part II" GamerPower's "...Part 2" (each was fixed in one place before and came back in
+/// another). II to IX only: a lone V or X is as often a version ("v 1.2") or a name ("Mega
+/// Man X"). Takes one lowercase word.
+pub fn numeral(word: &str) -> String {
+    const ROMAN: &[&str] = &["ii", "iii", "iv", "v", "vi", "vii", "viii", "ix"];
+    match ROMAN.iter().position(|r| *r == word) {
+        Some(n) if word != "v" => (n + 2).to_string(),
+        _ => word.to_string(),
+    }
 }
 
 /// A download's name and a folder's name are the same game's: equal, or one starts with the
@@ -627,6 +640,17 @@ fn same_game(a: &Entry, b: &Entry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequel_numbers_count_either_way() {
+        assert_eq!(plain("Minecraft Dungeons II"), plain("Minecraft Dungeons 2"));
+        assert_eq!(plain("Contractor: The Clean Up Part II"), plain("Contractor: The Clean Up Part 2"));
+        assert_ne!(plain("Contractor: The Clean Up Part II"), plain("Contractor: The Clean Up Part 3"));
+        assert_eq!(plain("Mega Man X"), "megamanx");
+        assert_eq!(plain("Game v 1.2"), "gamev12");
+        assert_eq!(plain("I Am Bread"), "iambread");
+        assert!(same_name("Minecraft Dungeons 2 v1.0.zip", "Minecraft Dungeons II"));
+    }
 
     #[test]
     fn demos_by_name() {

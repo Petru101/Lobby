@@ -93,7 +93,8 @@ fn without_initials(title: &str) -> &str {
 /// The same game's names: equal, or one is the other with a subtitle ("Home" and "Home - A
 /// Unique Horror Adventure") or initials in front.
 fn same_title(a: &str, b: &str) -> bool {
-    let words = |s: &str| without_initials(s).to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>();
+    // A sequel's number either way (crate::library::numeral): "Part 2" is Epic's "Part II".
+    let words = |s: &str| without_initials(s).to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(crate::library::numeral).collect::<Vec<_>>();
     let (a, b) = (words(a), words(b));
     !a.is_empty() && !b.is_empty() && (a.starts_with(&b) || b.starts_with(&a))
 }
@@ -421,6 +422,9 @@ mod tests {
         assert!(same_title("GMH - Good Morning Human", "Good Morning Human"));
         assert!(same_title("Good Morning Human", "GMH: Good Morning Human"));
         assert!(!same_title("Cossacks - Art Of War", "Art Of War"));
+        assert!(same_title("Contractor: The Clean Up Part II", "Contractor: The Clean Up Part 2"));
+        assert!(!same_title("Contractor: The Clean Up Part II", "Contractor: The Clean Up Part 3"));
+        assert!(same_title("I Am Bread", "I Am Bread"));
         assert!(!same_title("GMH - Something Else", "Something Else"));
         assert!(epic_search_js("GMH - Good Morning Human").contains("\\\"keywords\\\":\\\"Good Morning Human\\\""));
     }
