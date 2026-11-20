@@ -6,9 +6,11 @@
 #   run/without-launchers.sh in <cmd>    runs a command with the launchers gone
 #   run/without-launchers.sh play <id>   really starts a game with them gone, on an invisible
 #                                        screen with no sound, and lists what's running after $WAIT s (45)
+#   LOBBY=<a build> runs that one, protection included (the installed copy is left alone).
 #   PROTON=<name> plays it with that Proton (the choice is thrown away with the view).
 #   DURING=<shell command> runs alongside the game on its screen ($DISPLAY, $OUT for results).
-#   RW=<folder> keeps one folder writable (a Windows setup on a drive: Proton locks it).
+#   RW=<folder>[:<folder>...] keeps those writable (a Windows setup on a drive: Proton locks
+#   it; a game that writes into its own folder).
 #   SCREEN=gamescope: a headless gamescope instead of KWin's invisible screen.
 #   GONE=no plays it with the launchers there, to tell a launcher's absence from a game's fault.
 #   ONLY=<game id> looks at just that game; ALSO_GONE=<path in the home> removes more, to prove
@@ -59,9 +61,13 @@ view_args() {
         done
     fi
     mkdir -p "$out"
-    # RW=<folder>: that one stays writable (a game's Windows setup on a drive, where Proton
+    # RW=<folder>[:<folder>...]: those stay writable (a game's Windows setup on a drive, where Proton
     # writes its lock file and the game its saves).
-    [ -n "${RW:-}" ] && args+=(--bind "$RW" "$RW")
+    local rw
+    IFS=: read -ra rw <<< "${RW:-}"
+    for path in "${rw[@]}"; do
+        [ -n "$path" ] && args+=(--bind "$path" "$path")
+    done
     args+=(--bind "$out" "$out" --unshare-net --unshare-pid --die-with-parent --chdir "$home" --setenv HOME "$home" --unsetenv DBUS_SESSION_BUS_ADDRESS --unsetenv DISPLAY --unsetenv WAYLAND_DISPLAY)
 }
 
@@ -102,6 +108,9 @@ case ${1:-check} in
         done
         timeout $((${WAIT:-45} + 60)) bwrap "${args[@]}" --setenv WAIT "${WAIT:-45}" dbus-run-session -- bash -c '
             for p in "$@"; do rm -rf "${HOME:?}/$p"; done
+            # LOBBY=<a build>: shortcuts and Play name the installed copy for `lobby sandbox`; in
+            # this throwaway home it is the build under test too.
+            [ "$(realpath "$LOBBY")" != "$(realpath "$HOME/.local/bin/lobby")" ] && cp "$LOBBY" "$HOME/.local/bin/lobby"
             if [ "${SCREEN:-kwin}" = gamescope ]; then
                 # gamescope gives the game the focus itself (KWin moved it off a full-screen game
                 # at the first key put in with XTEST, and the game minimised itself).

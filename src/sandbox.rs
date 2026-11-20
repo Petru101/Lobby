@@ -374,10 +374,14 @@ pub fn command(game: &Game, env: &[(String, String)], words: &[String], cwd: Opt
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|r| r.is_dir());
     let proxy = runtime.as_deref().and_then(|r| start_proxy(r, game.protection.password_store && level != Level::Off));
     let private = (level == Level::Isolated).then(|| private_home(&game.id)).transpose()?;
+    let folders = game_folders(game, env, words, cwd, &home);
+    let (around, beside) = if level == Level::Isolated { around(&folders, &home) } else { Default::default() };
     let spec = Spec {
         level,
         internet: internet(game),
-        game: game_folders(game, env, words, cwd, &home),
+        game: folders,
+        around,
+        beside,
         reads: named_paths(env, words).into_iter().filter(|p| hidden_area(p, &home) && !p.join("proton").is_file()).collect(),
         protons: named_paths(env, words).into_iter().filter(|p| p.join("proton").is_file() && !steam_roots(&home).iter().any(|r| p.starts_with(home.join(r)))).collect(),
         devices: devices(),
@@ -518,6 +522,10 @@ struct Spec {
     steam: Vec<PathBuf>,
     /// Which of the home's files and folders this exists (relative to the home).
     present: Vec<(PathBuf, bool)>,
+    /// Isolated: the folders holding the game's folders on a drive, shown read-only, and what
+    /// else is in them (folder or not), hidden (`around`).
+    around: Vec<PathBuf>,
+    beside: Vec<(PathBuf, bool)>,
 }
 
 /// Paths a stealer is after, relative to the home: hidden in Standard. Names holding
@@ -670,6 +678,15 @@ fn args_for(s: &Spec) -> Vec<String> {
             for look in LOOKS.iter().filter(|l| has(l).is_some()) {
                 push(&["--ro-bind", &p(&at_home(Path::new(look))), &p(&at_home(Path::new(look)))]);
             }
+            for dir in &s.around {
+                push(&["--ro-bind", &p(dir), &p(dir)]);
+            }
+            for (path, dir) in &s.beside {
+                match dir {
+                    true => push(&["--tmpfs", &p(path)]),
+                    false => push(&["--ro-bind", "/dev/null", &p(path)]),
+                }
+            }
         }
         _ => {
             // Read-only first: hidden folders inside one (.var/app) are hidden after.
@@ -729,6 +746,42 @@ fn masks(home: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The folders holding an isolated game's folders on a drive (not in the home: its own home is
+/// on the home's drive already), and what else is in them. Bound into the empty folder that
+/// stands for the drives, a game's folder is on another filesystem than the folder above it,
+/// which Wine takes for a mount point (a reparse point to Windows): Kenshi's
+/// create_directories("E:\Kenshi") threw on that and the game quit at once. Shown read-only
+/// with the rest hidden (empty folders, empty files; links left as they are, leading nowhere
+/// in the sandbox), the game's folder is in a folder of its own drive. The other names there
+/// show; nothing in them does.
+fn around(game: &[PathBuf], home: &Path) -> (Vec<PathBuf>, Vec<(PathBuf, bool)>) {
+    around_in(game, home, &masks(home))
+}
+
+fn around_in(game: &[PathBuf], home: &Path, masks: &[PathBuf]) -> (Vec<PathBuf>, Vec<(PathBuf, bool)>) {
+    let mut around: Vec<PathBuf> = Vec::new();
+    for parent in game.iter().filter_map(|g| g.parent()) {
+        if masks.iter().any(|m| parent.starts_with(m)) && !parent.starts_with(home) && !game.iter().any(|g| parent.starts_with(g)) && !around.iter().any(|a| a == parent) {
+            around.push(parent.to_path_buf());
+        }
+    }
+    let mut beside = Vec::new();
+    for dir in &around {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if game.contains(&path) || around.contains(&path) {
+                continue;
+            }
+            match fs::symlink_metadata(&path) {
+                Ok(m) if m.is_dir() => beside.push((path, true)),
+                Ok(m) if m.is_file() => beside.push((path, false)),
+                _ => {}
+            }
+        }
+    }
+    (around, beside)
 }
 
 /// The isolated game's home, made the first time.
@@ -975,7 +1028,45 @@ mod tests {
             overlays: true,
             steam: vec![".local/share/Steam".into()],
             present: vec![(".ssh".into(), true), (".bashrc".into(), false), (".local/share/umu".into(), true), (".local/share/Steam".into(), true), (".local/share/Steam/linux64".into(), true), ("invent-kde-token".into(), false), (".local/share/gamefix".into(), true)],
+            around: vec!["/run/media/p/Games".into()],
+            beside: vec![("/run/media/p/Games/Other".into(), true), ("/run/media/p/Games/notes.txt".into(), false)],
         }
+    }
+
+    #[test]
+    fn isolated_game_folder_sits_in_its_drives_folder() {
+        let a = args_for(&spec(Level::Isolated));
+        let pos = |w: [&str; 3]| a.windows(3).position(|x| x == w);
+        // The drives' empty folder (when this machine has /run/media) comes first.
+        let drives = a.windows(2).position(|w| w == ["--tmpfs", "/run/media"]).unwrap_or(0);
+        let around = pos(["--ro-bind", "/run/media/p/Games", "/run/media/p/Games"]).unwrap();
+        let other = a.windows(2).position(|w| w == ["--tmpfs", "/run/media/p/Games/Other"]).unwrap();
+        let file = pos(["--ro-bind", "/dev/null", "/run/media/p/Games/notes.txt"]).unwrap();
+        let game = pos(["--bind", "/run/media/p/Games/G", "/run/media/p/Games/G"]).unwrap();
+        assert!(drives < around && around < other && around < file && other < game);
+        // Standard has nothing of the kind.
+        let mut standard = spec(Level::Standard);
+        (standard.around, standard.beside) = Default::default();
+        assert!(!args_for(&standard).iter().any(|w| w == "/run/media/p/Games"));
+    }
+
+    #[test]
+    fn around_shows_the_drives_folder_and_hides_the_rest() {
+        let dir = std::env::temp_dir().join(format!("lobby-around-{}", std::process::id()));
+        let (drive, home) = (dir.join("media/p/Games"), dir.join("home/p"));
+        for d in ["Game", ".Game (Windows setup)", "Other"] {
+            fs::create_dir_all(drive.join(d)).unwrap();
+        }
+        fs::create_dir_all(&home).unwrap();
+        fs::write(drive.join("notes.txt"), "").unwrap();
+        let game = vec![drive.join("Game"), drive.join(".Game (Windows setup)"), home.join("prefix")];
+        // masks() knows the real tops only: check with the drive's folder as one of them.
+        let (around, beside) = super::around_in(&game, &home, &[dir.join("media")]);
+        assert_eq!(around, vec![drive.clone()]);
+        let mut beside = beside;
+        beside.sort();
+        assert_eq!(beside, vec![(drive.join("Other"), true), (drive.join("notes.txt"), false)]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
