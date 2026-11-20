@@ -38,11 +38,13 @@ pub fn run(claim: bool) -> glib::ExitCode {
     covers::give_memory_back();
     crate::appimage::enter();
     crate::appimage::menu_entry();
+    crate::log::line(&format!("window: making the app, {} ms after the start", crate::log::since_start()));
     // A checking run (LOBBY_SNAPSHOT) is a copy of its own: otherwise it would hand over to the
     // user's open Lobby and quit.
     let flags = if std::env::var_os("LOBBY_SNAPSHOT").is_some() { gio::ApplicationFlags::NON_UNIQUE } else { gio::ApplicationFlags::empty() };
     let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
     app.connect_startup(|_| {
+        crate::log::line(&format!("window: GTK started, {} ms after the start", crate::log::since_start()));
         crate::appimage::let_webkit_in();
         // GTK has read where its parts are (an AppImage's), once these are loaded: the system's
         // own settings then go to what Lobby starts.
@@ -378,6 +380,12 @@ struct Ui {
     search: gtk::SearchEntry,
     rescan_button: gtk::Button,
     lib: RefCell<Library>,
+    /// Each card's lowercase name and whether its game is only owned, for sorting (made by fill).
+    sort_keys: RefCell<std::collections::HashMap<String, (String, bool)>>,
+    /// How many times the cards were made: the other pages' cards, made after, stop when it moves on.
+    fills: Cell<u32>,
+    /// The games whose cards `fill` hasn't made yet.
+    later: RefCell<Vec<Game>>,
     page: Cell<Page>,
     origin: Cell<Origin>,
     /// Downloads whose game is installed (`leftovers::find`, after each scan), and the
@@ -464,6 +472,7 @@ struct Ui {
 }
 
 fn build(app: &adw::Application) {
+    crate::log::line(&format!("window: building, {} ms after the start", crate::log::since_start()));
     let window = adw::ApplicationWindow::builder().application(app).title("Lobby").default_width(1280).default_height(860).build();
     // The pages, in the middle of the header, as one switch of joined buttons.
     let pages = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).build();
@@ -618,7 +627,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), read_only_banner: read_only_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), looking_for_downloads: Cell::new(false), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label, busy_spinner });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(crate::log::timed("window: library read", || Library::load().unwrap_or_default())), sort_keys: RefCell::default(), fills: Cell::new(0), later: RefCell::default(), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), read_only_banner: read_only_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), looking_for_downloads: Cell::new(false), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label, busy_spinner });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -633,6 +642,7 @@ fn build(app: &adw::Application) {
         button.connect_toggled(move |b| {
             if b.is_active() {
                 u.page.set(page);
+                u.make_cards_for_page();
                 if page != Page::Downloads {
                     u.forget_installed();
                 }
@@ -668,15 +678,21 @@ fn build(app: &adw::Application) {
     flow.set_filter_func(move |child| u.lib.borrow().games.iter().find(|g| g.id == child.widget_name()).is_some_and(|g| u.shows(g)));
     let u = ui.clone();
     flow.set_sort_func(move |a, b| {
+        // Each card's name and whether it's only owned, worked out once per fill (`sort_keys`):
+        // looking them up in the library on every comparison was a quarter of a second at start.
+        let keys = u.sort_keys.borrow();
         let lib = u.lib.borrow();
-        let name = |c: &gtk::FlowBoxChild| lib.games.iter().find(|g| g.id == c.widget_name()).map(|g| g.name.to_lowercase()).unwrap_or_default();
+        let key = |c: &gtk::FlowBoxChild| {
+            let id = c.widget_name();
+            keys.get(id.as_str()).cloned().unwrap_or_else(|| lib.games.iter().find(|g| g.id == id).map(|g| (g.name.to_lowercase(), g.kind == Kind::Owned)).unwrap_or_default())
+        };
         let first = |c: &gtk::FlowBoxChild| !u.is_just_installed(&c.widget_name());
         // By name, in Library: installed games before the ones only owned.
         let sort = u.sort.get();
-        let owned = |c: &gtk::FlowBoxChild| sort == Sort::Name && lib.games.iter().any(|g| g.id == c.widget_name() && g.kind == Kind::Owned);
         let facts = u.facts.borrow();
         let rank = |c: &gtk::FlowBoxChild| facts.get(c.widget_name().as_str()).map_or(i64::MAX, |f| f.rank(sort));
-        (first(a), owned(a), rank(a), name(a)).cmp(&(first(b), owned(b), rank(b), name(b))).into()
+        let ((name_a, owned_a), (name_b, owned_b)) = (key(a), key(b));
+        (first(a), sort == Sort::Name && owned_a, rank(a), name_a).cmp(&(first(b), sort == Sort::Name && owned_b, rank(b), name_b)).into()
     });
     let u = ui.clone();
     flow.connect_child_activated(move |_, child| {
@@ -826,10 +842,19 @@ fn build(app: &adw::Application) {
     if ui.lib.borrow().games.is_empty() {
         ui.stack.set_visible_child_name("loading");
     } else {
-        ui.fill();
+        crate::log::timed("window: cards made", || ui.fill());
     }
-    ui.rescan();
-    window.present();
+    crate::log::timed("window: scan started", || ui.rescan());
+    crate::log::timed("window: presented", || window.present());
+    // How long the window took to show (notes/window.md has the usual times).
+    if let Some(clock) = window.frame_clock() {
+        let first = Cell::new(true);
+        clock.connect_after_paint(move |_| {
+            if first.replace(false) {
+                crate::log::line(&format!("window: first picture drawn, {} ms after the start", crate::log::since_start()));
+            }
+        });
+    }
     snapshot_for_checking(&ui);
     UI.with(|u| *u.borrow_mut() = Some(ui.clone()));
     // The mouse moving (a few pixels: GTK also reports motion when the window changes under a
@@ -1420,10 +1445,35 @@ impl Ui {
         self.run_widgets.borrow_mut().clear();
         let lib = self.lib.borrow();
         self.facts.replace(Facts::of(&lib.games));
-        for g in lib.games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem | Kind::Owned)) {
+        self.sort_keys.replace(lib.games.iter().map(|g| (g.id.clone(), (g.name.to_lowercase(), g.kind == Kind::Owned))).collect());
+        // The page on screen gets its cards now; the other pages' (most of them: owned games)
+        // are made a few at a time once the window is up, so it opens sooner.
+        let page = self.page.get();
+        let (now, later): (Vec<&Game>, Vec<&Game>) = lib.games.iter().filter(|g| matches!(g.kind, Kind::Game | Kind::Download | Kind::WrongSystem | Kind::Owned)).partition(|g| page.wants(g) || self.is_just_installed(&g.id));
+        for g in now {
             self.flow.append(&card(self, g));
         }
+        self.later.replace(later.into_iter().cloned().collect());
         drop(lib);
+        let fill = self.fills.get() + 1;
+        self.fills.set(fill);
+        let u = self.clone();
+        glib::idle_add_local_full(glib::Priority::DEFAULT_IDLE, move || {
+            if u.fills.get() != fill {
+                return glib::ControlFlow::Break;
+            }
+            let some: Vec<Game> = { let mut later = u.later.borrow_mut(); let n = later.len().min(50); later.drain(..n).collect() };
+            for g in &some {
+                u.flow.append(&card(&u, g));
+            }
+            if !u.later.borrow().is_empty() {
+                return glib::ControlFlow::Continue;
+            }
+            if fill == 1 {
+                crate::log::line(&format!("window: the other pages' cards made, {} ms after the start", crate::log::since_start()));
+            }
+            glib::ControlFlow::Break
+        });
         self.fill_recent();
         self.refilter();
         if let Some(scrolled) = scrolled.filter(|_| at > 0.0) {
@@ -1461,6 +1511,16 @@ impl Ui {
         self.look_for_running();
         if self.sort.get() == Sort::Size {
             self.measure();
+        }
+    }
+
+    /// The page just opened gets its cards that weren't made yet (`fill` makes the other pages'
+    /// after the window is up), all at once, so it never shows half its games.
+    fn make_cards_for_page(self: &Rc<Self>) {
+        let page = self.page.get();
+        let now: Vec<Game> = { let mut later = self.later.borrow_mut(); let (now, rest) = std::mem::take(&mut *later).into_iter().partition(|g| page.wants(g)); *later = rest; now };
+        for g in &now {
+            self.flow.append(&card(self, g));
         }
     }
 
@@ -1892,7 +1952,9 @@ impl Ui {
             self.toast(&format!("Couldn't save the library: {e}"));
             return;
         }
-        // Its card again (the star, dimmed when hidden), then the rows.
+        // Its card again (the star, dimmed when hidden), then the rows; made now if fill
+        // hadn't got to it yet.
+        self.later.borrow_mut().retain(|g| g.id != id);
         let mut child = self.flow.first_child();
         while let Some(c) = child {
             child = c.next_sibling();
