@@ -714,8 +714,21 @@ fn build(app: &adw::Application) {
         s.save();
         u.resort();
     });
+    // Starting a search looks through every source: a game under another source than the one
+    // pressed was hidden from it (Borderlands 4, set up by gamefix so under Other, searched with
+    // Steam pressed). A source pressed while searching still narrows it.
     let u = ui.clone();
-    search.connect_search_changed(move |_| u.refilter());
+    let searching = Cell::new(false);
+    search.connect_search_changed(move |s| {
+        let now = !s.text().trim().is_empty();
+        if now && !searching.get() && u.origin.get() != Origin::All {
+            if let Some((_, b)) = u.origins.borrow().iter().find(|(o, _)| *o == Origin::All) {
+                b.set_active(true);
+            }
+        }
+        searching.set(now);
+        u.refilter();
+    });
     // Typing anywhere searches. Not while rendering a snapshot: keys typed elsewhere would land
     // here if the window takes focus.
     if std::env::var_os("LOBBY_SNAPSHOT").is_none() {
@@ -885,9 +898,6 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
         while u.scanning.get() {
             glib::timeout_future(std::time::Duration::from_millis(200)).await;
         }
-        if let Ok(text) = std::env::var("LOBBY_SNAPSHOT_SEARCH") {
-            u.search.set_text(&text);
-        }
         // LOBBY_SNAPSHOT_PAGE=installed|library|downloads, LOBBY_SNAPSHOT_SOURCE=steam|epic|gog|
         // amazon|itch|other: pressed as the user would.
         if let Ok(name) = std::env::var("LOBBY_SNAPSHOT_PAGE") {
@@ -912,6 +922,10 @@ fn snapshot_for_checking(ui: &Rc<Ui>) {
             if let Some((_, b)) = u.origins.borrow().iter().find(|(_, b)| b.widget_name() == name) {
                 b.set_active(true);
             }
+        }
+        // Typed after the source is pressed, as the user would.
+        if let Ok(text) = std::env::var("LOBBY_SNAPSHOT_SEARCH") {
+            u.search.set_text(&text);
         }
         if let Ok(id) = std::env::var("LOBBY_SNAPSHOT_INSTALLED") {
             u.just_installed.replace(Some((id, None)));
