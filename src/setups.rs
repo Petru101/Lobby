@@ -23,9 +23,9 @@ fn central() -> PathBuf {
     crate::store::data_home().join("gamefix/prefixes")
 }
 
-/// A game folder's setup beside it.
+/// A game folder's setup beside it, hidden (`hide`).
 pub fn beside(folder: &Path) -> Option<PathBuf> {
-    Some(folder.parent()?.join(format!("{}{ENDING}", folder.file_name()?.to_string_lossy())))
+    Some(folder.parent()?.join(format!(".{}{ENDING}", folder.file_name()?.to_string_lossy())))
 }
 
 /// A setup to move, and the game it's for.
@@ -102,11 +102,79 @@ fn move_one(m: &Move) -> Result<(), String> {
     crate::import::point_records(&m.from, &m.to)
 }
 
+/// A setup in plain view (no hidden folder on its path) that holds no game, to be given a
+/// hidden name: a file search going into it follows its drive links (Z: is the whole system,
+/// gamefix's D: to G: each drive) and so searches every drive. Dolphin's search never goes
+/// into hidden folders. Only gamefix's setups (an installer's, with its install note) and
+/// Lobby's beside a game: not Steam's, a store's or another launcher's, whose records Lobby
+/// doesn't keep; not one with a game inside (hiding it would hide the game), nor in use.
+pub fn to_hide(games: &[Game]) -> Vec<Move> {
+    let mut out: Vec<Move> = Vec::new();
+    let named: Vec<(PathBuf, &Game)> = games.iter().flat_map(|g| g.entries.iter().filter_map(|e| e.prefix.as_deref()).map(move |p| (library::norm(&crate::import::unit(p)), g))).collect();
+    for (from, g) in &named {
+        let Some(name) = from.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+        if out.iter().any(|m| m.from == *from) || from.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.')) {
+            continue;
+        }
+        if !fs::symlink_metadata(from).is_ok_and(|m| m.is_dir()) || library::prefix_in(from).is_none() || !(from.join("gamefix-install.txt").is_file() || name.ends_with(ENDING)) {
+            continue;
+        }
+        // Every game it's named for keeps its folder and program outside it.
+        let inside = |p: &Path| library::norm(p).starts_with(from);
+        if named.iter().filter(|(p, _)| p == from).any(|(_, h)| h.folder().is_none() || h.folder().is_some_and(inside) || h.entries.iter().filter_map(|e| e.program.as_deref()).any(inside)) {
+            continue;
+        }
+        let to = from.with_file_name(format!(".{name}"));
+        if fs::symlink_metadata(&to).is_err() {
+            out.push(Move { from: from.clone(), to, name: g.name.clone(), back: false });
+        }
+    }
+    out
+}
+
+/// Gives a setup its hidden name (renamed in place) and points everything naming it there:
+/// gamefix's records, app-menu entries and Steam shortcuts (`setup::relocate`), the link in
+/// gamefix's folder to a setup Lobby put beside its game, and Lobby's own files. Put back as
+/// it was when gamefix's part can't be done (Steam open with a shortcut to change).
+fn hide_one(m: &Move) -> Result<(), String> {
+    fs::rename(&m.from, &m.to).map_err(|e| e.to_string())?;
+    if let Err(e) = gamefix::setup::relocate(&m.from, &m.to) {
+        let _ = fs::rename(&m.to, &m.from);
+        return Err(e);
+    }
+    for (_, link) in links().into_iter().filter(|(target, _)| library::norm(target) == m.from || *target == m.from) {
+        fs::remove_file(&link).and_then(|()| std::os::unix::fs::symlink(&m.to, &link)).map_err(|e| format!("{}: {e}", link.display()))?;
+    }
+    crate::import::point_records(&m.from, &m.to)
+}
+
 /// Moves the setups to where the pick says; says what it did (`dry`: what it would do). One
 /// something runs in waits for the next time.
 pub fn run(games: &[Game], dry: bool) -> Vec<String> {
     let pick = crate::places::Places::load().windows_setups;
     let mut done = Vec::new();
+    for m in to_hide(games) {
+        if dry {
+            done.push(format!("{}: its Windows setup {} gets the hidden name {}.", m.name, m.from.display(), m.to.display()));
+        } else if crate::import::in_use(&m.from) {
+            done.push(format!("{}: its Windows setup is in use; it's hidden next time.", m.name));
+        } else {
+            match hide_one(&m) {
+                Ok(()) => {
+                    crate::log::line(&format!("windows setups: hidden {} → {} ({})", m.from.display(), m.to.display(), m.name));
+                    done.push(format!("✓ {}: Windows setup hidden as {}.", m.name, m.to.display()));
+                }
+                Err(e) => {
+                    crate::log::line(&format!("windows setups: {} not hidden: {e}", m.from.display()));
+                    done.push(format!("{}: its Windows setup couldn't be hidden: {e}", m.name));
+                }
+            }
+        }
+    }
+    // Hidden ones aren't moved again this time: the library still names the old places.
+    if done.iter().any(|l| l.starts_with('✓')) && !dry {
+        return done;
+    }
     for m in moves(games, pick) {
         if dry {
             done.push(format!("{}: its Windows setup {} moves to {}.", m.name, m.from.display(), m.to.display()));
@@ -180,7 +248,7 @@ mod tests {
 
     #[test]
     fn a_setup_is_named_after_the_games_folder() {
-        assert_eq!(beside(Path::new("/run/media/p/Games/Cookie Clicker")), Some(PathBuf::from("/run/media/p/Games/Cookie Clicker (Windows setup)")));
+        assert_eq!(beside(Path::new("/run/media/p/Games/Cookie Clicker")), Some(PathBuf::from("/run/media/p/Games/.Cookie Clicker (Windows setup)")));
         assert_eq!(beside(Path::new("/")), None);
     }
 

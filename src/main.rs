@@ -1255,11 +1255,16 @@ fn windows_setups(args: &[&str], dry: bool) -> Result<(), String> {
         None => {}
     }
     println!("{}", match places.windows_setups {
-        places::Setups::Beside => "Windows setups are kept beside each game, as \"<its folder> (Windows setup)\".",
+        places::Setups::Beside => "Windows setups are kept beside each game, as the hidden folder \".<its folder> (Windows setup)\".",
         places::Setups::Central => "Windows setups are kept in one folder in your home (~/.local/share/gamefix/prefixes).",
     });
     let lib = Library::load().map_or_else(scan, Ok)?;
     if dry {
+        let hide = setups::to_hide(&lib.games);
+        println!("{} would get a hidden name (so file searches don't go into them):", hide.len());
+        for m in hide {
+            println!("  {}: {} → {}", m.name, m.from.display(), m.to.display());
+        }
         let would = setups::moves(&lib.games, places.windows_setups);
         println!("{} would move:", would.len());
         for m in would {

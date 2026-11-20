@@ -8,6 +8,7 @@
 #                                        screen with no sound, and lists what's running after $WAIT s (45)
 #   PROTON=<name> plays it with that Proton (the choice is thrown away with the view).
 #   DURING=<shell command> runs alongside the game on its screen ($DISPLAY, $OUT for results).
+#   RW=<folder> keeps one folder writable (a Windows setup on a drive: Proton locks it).
 #   SCREEN=gamescope: a headless gamescope instead of KWin's invisible screen.
 #   GONE=no plays it with the launchers there, to tell a launcher's absence from a game's fault.
 #   ONLY=<game id> looks at just that game; ALSO_GONE=<path in the home> removes more, to prove
@@ -58,6 +59,9 @@ view_args() {
         done
     fi
     mkdir -p "$out"
+    # RW=<folder>: that one stays writable (a game's Windows setup on a drive, where Proton
+    # writes its lock file and the game its saves).
+    [ -n "${RW:-}" ] && args+=(--bind "$RW" "$RW")
     args+=(--bind "$out" "$out" --unshare-net --unshare-pid --die-with-parent --chdir "$home" --setenv HOME "$home" --unsetenv DBUS_SESSION_BUS_ADDRESS --unsetenv DISPLAY --unsetenv WAYLAND_DISPLAY)
 }
 
