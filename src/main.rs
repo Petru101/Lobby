@@ -133,11 +133,8 @@ pub fn gaming_mode() -> bool {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        log::line(&format!("window: main, {} ms after the start", log::since_start()));
-    }
     stores::tools::provide();
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let json = args.iter().any(|a| a == "--json");
     let rest: Vec<&str> = args.iter().skip(1).filter(|a| !a.starts_with("--")).map(String::as_str).collect();
     // The window puts the system's settings back once GTK has started; the rest has no GTK.

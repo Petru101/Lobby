@@ -41,14 +41,3 @@ pub fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
     line(&format!("{what}: {} ms", start.elapsed().as_millis()));
     out
 }
-
-/// Milliseconds since this process started (from /proc: the kernel's start time against the
-/// time since boot), for timing the window's start from the very beginning.
-pub fn since_start() -> u64 {
-    let start = fs::read_to_string("/proc/self/stat").ok().and_then(|s| s.rsplit(')').next()?.split_whitespace().nth(19)?.parse::<u64>().ok());
-    let up = fs::read_to_string("/proc/uptime").ok().and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok());
-    match (start, up) {
-        (Some(start), Some(up)) => ((up * 1000.0) as u64).saturating_sub(start * 10),
-        _ => 0,
-    }
-}

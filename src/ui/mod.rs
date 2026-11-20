@@ -38,13 +38,11 @@ pub fn run(claim: bool) -> glib::ExitCode {
     covers::give_memory_back();
     crate::appimage::enter();
     crate::appimage::menu_entry();
-    crate::log::line(&format!("window: making the app, {} ms after the start", crate::log::since_start()));
     // A checking run (LOBBY_SNAPSHOT) is a copy of its own: otherwise it would hand over to the
     // user's open Lobby and quit.
     let flags = if std::env::var_os("LOBBY_SNAPSHOT").is_some() { gio::ApplicationFlags::NON_UNIQUE } else { gio::ApplicationFlags::empty() };
     let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
     app.connect_startup(|_| {
-        crate::log::line(&format!("window: GTK started, {} ms after the start", crate::log::since_start()));
         crate::appimage::let_webkit_in();
         // GTK has read where its parts are (an AppImage's), once these are loaded: the system's
         // own settings then go to what Lobby starts.
@@ -472,7 +470,6 @@ struct Ui {
 }
 
 fn build(app: &adw::Application) {
-    crate::log::line(&format!("window: building, {} ms after the start", crate::log::since_start()));
     let window = adw::ApplicationWindow::builder().application(app).title("Lobby").default_width(1280).default_height(860).build();
     // The pages, in the middle of the header, as one switch of joined buttons.
     let pages = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).build();
@@ -627,7 +624,7 @@ fn build(app: &adw::Application) {
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(&toasts));
 
-    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(crate::log::timed("window: library read", || Library::load().unwrap_or_default())), sort_keys: RefCell::default(), fills: Cell::new(0), later: RefCell::default(), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), read_only_banner: read_only_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), looking_for_downloads: Cell::new(false), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label, busy_spinner });
+    let ui = Rc::new(Ui { window: window.clone(), count, toasts, stack, flow: flow.clone(), search: search.clone(), rescan_button: rescan_button.clone(), lib: RefCell::new(Library::load().unwrap_or_default()), sort_keys: RefCell::default(), fills: Cell::new(0), later: RefCell::default(), page: Cell::new(Page::Installed), origin: Cell::new(Origin::All), leftovers: RefCell::default(), leftover_banner: leftover_banner.clone(), closed: RefCell::default(), closed_banner: closed_banner.clone(), read_only_banner: read_only_banner.clone(), online_warnings: RefCell::default(), failures_seen: Cell::new(crate::store::now()), opened: crate::store::now(), steam_shown: RefCell::default(), steam_log: Cell::new((0, 0)), offer_leftover: RefCell::default(), pages: RefCell::default(), pad_return: RefCell::default(), pad_closing: Cell::new(false), pad_pending: Cell::new(None), origins: RefCell::default(), sort: Cell::new(Sort::load()), facts: RefCell::default(), values: RefCell::default(), recent: recent.clone(), recent_box: recent_box.clone(), recent_shown: RefCell::default(), measuring: Cell::new(false), show: Cell::new(Show::load()), running: RefCell::default(), run_widgets: RefCell::default(), looking_for_running: Cell::new(false), scanning: Cell::new(false), scan_again: Cell::new(false), refreshing_stores: Cell::new(false), free_button: free_button.clone(), installing: RefCell::default(), bars: RefCell::default(), just_installed: RefCell::default(), downloading: RefCell::default(), looking_for_downloads: Cell::new(false), asked_apparmor: Cell::new(false), steam_watch: RefCell::default(), steam_installed: RefCell::default(), steam_looking: Cell::new(false), busy, busy_label, busy_spinner });
 
     let mut group: Option<gtk::ToggleButton> = None;
     for (page, name, label, tip) in Page::ALL {
@@ -842,19 +839,10 @@ fn build(app: &adw::Application) {
     if ui.lib.borrow().games.is_empty() {
         ui.stack.set_visible_child_name("loading");
     } else {
-        crate::log::timed("window: cards made", || ui.fill());
+        ui.fill();
     }
-    crate::log::timed("window: scan started", || ui.rescan());
-    crate::log::timed("window: presented", || window.present());
-    // How long the window took to show (notes/window.md has the usual times).
-    if let Some(clock) = window.frame_clock() {
-        let first = Cell::new(true);
-        clock.connect_after_paint(move |_| {
-            if first.replace(false) {
-                crate::log::line(&format!("window: first picture drawn, {} ms after the start", crate::log::since_start()));
-            }
-        });
-    }
+    ui.rescan();
+    window.present();
     snapshot_for_checking(&ui);
     UI.with(|u| *u.borrow_mut() = Some(ui.clone()));
     // The mouse moving (a few pixels: GTK also reports motion when the window changes under a
@@ -1466,13 +1454,7 @@ impl Ui {
             for g in &some {
                 u.flow.append(&card(&u, g));
             }
-            if !u.later.borrow().is_empty() {
-                return glib::ControlFlow::Continue;
-            }
-            if fill == 1 {
-                crate::log::line(&format!("window: the other pages' cards made, {} ms after the start", crate::log::since_start()));
-            }
-            glib::ControlFlow::Break
+            if u.later.borrow().is_empty() { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
         });
         self.fill_recent();
         self.refilter();
