@@ -296,6 +296,21 @@ pub fn proton_name(dir: &Path) -> String {
     name.strip_suffix("-x86_64").map_or(name.clone(), String::from)
 }
 
+/// The Wine prefix Play starts the game in, whether or not it exists yet: the one its command
+/// names (a Steam shortcut's own compatdata included), else where its saves are looked for.
+/// The folder holding drive_c once it exists (umu's WINEPREFIX may hold it in pfx, or have a
+/// pfx link to itself).
+pub fn play_prefix(game: &Game) -> Option<PathBuf> {
+    let named = match plan(game) {
+        Plan::Run { command, .. } => var_in(&command, "WINEPREFIX").map(PathBuf::from).or_else(|| var_in(&command, "STEAM_COMPAT_DATA_PATH").map(|c| Path::new(&c).join("pfx"))),
+        _ => None,
+    };
+    let p = named.or_else(|| crate::windows_saves::prefix(game))?;
+    let p = crate::library::prefix_in(&p).unwrap_or(p);
+    let to_itself = p.ends_with("pfx") && fs::read_link(&p).is_ok_and(|l| l == Path::new("."));
+    Some(if to_itself { p.parent().map_or(p.clone(), Path::to_path_buf) } else { p })
+}
+
 /// A `NAME=value` word's value in a command or an environment.
 fn var_in(words: &[String], name: &str) -> Option<String> {
     words.iter().find_map(|w| w.strip_prefix(name)?.strip_prefix('=').map(String::from))

@@ -1390,7 +1390,15 @@ fn where_found(g: &Game) -> String {
 
 fn show(lib: &Library, json: bool) {
     if json {
-        println!("{}", serde_json::to_string_pretty(&lib.games).unwrap());
+        // Each game also says which Wine prefix Play would start it in (null: none), for tools
+        // that reach into it (the mod manager reads a game's plugin list there).
+        let games: Vec<serde_json::Value> = lib.games.iter().map(|g| {
+            let mut v = serde_json::to_value(g).unwrap();
+            let prefix = (g.kind == Kind::Game && !g.gone).then(|| launch::play_prefix(g)).flatten();
+            v["prefix"] = serde_json::json!(prefix);
+            v
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&games).unwrap());
         return;
     }
     let sections: [(&str, Box<dyn Fn(&Game) -> bool>); 8] = [
