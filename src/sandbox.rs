@@ -297,6 +297,7 @@ pub fn sync_shortcuts(games: &[Game]) {
     }
     unwrap_others(games);
     crate::start_menu::sync_icons(games);
+    crate::start_menu::sync_overrides();
 }
 
 /// Entries Lobby put its wrapper in that are no game's now (a launcher's, taken for a game

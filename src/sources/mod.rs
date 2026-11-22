@@ -9,7 +9,7 @@ mod gamefix;
 pub mod heroic;
 mod itch;
 pub mod lutris;
-mod menu;
+pub(crate) mod menu;
 mod prefixes;
 pub mod steam;
 pub mod steam_owned;

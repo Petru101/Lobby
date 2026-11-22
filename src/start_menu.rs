@@ -203,6 +203,8 @@ pub struct Item {
     pub game: Option<String>,
     /// The game's entries not made here (gamefix's ...), shown or hidden.
     pub own: Vec<PathBuf>,
+    /// Its entries a Flatpak exports (Flatpak's own files: hidden by a copy in the home, `OVERRIDE_OF`).
+    pub exported: Vec<PathBuf>,
     /// The entry made here for its shortcut.
     pub made: Option<PathBuf>,
     pub shortcut: Option<Shortcut>,
@@ -213,13 +215,18 @@ pub const GONE: &str = "No longer on this computer";
 
 impl Item {
     pub fn shown(&self) -> bool {
-        self.made.is_some() || self.own.iter().any(|e| !hidden(e))
+        self.made.is_some() || self.own.iter().any(|e| !hidden(e)) || self.exported.iter().any(|e| !overridden(e))
     }
 
-    /// Into the app menu: its own entry shown again, else one made for its shortcut.
+    /// Into the app menu: its own entry shown again (a Flatpak's: Lobby's copy hiding it goes),
+    /// else one made for its shortcut.
     pub fn show(&mut self) -> Result<(), String> {
         if let Some(entry) = self.own.first() {
             set_hidden(entry, false)?;
+        } else if !self.exported.is_empty() {
+            for export in &self.exported {
+                remove_override(export)?;
+            }
         } else if self.made.is_none() {
             let s = self.shortcut.as_ref().ok_or("Nothing to put in the app menu.")?;
             self.made = Some(add(s)?);
@@ -236,7 +243,81 @@ impl Item {
         for entry in self.own.iter().filter(|e| !hidden(e)) {
             set_hidden(entry, true)?;
         }
+        for export in self.exported.iter().filter(|e| !overridden(e)) {
+            write_override(export)?;
+        }
         Ok(())
+    }
+}
+
+/// Marks Lobby's copy of a Flatpak's exported entry in the home's app-menu folder, naming the
+/// entry it copies. The home's folder comes first, so the copy (NoDisplay) hides Flatpak's
+/// from the menu without touching Flatpak's files; the copy still opens what the app opens
+/// (Sober's roblox:// links). The scan takes the game's entry to be Flatpak's still
+/// (`sources::menu`), so nothing of the game's moves.
+pub const OVERRIDE_OF: &str = "X-Lobby-Override-Of";
+
+/// Whether an entry is one a Flatpak exports (the user's or the system's installation).
+fn exported(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    s.contains("/flatpak/exports/share/applications/") && p.is_file()
+}
+
+fn override_path(export: &Path) -> Option<PathBuf> {
+    export.file_name().map(|n| applications().join(n))
+}
+
+/// The value of one key in an entry's main group.
+fn key_of(text: &str, key: &str) -> Option<String> {
+    main_group(text).find_map(|l| l.split_once('=').filter(|(k, _)| k.trim() == key).map(|(_, v)| v.trim().to_string()))
+}
+
+/// Whether Flatpak's entry is kept out of the menu by a copy in the home (Lobby's or anyone's).
+fn overridden(export: &Path) -> bool {
+    override_path(export).and_then(|p| fs::read_to_string(p).ok()).is_some_and(|t| main_group(&t).any(|l| matches!(l.trim(), "NoDisplay=true" | "Hidden=true")))
+}
+
+fn override_text(export: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(export).map_err(|e| format!("{}: {e}", export.display()))?;
+    Ok(with_keys(&hidden_text(&text, true), &[(OVERRIDE_OF, &export.display().to_string())]))
+}
+
+fn write_override(export: &Path) -> Result<(), String> {
+    let to = override_path(export).ok_or("an entry without a name")?;
+    // Someone's own copy there already: hidden as it is, not replaced.
+    if let Ok(text) = fs::read_to_string(&to) {
+        if key_of(&text, OVERRIDE_OF).is_none() {
+            return set_hidden(&to, true);
+        }
+    }
+    let _ = fs::create_dir_all(applications());
+    fs::write(&to, override_text(export)?).map_err(|e| format!("{}: {e}", to.display()))
+}
+
+fn remove_override(export: &Path) -> Result<(), String> {
+    let Some(to) = override_path(export) else { return Ok(()) };
+    match fs::read_to_string(&to) {
+        Ok(text) if key_of(&text, OVERRIDE_OF).is_some() => fs::remove_file(&to).map_err(|e| format!("{}: {e}", to.display())),
+        Ok(_) => set_hidden(&to, false),
+        Err(_) => Ok(()),
+    }
+}
+
+/// Lobby's copies of Flatpak entries kept like the entries they copy (after every scan): made
+/// again when Flatpak's changes (an update), gone with it (the app uninstalled).
+pub fn sync_overrides() {
+    for file in fs::read_dir(applications()).into_iter().flatten().flatten().map(|e| e.path()) {
+        let Some(export) = fs::read_to_string(&file).ok().and_then(|t| key_of(&t, OVERRIDE_OF)).map(PathBuf::from) else { continue };
+        if !export.is_file() {
+            let _ = fs::remove_file(&file);
+            crate::log::line(&format!("app menu: {} went with the Flatpak entry it hid", file.display()));
+            continue;
+        }
+        if let Ok(text) = override_text(&export) {
+            if fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
+                let _ = fs::write(&file, text);
+            }
+        }
     }
 }
 
@@ -257,33 +338,37 @@ pub fn items(lib: &Library) -> Vec<Item> {
     let owner: Vec<Option<&str>> = shortcuts.iter().map(|s| programs.get(&library::norm(&s.program)).copied()).collect();
     let mut out = Vec::new();
     for g in lib.games.iter().filter(|g| g.kind == Kind::Game && !g.gone) {
-        let mut own: Vec<PathBuf> = g.entries.iter().flat_map(|e| &e.keys).filter_map(|k| if let library::Key::Desktop(p) = k { Some(p.clone()) } else { None }).filter(|p| own_entry(p, &apps)).collect();
+        let desktop: Vec<PathBuf> = g.entries.iter().flat_map(|e| &e.keys).filter_map(|k| if let library::Key::Desktop(p) = k { Some(p.clone()) } else { None }).collect();
+        let mut own: Vec<PathBuf> = desktop.iter().filter(|p| own_entry(p, &apps)).cloned().collect();
         own.sort();
         own.dedup();
+        let mut exported: Vec<PathBuf> = desktop.iter().filter(|p| self::exported(p)).cloned().collect();
+        exported.sort();
+        exported.dedup();
         let mine: Vec<usize> = (0..shortcuts.len()).filter(|&i| !used[i] && owner[i] == Some(g.id.as_str())).collect();
-        if own.is_empty() && mine.is_empty() {
+        if own.is_empty() && exported.is_empty() && mine.is_empty() {
             continue;
         }
         mine.iter().for_each(|&i| used[i] = true);
         let made = mine.iter().find_map(|&i| shortcuts[i].entry.clone());
         // An entry's own picture (gamefix's .exe icon, a launcher's), else the program's.
-        let icon = own.iter().find_map(|e| entry_icon(e)).or_else(|| mine.first().map(|&i| shortcuts[i].program.clone())).or_else(|| g.entries.iter().find_map(|e| e.program.clone()));
+        let icon = own.iter().chain(&exported).find_map(|e| entry_icon(e)).or_else(|| mine.first().map(|&i| shortcuts[i].program.clone())).or_else(|| g.entries.iter().find_map(|e| e.program.clone()));
         let shortcut = mine.first().map(|&i| Shortcut { name: g.name.clone(), ..shortcuts[i].clone() });
-        out.push(Item { name: g.name.clone(), detail: String::new(), group: GAMES.into(), icon, game: Some(g.id.clone()), own, made, shortcut });
+        out.push(Item { name: g.name.clone(), detail: String::new(), group: GAMES.into(), icon, game: Some(g.id.clone()), own, exported, made, shortcut });
     }
     for (s, _) in shortcuts.into_iter().zip(used).filter(|(_, used)| !used) {
         let group = if s.gone() { GONE.into() } else { s.place.clone() };
         let detail = s.program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        out.push(Item { name: s.name.clone(), detail, group, icon: Some(s.program.clone()), game: None, own: Vec::new(), made: s.entry.clone(), shortcut: Some(s) });
+        out.push(Item { name: s.name.clone(), detail, group, icon: Some(s.program.clone()), game: None, own: Vec::new(), exported: Vec::new(), made: s.entry.clone(), shortcut: Some(s) });
     }
     out.sort_by_key(|i| (i.group != GAMES, i.group == GONE, i.group.to_lowercase(), i.name.to_lowercase()));
     out
 }
 
 /// A game's entry this picker may show and hide: a file of the home's app-menu folder, not a
-/// link (a Flatpak's) and not one made here.
+/// link (a Flatpak's), not one made here, not Lobby's copy hiding a Flatpak's.
 fn own_entry(p: &Path, apps: &Path) -> bool {
-    library::norm(p).starts_with(apps) && p.is_file() && !is_entry(p) && !fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("io.github.Petru101.Lobby"))
+    library::norm(p).starts_with(apps) && p.is_file() && !fs::read_to_string(p).is_ok_and(|t| key_of(&t, OVERRIDE_OF).is_some()) && !is_entry(p) && !fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) && !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("io.github.Petru101.Lobby"))
 }
 
 fn main_group(text: &str) -> impl Iterator<Item = &str> {
@@ -292,8 +377,10 @@ fn main_group(text: &str) -> impl Iterator<Item = &str> {
 
 fn entry_icon(entry: &Path) -> Option<PathBuf> {
     let text = fs::read_to_string(entry).ok()?;
-    let icon = main_group(&text).find_map(|l| l.strip_prefix("Icon=")).map(PathBuf::from);
-    icon.filter(|p| p.is_absolute() && p.is_file())
+    let icon = main_group(&text).find_map(|l| l.strip_prefix("Icon="))?;
+    // A Flatpak's names its icon, which is in the export's share/icons beside applications/.
+    let share = entry.parent().and_then(Path::parent).filter(|_| exported(entry)).map(Path::to_path_buf);
+    crate::sources::menu::icon_file(icon, &share.into_iter().collect::<Vec<_>>()).filter(|p| p.is_file())
 }
 
 /// Whether an entry is kept out of the app menu (NoDisplay).
@@ -492,6 +579,21 @@ mod tests {
         assert!(is_entry(&file));
         assert_eq!(read(&file), Some(Shortcut { entry: Some(file.clone()), ..s }));
         assert!(!is_entry(&dir.join("gamefix-battle-net.desktop")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_flatpak_entry_is_hidden_by_a_marked_copy() {
+        let dir = std::env::temp_dir().join(format!("lobby-override-{}", std::process::id()));
+        let apps = dir.join("flatpak/exports/share/applications");
+        fs::create_dir_all(&apps).unwrap();
+        let export = apps.join("org.vinegarhq.Sober.desktop");
+        fs::write(&export, "[Desktop Entry]\nName=Sober\nExec=flatpak run org.vinegarhq.Sober %u\nMimeType=x-scheme-handler/roblox;\nNoDisplay=false\n\n[Desktop Action x]\nName=X\n").unwrap();
+        assert!(exported(&export));
+        let text = override_text(&export).unwrap();
+        assert_eq!(text, format!("[Desktop Entry]\nX-Lobby-Override-Of={}\nNoDisplay=true\nX-Lobby-Hidden=true\nName=Sober\nExec=flatpak run org.vinegarhq.Sober %u\nMimeType=x-scheme-handler/roblox;\n\n[Desktop Action x]\nName=X\n", export.display()));
+        assert_eq!(key_of(&text, OVERRIDE_OF), Some(export.display().to_string()));
+        assert!(!exported(&dir.join("home/.local/share/applications/x.desktop")));
         fs::remove_dir_all(&dir).unwrap();
     }
 

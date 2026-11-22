@@ -130,7 +130,10 @@ fn read(file: &Path, dirs: &[PathBuf]) -> Option<Entry> {
     // installed.
     let through = get("X-Flatpak").and_then(super::apps::known);
     let mut e = Entry::new(Source::AppMenu, through.map_or(name, |a| a.game));
-    e.keys.push(Key::Desktop(file.to_path_buf()));
+    // Lobby's copy hiding a Flatpak's entry (`start_menu::OVERRIDE_OF`) stands for Flatpak's:
+    // the game's entry stays the same whether it's in the menu or not.
+    let copied = get(crate::start_menu::OVERRIDE_OF).map(PathBuf::from).filter(|p| p.is_file());
+    e.keys.push(Key::Desktop(copied.unwrap_or_else(|| file.to_path_buf())));
     if let Some(app) = through {
         e.keys.push(Key::Flatpak(app.flatpak.to_string()));
     }
@@ -161,7 +164,7 @@ fn read(file: &Path, dirs: &[PathBuf]) -> Option<Entry> {
 
 /// An entry's icon as a file: its Icon= when that's a path, else the icon of that name in the
 /// app menus' icon folders, biggest first.
-fn icon_file(icon: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+pub(crate) fn icon_file(icon: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     let path = PathBuf::from(icon);
     if path.is_absolute() {
         return Some(path);
@@ -198,6 +201,25 @@ fn game_root(root: &Path, path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lobbys_copy_hiding_a_flatpak_entry_stands_for_it() {
+        let dir = std::env::temp_dir().join(format!("lobby-menu-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (local, flatpak) = (dir.join("home/.local/share/applications"), dir.join("flatpak/exports/share/applications"));
+        fs::create_dir_all(&local).unwrap();
+        fs::create_dir_all(&flatpak).unwrap();
+        let export = flatpak.join("org.supertuxproject.SuperTux.desktop");
+        fs::write(&export, "[Desktop Entry]\nType=Application\nName=SuperTux 2\nExec=/usr/bin/flatpak run org.supertuxproject.SuperTux\nCategories=Game;\n").unwrap();
+        let copy = local.join("org.supertuxproject.SuperTux.desktop");
+        fs::write(&copy, format!("[Desktop Entry]\nNoDisplay=true\n{}\n{}={}\nType=Application\nName=SuperTux 2\nExec=/usr/bin/flatpak run org.supertuxproject.SuperTux\nCategories=Game;\n", crate::start_menu::HIDDEN_BY_LOBBY, crate::start_menu::OVERRIDE_OF, export.display())).unwrap();
+        let e = read(&copy, &[]).unwrap();
+        assert_eq!(e.keys, vec![Key::Desktop(export.clone())]);
+        // Flatpak's entry gone (the app uninstalled): the copy is only itself.
+        fs::remove_file(&export).unwrap();
+        assert_eq!(read(&copy, &[]).unwrap().keys, vec![Key::Desktop(copy.clone())]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_games_folder_isnt_the_games_own() {
