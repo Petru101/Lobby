@@ -30,6 +30,10 @@ impl Shortcut {
 }
 
 const PREFIX: &str = "lobby-shortcut-";
+/// Lobby's entry for a game that has none of its own (a Steam game, a loose download):
+/// `lobby-game-<id>.desktop`, running `lobby play <id>`.
+const GAME_PREFIX: &str = "lobby-game-";
+const GAME_KEY: &str = "X-Lobby-Game";
 
 fn applications() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share/applications")
@@ -121,12 +125,52 @@ fn added() -> Vec<Shortcut> {
     out
 }
 
-/// Whether an app-menu entry is one Lobby made for a shortcut.
+/// Whether an app-menu entry is one Lobby made: for a shortcut, or for a game with none.
 pub fn is_entry(file: &Path) -> bool {
     file.file_name().is_some_and(|n| {
         let n = n.to_string_lossy();
-        n.starts_with(PREFIX) && n.ends_with(".desktop")
+        (n.starts_with(PREFIX) || n.starts_with(GAME_PREFIX)) && n.ends_with(".desktop")
     })
+}
+
+fn game_entry_path(id: &str) -> PathBuf {
+    applications().join(format!("{GAME_PREFIX}{id}.desktop"))
+}
+
+/// What a game with no entry of its own needs for one Lobby makes.
+#[derive(Debug, Clone)]
+pub struct GameEntry {
+    pub id: String,
+    pub name: String,
+    cover: Option<String>,
+    icon: Option<PathBuf>,
+}
+
+impl GameEntry {
+    fn of(g: &library::Game) -> GameEntry {
+        GameEntry { id: g.id.clone(), name: g.name.clone(), cover: g.cover().map(str::to_string), icon: g.icon().map(Path::to_path_buf) }
+    }
+
+    /// The entry's text: Play through Lobby (its protection, launch options, play time), the
+    /// cover's middle as its picture, else the game's icon.
+    fn text(&self, lobby: &str) -> String {
+        let cover_icon = self.cover.as_deref().and_then(|c| cover_icon(&self.id, c).ok());
+        let icon = cover_icon.or_else(|| self.icon.clone()).map_or("applications-games".to_string(), |p| p.display().to_string());
+        format!(
+            "[Desktop Entry]\nType=Application\nName={}\nComment=Starts through Lobby\nExec=\"{lobby}\" play \"{}\"\nIcon={icon}\nCategories=Game;\n{GAME_KEY}={}\n{ICON_FROM}={}\n",
+            one_line(&self.name),
+            self.id.replace(['"', '\\', '`', '$'], ""),
+            self.id,
+            self.cover.as_deref().map(one_line).unwrap_or_default(),
+        )
+    }
+
+    fn write(&self) -> Result<PathBuf, String> {
+        let file = game_entry_path(&self.id);
+        fs::create_dir_all(applications()).map_err(|e| e.to_string())?;
+        fs::write(&file, self.text(&crate::sandbox::installed_lobby())).map_err(|e| format!("{}: {e}", file.display()))?;
+        Ok(file)
+    }
 }
 
 fn read(file: &Path) -> Option<Shortcut> {
@@ -205,9 +249,11 @@ pub struct Item {
     pub own: Vec<PathBuf>,
     /// Its entries a Flatpak exports (Flatpak's own files: hidden by a copy in the home, `OVERRIDE_OF`).
     pub exported: Vec<PathBuf>,
-    /// The entry made here for its shortcut.
+    /// The entry made here for its shortcut, or for the game when it has no entry of its own.
     pub made: Option<PathBuf>,
     pub shortcut: Option<Shortcut>,
+    /// A game with no entry of its own or shortcut: what Lobby's entry for it needs.
+    pub new_entry: Option<GameEntry>,
 }
 
 pub const GAMES: &str = "Games";
@@ -228,8 +274,11 @@ impl Item {
                 remove_override(export)?;
             }
         } else if self.made.is_none() {
-            let s = self.shortcut.as_ref().ok_or("Nothing to put in the app menu.")?;
-            self.made = Some(add(s)?);
+            self.made = Some(match (&self.shortcut, &self.new_entry) {
+                (Some(s), _) => add(s)?,
+                (None, Some(g)) => g.write()?,
+                (None, None) => return Err("Nothing to put in the app menu.".into()),
+            });
         }
         Ok(())
     }
@@ -347,6 +396,15 @@ pub fn items(lib: &Library) -> Vec<Item> {
         exported.dedup();
         let mine: Vec<usize> = (0..shortcuts.len()).filter(|&i| !used[i] && owner[i] == Some(g.id.as_str())).collect();
         if own.is_empty() && exported.is_empty() && mine.is_empty() {
+            // No entry of its own: offered one Lobby makes (not for a game whose files are
+            // missing: it couldn't start).
+            if g.missing {
+                continue;
+            }
+            let entry = GameEntry::of(g);
+            let made = Some(game_entry_path(&g.id)).filter(|p| p.is_file());
+            let icon = made.as_deref().and_then(entry_icon).or_else(|| g.icon().map(Path::to_path_buf)).or_else(|| g.entries.iter().find_map(|e| e.program.clone()));
+            out.push(Item { name: g.name.clone(), detail: String::new(), group: GAMES.into(), icon, game: Some(g.id.clone()), own, exported, made, shortcut: None, new_entry: Some(entry) });
             continue;
         }
         mine.iter().for_each(|&i| used[i] = true);
@@ -354,12 +412,12 @@ pub fn items(lib: &Library) -> Vec<Item> {
         // An entry's own picture (gamefix's .exe icon, a launcher's), else the program's.
         let icon = own.iter().chain(&exported).find_map(|e| entry_icon(e)).or_else(|| mine.first().map(|&i| shortcuts[i].program.clone())).or_else(|| g.entries.iter().find_map(|e| e.program.clone()));
         let shortcut = mine.first().map(|&i| Shortcut { name: g.name.clone(), ..shortcuts[i].clone() });
-        out.push(Item { name: g.name.clone(), detail: String::new(), group: GAMES.into(), icon, game: Some(g.id.clone()), own, exported, made, shortcut });
+        out.push(Item { name: g.name.clone(), detail: String::new(), group: GAMES.into(), icon, game: Some(g.id.clone()), own, exported, made, shortcut, new_entry: None });
     }
     for (s, _) in shortcuts.into_iter().zip(used).filter(|(_, used)| !used) {
         let group = if s.gone() { GONE.into() } else { s.place.clone() };
         let detail = s.program.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        out.push(Item { name: s.name.clone(), detail, group, icon: Some(s.program.clone()), game: None, own: Vec::new(), exported: Vec::new(), made: s.entry.clone(), shortcut: Some(s) });
+        out.push(Item { name: s.name.clone(), detail, group, icon: Some(s.program.clone()), game: None, own: Vec::new(), exported: Vec::new(), made: s.entry.clone(), shortcut: Some(s), new_entry: None });
     }
     out.sort_by_key(|i| (i.group != GAMES, i.group == GONE, i.group.to_lowercase(), i.name.to_lowercase()));
     out
@@ -482,10 +540,7 @@ fn game_icon(id: &str, cover: &str, entry: &Path, original: &str) -> Result<bool
     let file = menu_icons().join(format!("{id}.png"));
     let from = main_group(&text).find_map(|l| l.strip_prefix(ICON_FROM)?.strip_prefix('=')).map(str::to_string);
     if from.as_deref() != Some(cover) || !file.is_file() {
-        let source = if cover.starts_with("https://") { crate::covers::web_copy(cover).ok_or("its cover isn't downloaded")? } else { PathBuf::from(cover) };
-        let img = image::ImageReader::open(&source).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?.decode().map_err(|e| e.to_string())?;
-        fs::create_dir_all(menu_icons()).map_err(|e| e.to_string())?;
-        square(&img).save_with_format(&file, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        make_cover_icon(cover, &file)?;
     }
     let rewritten = with_keys(&text, &[("Icon", &file.display().to_string()), (ORIGINAL_ICON, original), (ICON_FROM, cover)]);
     if rewritten == text {
@@ -493,6 +548,68 @@ fn game_icon(id: &str, cover: &str, entry: &Path, original: &str) -> Result<bool
     }
     fs::write(entry, rewritten).map_err(|e| format!("{}: {e}", entry.display()))?;
     Ok(true)
+}
+
+/// The square picture cut from a game's cover for its menu entry (made when missing).
+fn cover_icon(id: &str, cover: &str) -> Result<PathBuf, String> {
+    let file = menu_icons().join(format!("{id}.png"));
+    if !file.is_file() {
+        make_cover_icon(cover, &file)?;
+    }
+    Ok(file)
+}
+
+fn make_cover_icon(cover: &str, file: &Path) -> Result<(), String> {
+    let source = if cover.starts_with("https://") { crate::covers::web_copy(cover).ok_or("its cover isn't downloaded")? } else { PathBuf::from(cover) };
+    let img = image::ImageReader::open(&source).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?.decode().map_err(|e| e.to_string())?;
+    fs::create_dir_all(menu_icons()).map_err(|e| e.to_string())?;
+    square(&img).save_with_format(file, image::ImageFormat::Png).map_err(|e| e.to_string())
+}
+
+/// Lobby's entries for games with none of their own, kept up (after every scan): gone with the
+/// game (uninstalled, out of the library); given up when the game gets an entry of its own
+/// (gamefix's at the first Play of a loose download), which is shown instead, since the game
+/// was wanted in the menu; name and picture kept as the game's (a new cover: a new picture).
+pub fn sync_game_entries(games: &[library::Game]) {
+    let apps = library::norm(&applications());
+    let mut changed = false;
+    for file in fs::read_dir(applications()).into_iter().flatten().flatten().map(|e| e.path()) {
+        let Some(text) = fs::read_to_string(&file).ok().filter(|_| file.file_name().is_some_and(|n| n.to_string_lossy().starts_with(GAME_PREFIX))) else { continue };
+        let Some(id) = key_of(&text, GAME_KEY) else { continue };
+        let game = games.iter().find(|g| g.id == id && g.kind == Kind::Game && !g.gone);
+        let Some(g) = game else {
+            let _ = fs::remove_file(&file);
+            crate::log::line(&format!("app menu: {id}'s entry went with the game"));
+            changed = true;
+            continue;
+        };
+        let desktop: Vec<PathBuf> = g.entries.iter().flat_map(|e| &e.keys).filter_map(|k| if let library::Key::Desktop(p) = k { Some(p.clone()) } else { None }).collect();
+        let own: Vec<&PathBuf> = desktop.iter().filter(|p| own_entry(p, &apps)).collect();
+        let exported: Vec<&PathBuf> = desktop.iter().filter(|p| self::exported(p)).collect();
+        if !own.is_empty() || !exported.is_empty() {
+            let _ = fs::remove_file(&file);
+            if let Some(entry) = own.first() {
+                let _ = set_hidden(entry, false);
+            }
+            for export in &exported {
+                let _ = remove_override(export);
+            }
+            crate::log::line(&format!("app menu: {} has an entry of its own now, shown instead of Lobby's", g.name));
+            changed = true;
+            continue;
+        }
+        let entry = GameEntry::of(g);
+        if key_of(&text, ICON_FROM).unwrap_or_default() != entry.cover.as_deref().map(one_line).unwrap_or_default() {
+            let _ = fs::remove_file(menu_icons().join(format!("{id}.png")));
+        }
+        let want = entry.text(&crate::sandbox::installed_lobby());
+        if want != text && fs::write(&file, want).is_ok() {
+            changed = true;
+        }
+    }
+    if changed {
+        refresh();
+    }
 }
 
 /// The middle square of a picture (a cover's 315x250 loses its sides), at most 256 px.
@@ -595,6 +712,16 @@ mod tests {
         assert_eq!(key_of(&text, OVERRIDE_OF), Some(export.display().to_string()));
         assert!(!exported(&dir.join("home/.local/share/applications/x.desktop")));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_game_without_an_entry_gets_one_that_plays_it() {
+        let g = GameEntry { id: "borderlands-2".into(), name: "Borderlands 2\nGOTY".into(), cover: None, icon: Some("/x/icon.png".into()) };
+        let text = g.text("/home/u/.local/bin/lobby");
+        assert_eq!(text, "[Desktop Entry]\nType=Application\nName=Borderlands 2 GOTY\nComment=Starts through Lobby\nExec=\"/home/u/.local/bin/lobby\" play \"borderlands-2\"\nIcon=/x/icon.png\nCategories=Game;\nX-Lobby-Game=borderlands-2\nX-Lobby-Icon-From=\n");
+        assert_eq!(key_of(&text, GAME_KEY).as_deref(), Some("borderlands-2"));
+        assert!(is_entry(Path::new("/h/.local/share/applications/lobby-game-borderlands-2.desktop")));
+        assert_eq!(crate::launch::desktop_exec(&text).map(|(w, _)| w), Some(vec!["/home/u/.local/bin/lobby".to_string(), "play".into(), "borderlands-2".into()]));
     }
 
     #[test]
