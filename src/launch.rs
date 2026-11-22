@@ -208,6 +208,13 @@ pub fn hands_over(command: &[String]) -> Option<String> {
     if command.iter().any(|w| ["steam://", "heroic://", "lutris:", "itch://"].iter().any(|s| w.starts_with(s))) || command.first().map(name).is_some_and(|n| ["steam", "xdg-open", "gtk-launch", "kioclient", "kioclient5", "kde-open", "lutris", "heroic", "mira"].contains(&n.as_str())) {
         return Some("It hands the game to another program, which starts it outside Lobby's protection.".into());
     }
+    // Commands that have systemd or the host start the program (an entry's own `systemd-run
+    // --user`, a Flatpak's flatpak-spawn --host): the game runs outside whatever started them, and
+    // they need the session bus, which the sandbox hides: "Failed to connect to user scope bus"
+    // was all the Skyrim play-test entry did once wrapped.
+    if command.first().map(name).is_some_and(|n| ["systemd-run", "flatpak-spawn", "host-spawn"].contains(&n.as_str())) {
+        return Some("It has systemd or the host start the game, outside Lobby's protection.".into());
+    }
     None
 }
 
@@ -1282,6 +1289,8 @@ mod tests {
         assert_eq!(shell_words(r#"a\ b "c d" 'e $f'"#), ["a b", "c d", "e $f"]);
         assert!(hands_over(&["distrobox".into(), "enter".into(), "box".into(), "--".into(), "/g/play.sh".into()]).unwrap().contains("distrobox box"));
         assert!(hands_over(&["/g/ToiletSim.x86_64".into()]).is_none());
+        assert!(hands_over(&["systemd-run".into(), "--user".into(), "--unit=tmo-playtest".into(), "--collect".into(), "/p/run-playtest.sh".into()]).is_some());
+        assert!(hands_over(&["/usr/bin/flatpak-spawn".into(), "--host".into(), "/g/game".into()]).is_some());
     }
 
     #[test]
