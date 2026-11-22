@@ -82,11 +82,24 @@ impl Look {
 /// What gamefix reads for a game no plan names.
 fn files_of(game: &Game) -> Option<PathBuf> {
     let of = |e: &Entry| {
+        // A script the game starts with is its start: gamefix checks the folder when the script
+        // runs the folder's own program, else the script alone (the Skyrim play-test's folder
+        // holds the user's .NET tools, which read as a game needing .NET).
+        if let Some(script) = e.program.clone().filter(|p| is_script(p)) {
+            return Some(script);
+        }
         // A prefix game's folder may be the whole prefix.
         let folder = e.folder.clone().filter(|f| f.is_dir() && e.prefix.is_none());
         folder.or_else(|| e.program.clone().filter(|p| p.exists()))
     };
     game.entries.iter().filter(|e| !matches!(e.kind, Kind::Download | Kind::Owned)).find_map(of)
+}
+
+/// Whether a file is a script (`#!` first).
+fn is_script(p: &Path) -> bool {
+    use std::io::Read;
+    let mut start = [0u8; 2];
+    fs::File::open(p).and_then(|mut f| f.read_exact(&mut start)).is_ok() && &start == b"#!"
 }
 
 /// Steam's own install of it (not a copy in a library Steam doesn't list).
