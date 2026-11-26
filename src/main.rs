@@ -1144,9 +1144,25 @@ fn free_notify() -> Result<(), String> {
     let action = if epic_ones { "claim=Claim" } else { "claim=Show" };
     let out = std::process::Command::new("notify-send").args(["-a", "Lobby", "-i", "applications-games", "-A", action, "-w", "Free to keep", &body.join("\n")]).stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
     if String::from_utf8_lossy(&out.stdout).trim() == "claim" {
-        std::os::unix::process::CommandExt::process_group(&mut std::process::Command::new(me()), 0).arg("claim").stdin(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
+        start_claim()?;
     }
     Ok(())
+}
+
+/// Starts `lobby claim` as an app of its own. Started as a child of this one, it belonged to the
+/// daily timer's service, which systemd stops, killing everything in it, the moment this
+/// returns: the user clicked Claim with Lobby closed and no window came.
+fn start_claim() -> Result<(), String> {
+    let me = me();
+    let unit = format!("--unit=app-lobby-claim-{:x}{:x}", std::process::id(), store::now());
+    let mut args: Vec<String> = ["--user", "--quiet", "--collect", "--slice=app.slice", &unit, "--description=Lobby"].map(String::from).to_vec();
+    // The screen the notification was answered on.
+    args.extend(["WAYLAND_DISPLAY", "DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE"].iter().filter(|v| std::env::var_os(v).is_some()).map(|v| format!("--setenv={v}")));
+    let ran = std::process::Command::new("systemd-run").args(&args).arg("--").arg(&me).arg("claim").stdin(std::process::Stdio::null()).status();
+    if ran.is_ok_and(|s| s.success()) {
+        return Ok(());
+    }
+    std::os::unix::process::CommandExt::process_group(&mut std::process::Command::new(me), 0).arg("claim").stdin(std::process::Stdio::null()).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 fn free_games() -> Result<(), String> {
